@@ -321,6 +321,91 @@ cargo run --bin agent-desktop
 
 首次使用时，在顶部“API 登录”区域选择服务，点击“账号登录”，再点击 OAuth 链接完成浏览器授权；授权完成后点击“检查登录”，随后点击“刷新模型”和“验证模型”。桌面版不会单独保存模型密钥，也不会直接读取 CLIProxyAPI OAuth token；账号验证由 Rust Agent 后端转发给 CLIProxyAPI 完成。
 
+## 安装包和 npm CLI
+
+### Windows 桌面安装包
+
+安装包包含以下三个原生程序：
+
+- `rust-ai-agent.exe`：后端服务。
+- `agent-desktop.exe`：桌面 GUI。
+- `agent-cli.exe`：原生 Rust CLI。
+
+安装脚本会把这三个程序安装到 `%LOCALAPPDATA%\RustAIAgent`，创建桌面快捷方式，并把安装目录加入当前用户的 PATH。因此安装桌面版后，重新打开 PowerShell 就可以直接运行 `agent-cli`，不需要额外安装 CLI。
+
+生成 Windows x64 安装包：
+
+```powershell
+Set-Location F:\codex\Rust_for_AI-agent
+& .\packaging\windows\build-windows-package.ps1
+```
+
+生成文件：
+
+```text
+dist\Rust-AI-Agent-windows-x64.zip
+```
+
+解压后安装：
+
+```powershell
+Expand-Archive .\dist\Rust-AI-Agent-windows-x64.zip -DestinationPath .\dist\Rust-AI-Agent-windows-x64-unpacked -Force
+Set-Location .\dist\Rust-AI-Agent-windows-x64-unpacked
+powershell -ExecutionPolicy Bypass -File .\Install-RustAIAgent.ps1
+```
+
+也可以直接双击解压目录中的 `Install-RustAIAgent.cmd`。
+
+安装完成后可以双击桌面快捷方式启动后端和桌面版，也可以手动运行：
+
+```powershell
+agent-cli health
+agent-cli chat
+```
+
+卸载：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\RustAIAgent\Uninstall-RustAIAgent.ps1"
+```
+
+卸载不会删除 `%LOCALAPPDATA%\RustAIAgentData` 或 CLIProxyAPI 的 `auth-dir` 账号凭据。
+
+### npm 独立 CLI
+
+`packaging/npm/agent-cli` 是零依赖 npm 包，不要求安装 Rust。它通过 HTTP 调用已经启动的 Rust Agent 后端，适合单独安装 CLI：
+
+```powershell
+npm install --global rust-ai-agent-cli
+agent-cli --help
+agent-cli chat
+agent-cli run "分析我的项目"
+```
+
+如果还没有发布到 npm，也可以直接安装本地 tarball：
+
+```powershell
+Set-Location F:\codex\Rust_for_AI-agent
+npm.cmd pack .\packaging\npm\agent-cli --pack-destination .\dist
+npm.cmd install --global .\dist\rust-ai-agent-cli-0.1.0.tgz
+```
+
+需要发布 npm 包时：
+
+```powershell
+Set-Location F:\codex\Rust_for_AI-agent\packaging\npm\agent-cli
+npm login
+npm publish
+```
+
+CLI 默认连接 `http://127.0.0.1:8080`，也可以设置：
+
+```powershell
+$env:AGENT_SERVER_URL = "http://127.0.0.1:8080"
+$env:AGENT_USER_ID = "alice"
+agent-cli health
+```
+
 ## API 示例
 
 健康检查：

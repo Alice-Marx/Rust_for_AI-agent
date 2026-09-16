@@ -1,0 +1,20 @@
+{
+  "name": "rust-ai-agent-cli",
+  "version": "0.1.0",
+  "description": "Terminal client for the Rust AI Agent HTTP service",
+  "license": "MIT",
+  "bin": {
+    "agent-cli": "bin/agent-cli.js",
+    "rust-ai-agent": "bin/agent-cli.js"
+  },
+  "files": [
+    "bin/agent-cli.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
