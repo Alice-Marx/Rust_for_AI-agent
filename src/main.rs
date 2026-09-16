@@ -4,6 +4,7 @@ use anyhow::Result;
 use rust_ai_agent::{
     agent::AgentRuntime,
     api::{router, AppState},
+    cliproxy::CliProxyApiClient,
     evaluation::EvaluationStore,
     expenses::ExpenseStore,
     memory::MemoryStore,
@@ -22,6 +23,7 @@ async fn main() -> Result<()> {
     let memory = MemoryStore::open(data_dir.join("memory.json")).await?;
     let evaluations = EvaluationStore::open(data_dir.join("evaluations.json")).await?;
     let provider = provider_from_env()?;
+    let cliproxy = CliProxyApiClient::from_env().map(Arc::new);
     let sandbox = SandboxExecutor::new(SandboxPolicy {
         enabled: env_bool("AGENT_ENABLE_SANDBOX", false),
         timeout_ms: env_u64("AGENT_SANDBOX_TIMEOUT_MS", 2_000),
@@ -41,6 +43,7 @@ async fn main() -> Result<()> {
         router(AppState {
             runtime,
             expenses: ExpenseStore::seeded(),
+            cliproxy,
         }),
     )
     .await?;

@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod api;
+pub mod cliproxy;
 pub mod collaboration;
 pub mod evaluation;
 pub mod expenses;
