@@ -99,7 +99,11 @@ mod tests {
     #[tokio::test]
     async fn agents_can_call_each_other_through_directory() {
         let directory = AgentDirectory::new();
-        directory.register(Arc::new(EchoAgent { agent_name: "helper".to_string() })).await;
+        directory
+            .register(Arc::new(EchoAgent {
+                agent_name: "helper".to_string(),
+            }))
+            .await;
         let result = directory.call("helper", "整理这段任务").await.unwrap();
         assert_eq!(result, "helper: 整理这段任务");
     }

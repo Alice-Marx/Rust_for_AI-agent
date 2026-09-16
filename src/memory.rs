@@ -3,22 +3,20 @@ use std::{cmp::Ordering, path::PathBuf};
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tokio::{fs, sync::{Mutex, RwLock}};
+use tokio::{
+    fs,
+    sync::{Mutex, RwLock},
+};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryKind {
     Fact,
     Preference,
+    #[default]
     Conversation,
     Task,
-}
-
-impl Default for MemoryKind {
-    fn default() -> Self {
-        Self::Conversation
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,9 +114,14 @@ impl MemoryStore {
         let guard = self.entries.read().await;
         let mut matches: Vec<_> = guard
             .iter()
-            .filter(|entry| user_id.map(|id| entry.user_id.as_deref() == Some(id)).unwrap_or(true))
+            .filter(|entry| {
+                user_id
+                    .map(|id| entry.user_id.as_deref() == Some(id))
+                    .unwrap_or(true)
+            })
             .filter_map(|entry| {
-                let searchable = format!("{} {}", entry.content, entry.tags.join(" ")).to_lowercase();
+                let searchable =
+                    format!("{} {}", entry.content, entry.tags.join(" ")).to_lowercase();
                 let exact = searchable.contains(&query);
                 let token_hits = query_tokens
                     .iter()
@@ -143,7 +146,10 @@ impl MemoryStore {
             .collect();
 
         matches.sort_by(|left, right| {
-            right.score.partial_cmp(&left.score).unwrap_or(Ordering::Equal)
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(Ordering::Equal)
         });
         matches.truncate(limit);
         matches
@@ -164,7 +170,9 @@ impl MemoryStore {
 
 fn tokenize(value: &str) -> Vec<String> {
     value
-        .split(|character: char| character.is_whitespace() || ",.!?;:，。！？；：".contains(character))
+        .split(|character: char| {
+            character.is_whitespace() || ",.!?;:，。！？；：".contains(character)
+        })
         .filter(|part| !part.is_empty())
         .map(ToOwned::to_owned)
         .collect()

@@ -39,8 +39,16 @@ pub fn router(state: AppState) -> Router {
 
 fn expense_router() -> Router<AppState> {
     Router::new()
-        .route("/", get(crate::expenses::list).post(crate::expenses::create))
-        .route("/{id}", get(crate::expenses::get).put(crate::expenses::update).delete(crate::expenses::delete))
+        .route(
+            "/",
+            get(crate::expenses::list).post(crate::expenses::create),
+        )
+        .route(
+            "/{id}",
+            get(crate::expenses::get)
+                .put(crate::expenses::update)
+                .delete(crate::expenses::delete),
+        )
         .route("/summary", get(crate::expenses::summary))
         .layer(middleware::from_fn(require_expense_api_key))
 }
@@ -49,8 +57,12 @@ async fn require_expense_api_key(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<Response, StatusCode> {
-    let expected = std::env::var("EXPENSE_API_KEY").unwrap_or_else(|_| "dev-secret-key".to_string());
-    let provided = request.headers().get("x-api-key").and_then(|value| value.to_str().ok());
+    let expected =
+        std::env::var("EXPENSE_API_KEY").unwrap_or_else(|_| "dev-secret-key".to_string());
+    let provided = request
+        .headers()
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok());
     match provided {
         Some(value) if value == expected => Ok(next.run(request).await),
         _ => Err(StatusCode::UNAUTHORIZED),
@@ -113,7 +125,11 @@ async fn search_memory(
         state
             .runtime
             .memory
-            .search(query.user_id.as_deref(), &query.q, query.limit.unwrap_or(10).min(50))
+            .search(
+                query.user_id.as_deref(),
+                &query.q,
+                query.limit.unwrap_or(10).min(50),
+            )
             .await,
     )
 }
@@ -134,7 +150,13 @@ async fn list_evaluations(
     State(state): State<AppState>,
     Query(query): Query<EvaluationQuery>,
 ) -> Json<Vec<crate::evaluation::EvaluationReport>> {
-    Json(state.runtime.evaluations.list(query.session_id.as_deref()).await)
+    Json(
+        state
+            .runtime
+            .evaluations
+            .list(query.session_id.as_deref())
+            .await,
+    )
 }
 
 #[derive(Debug)]
@@ -155,7 +177,9 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorBody { error: self.0.to_string() }),
+            Json(ErrorBody {
+                error: self.0.to_string(),
+            }),
         )
             .into_response()
     }

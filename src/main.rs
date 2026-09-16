@@ -16,7 +16,9 @@ use rust_ai_agent::{
 async fn main() -> Result<()> {
     init_tracing()?;
 
-    let data_dir = PathBuf::from(std::env::var("AGENT_DATA_DIR").unwrap_or_else(|_| ".agent-data".to_string()));
+    let data_dir = PathBuf::from(
+        std::env::var("AGENT_DATA_DIR").unwrap_or_else(|_| ".agent-data".to_string()),
+    );
     let memory = MemoryStore::open(data_dir.join("memory.json")).await?;
     let evaluations = EvaluationStore::open(data_dir.join("evaluations.json")).await?;
     let provider = provider_from_env()?;
@@ -34,7 +36,14 @@ async fn main() -> Result<()> {
         .parse()?;
     let listener = tokio::net::TcpListener::bind(address).await?;
     tracing::info!(%address, "Rust AI Agent API started");
-    axum::serve(listener, router(AppState { runtime, expenses: ExpenseStore::seeded() })).await?;
+    axum::serve(
+        listener,
+        router(AppState {
+            runtime,
+            expenses: ExpenseStore::seeded(),
+        }),
+    )
+    .await?;
     Ok(())
 }
 
@@ -46,5 +55,8 @@ fn env_bool(name: &str, default: bool) -> bool {
 }
 
 fn env_u64(name: &str, default: u64) -> u64 {
-    std::env::var(name).ok().and_then(|value| value.parse().ok()).unwrap_or(default)
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
 }

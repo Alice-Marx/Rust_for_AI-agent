@@ -9,7 +9,7 @@ use crate::{
     evaluation::{score, EvaluationStore},
     memory::{MemoryKind, MemoryStore},
     model::{AgentRequest, AgentResponse, DelegatedResult},
-    planning::{HeuristicPlanner, Plan, Planner, Reflection, StepStatus},
+    planning::{HeuristicPlanner, Plan, Planner, StepStatus},
     provider::{ModelProvider, ModelRequest},
     sandbox::SandboxExecutor,
 };
@@ -83,13 +83,24 @@ impl AgentRuntime {
             "用户请求：{}\n\n计划：{}\n\n相关长期记忆：{}\n\n协作 Agent 结果：{}",
             request.input,
             plan_json,
-            if memory_context.is_empty() { "无" } else { &memory_context },
-            if delegated_context.is_empty() { "无" } else { &delegated_context },
+            if memory_context.is_empty() {
+                "无"
+            } else {
+                &memory_context
+            },
+            if delegated_context.is_empty() {
+                "无"
+            } else {
+                &delegated_context
+            },
         );
 
         let mut output = self
             .provider
-            .complete(ModelRequest { system_prompt: system_prompt.to_string(), user_prompt })
+            .complete(ModelRequest {
+                system_prompt: system_prompt.to_string(),
+                user_prompt,
+            })
             .await?
             .text;
         mark_completed(&mut plan);
@@ -147,10 +158,16 @@ impl AgentRuntime {
     async fn delegate_if_needed(&self, input: &str) -> Vec<DelegatedResult> {
         let mut requests = Vec::new();
         let lower = input.to_lowercase();
-        if ["研究", "搜索", "查找", "research", "latest"].iter().any(|word| lower.contains(word)) {
+        if ["研究", "搜索", "查找", "research", "latest"]
+            .iter()
+            .any(|word| lower.contains(word))
+        {
             requests.push(("research", "整理与用户请求相关的研究线索"));
         }
-        if ["费用", "账单", "支出", "expense", "budget"].iter().any(|word| lower.contains(word)) {
+        if ["费用", "账单", "支出", "expense", "budget"]
+            .iter()
+            .any(|word| lower.contains(word))
+        {
             requests.push(("expense", "分析与用户请求相关的费用信息"));
         }
 
@@ -183,17 +200,19 @@ fn mark_completed(plan: &mut Plan) {
 mod tests {
     use super::*;
     use crate::{
-        evaluation::EvaluationStore,
-        model::AgentRequest,
-        provider::RuleBasedModel,
+        evaluation::EvaluationStore, model::AgentRequest, provider::RuleBasedModel,
         sandbox::SandboxPolicy,
     };
 
     #[tokio::test]
     async fn runtime_persists_memory_and_evaluation() {
         let directory = tempfile::tempdir().unwrap();
-        let memory = MemoryStore::open(directory.path().join("memory.json")).await.unwrap();
-        let evaluations = EvaluationStore::open(directory.path().join("evaluations.json")).await.unwrap();
+        let memory = MemoryStore::open(directory.path().join("memory.json"))
+            .await
+            .unwrap();
+        let evaluations = EvaluationStore::open(directory.path().join("evaluations.json"))
+            .await
+            .unwrap();
         let runtime = AgentRuntime::new(
             Arc::new(RuleBasedModel),
             memory.clone(),

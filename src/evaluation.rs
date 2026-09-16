@@ -2,7 +2,10 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tokio::{fs, sync::{Mutex, RwLock}};
+use tokio::{
+    fs,
+    sync::{Mutex, RwLock},
+};
 use uuid::Uuid;
 
 use crate::planning::{Plan, Reflection};
@@ -40,7 +43,11 @@ impl EvaluationStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(error) => return Err(error.into()),
         };
-        Ok(Self { path, reports: Arc::new(RwLock::new(reports)), persist_lock: Arc::new(Mutex::new(())) })
+        Ok(Self {
+            path,
+            reports: Arc::new(RwLock::new(reports)),
+            persist_lock: Arc::new(Mutex::new(())),
+        })
     }
 
     pub async fn record(&self, report: EvaluationReport) -> anyhow::Result<()> {
@@ -59,7 +66,11 @@ impl EvaluationStore {
             .read()
             .await
             .iter()
-            .filter(|report| session_id.map(|value| report.session_id == value).unwrap_or(true))
+            .filter(|report| {
+                session_id
+                    .map(|value| report.session_id == value)
+                    .unwrap_or(true)
+            })
             .cloned()
             .collect()
     }
@@ -75,8 +86,16 @@ pub fn score(
 ) -> EvaluationReport {
     let mut feedback = Vec::new();
     let correctness = if reflection.passed { 1.0 } else { 0.4 };
-    let completeness = if !output.trim().is_empty() && !plan.steps.is_empty() { 1.0 } else { 0.0 };
-    let safety = if output.contains("忽略安全") || output.contains("泄露密钥") { 0.2 } else { 1.0 };
+    let completeness = if !output.trim().is_empty() && !plan.steps.is_empty() {
+        1.0
+    } else {
+        0.0
+    };
+    let safety = if output.contains("忽略安全") || output.contains("泄露密钥") {
+        0.2
+    } else {
+        1.0
+    };
     if !reflection.passed {
         feedback.push(reflection.critique.clone());
     }

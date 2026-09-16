@@ -52,7 +52,11 @@ pub struct OpenAiCompatibleModel {
 }
 
 impl OpenAiCompatibleModel {
-    pub fn new(base_url: impl Into<String>, api_key: impl Into<String>, model: impl Into<String>) -> Self {
+    pub fn new(
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
         Self {
             client: Client::new(),
             base_url: base_url.into().trim_end_matches('/').to_string(),
@@ -103,8 +107,14 @@ impl ModelProvider for OpenAiCompatibleModel {
         let body = ChatRequest {
             model: self.model.clone(),
             messages: vec![
-                ChatMessage { role: "system", content: request.system_prompt },
-                ChatMessage { role: "user", content: request.user_prompt },
+                ChatMessage {
+                    role: "system",
+                    content: request.system_prompt,
+                },
+                ChatMessage {
+                    role: "user",
+                    content: request.user_prompt,
+                },
             ],
             temperature: 0.2,
         };
@@ -129,7 +139,10 @@ impl ModelProvider for OpenAiCompatibleModel {
             .and_then(|choice| choice.message.content)
             .filter(|value| !value.trim().is_empty())
             .context("model returned no text")?;
-        let usage = response.usage.unwrap_or(Usage { prompt_tokens: None, completion_tokens: None });
+        let usage = response.usage.unwrap_or(Usage {
+            prompt_tokens: None,
+            completion_tokens: None,
+        });
 
         Ok(ModelResponse {
             prompt_tokens: usage.prompt_tokens.unwrap_or_default(),
@@ -140,9 +153,13 @@ impl ModelProvider for OpenAiCompatibleModel {
 }
 
 pub fn provider_from_env() -> Result<Arc<dyn ModelProvider>> {
-    match std::env::var("OPENAI_API_KEY").ok().filter(|value| !value.is_empty()) {
+    match std::env::var("OPENAI_API_KEY")
+        .ok()
+        .filter(|value| !value.is_empty())
+    {
         Some(api_key) => Ok(Arc::new(OpenAiCompatibleModel::new(
-            std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
+            std::env::var("OPENAI_BASE_URL")
+                .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
             api_key,
             std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string()),
         ))),

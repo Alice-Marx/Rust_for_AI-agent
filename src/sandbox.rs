@@ -1,4 +1,4 @@
-use std::{path::PathBuf, time::Duration};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -58,14 +58,20 @@ impl SandboxExecutor {
             bail!("code execution is disabled; set AGENT_ENABLE_SANDBOX=true only in an isolated environment")
         }
         let language = request.language.trim().to_lowercase();
-        if !self.policy.allowed_languages.iter().any(|allowed| allowed == &language) {
+        if !self
+            .policy
+            .allowed_languages
+            .iter()
+            .any(|allowed| allowed == &language)
+        {
             bail!("language '{language}' is not allowed by the sandbox policy")
         }
         if request.code.len() > self.policy.max_output_bytes {
             bail!("code exceeds the sandbox input limit")
         }
 
-        let directory = std::env::temp_dir().join(format!("rust-ai-agent-sandbox-{}", Uuid::new_v4()));
+        let directory =
+            std::env::temp_dir().join(format!("rust-ai-agent-sandbox-{}", Uuid::new_v4()));
         fs::create_dir_all(&directory).await?;
         let code_path = directory.join("main.py");
         fs::write(&code_path, request.code).await?;
@@ -116,7 +122,11 @@ mod tests {
     async fn sandbox_is_disabled_by_default() {
         let sandbox = SandboxExecutor::new(SandboxPolicy::default());
         let error = sandbox
-            .execute(SandboxRequest { language: "python".to_string(), code: "print(1)".to_string(), timeout_ms: None })
+            .execute(SandboxRequest {
+                language: "python".to_string(),
+                code: "print(1)".to_string(),
+                timeout_ms: None,
+            })
             .await
             .unwrap_err();
         assert!(error.to_string().contains("disabled"));

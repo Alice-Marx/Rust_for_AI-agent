@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{evaluation::EvaluationReport, memory::MemoryMatch, planning::{Plan, Reflection}};
+use crate::{
+    evaluation::EvaluationReport,
+    memory::MemoryMatch,
+    planning::{Plan, Reflection},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentRequest {
