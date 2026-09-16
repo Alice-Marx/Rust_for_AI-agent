@@ -46,7 +46,7 @@ pub struct CliProxyLoginStart {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CliProxyLoginStatus {
     pub state: String,
     pub status: String,

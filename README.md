@@ -238,6 +238,87 @@ cargo run
 - 登录状态长时间为 `wait`：确认浏览器已经完成授权，并保持 CLIProxyAPI 进程运行；OAuth 状态可能因超时失效，需要重新发起登录。
 - `/v1/providers/cliproxyapi/models` 没有模型：先完成至少一个订阅账号登录，再重新请求模型列表。
 
+## CLI 终端客户端
+
+CLI 是纯命令行客户端，适合服务器、远程 SSH、脚本和不需要图形界面的用户。它复用已经启动的 Rust Agent HTTP 服务，因此长期记忆、规划、评估和 CLIProxyAPI 账号配置保持一致。
+
+先保持后端服务运行，再执行：
+
+```powershell
+Set-Location F:\codex\Rust_for_AI-agent
+
+# 查看所有命令
+cargo run --bin agent-cli -- --help
+
+# 进入连续聊天模式；输入 /exit 退出
+cargo run --bin agent-cli
+
+# 单次执行任务
+cargo run --bin agent-cli -- run "分析我的 Rust 项目并给出改进计划"
+
+# 指定用户和会话，确保长期记忆隔离和会话连续
+cargo run --bin agent-cli -- --user-id alice --session-id project-001 chat
+
+# 检查后端、查看订阅模型、验证模型
+cargo run --bin agent-cli -- health
+cargo run --bin agent-cli -- models
+cargo run --bin agent-cli -- verify --model gpt-5.4
+
+# 发起 CLIProxyAPI OAuth 登录；--wait 会在终端轮询验证结果
+cargo run --bin agent-cli -- login codex --wait
+```
+
+也可以通过环境变量固定服务地址和用户：
+
+```powershell
+$env:AGENT_SERVER_URL = "http://127.0.0.1:8080"
+$env:AGENT_USER_ID = "alice"
+cargo run --bin agent-cli -- chat
+```
+
+终端登录命令会打印 OAuth URL。复制到浏览器完成账号授权；如果当前终端支持手动打开链接，也可以使用：
+
+```powershell
+$url = "上一步输出的 OAuth URL"
+Start-Process $url
+```
+
+## 桌面版应用
+
+桌面版是原生 Rust `egui` 应用，界面按 ChatGPT 类工作台设计：
+
+- 左侧是历史任务列表，任务标题、聊天记录、执行计划和反思会保存到桌面端本地存储。
+- “聊天式规划”显示当前任务的完整对话，右侧显示计划步骤和反思结果。
+- “多任务并排”把多个任务同时展示在工作区，每个任务拥有独立 session，可以分别打开继续对话。
+- 顶部可以修改 Rust Agent 服务地址和用户 ID。
+- Agent 请求在后台线程执行，窗口不会因为模型请求阻塞；后端不可用时会在当前任务中显示错误。
+
+启动桌面版：
+
+```powershell
+Set-Location F:\codex\Rust_for_AI-agent
+cargo run --bin agent-desktop
+```
+
+如果已经构建过，也可以直接运行：
+
+```powershell
+cargo build --release --bin agent-desktop
+& "$env:CARGO_TARGET_DIR\release\agent-desktop.exe"
+```
+
+桌面版启动前需要先启动 Rust Agent 后端：
+
+```powershell
+# 窗口 1：后端，先配置 OPENAI 或 CLIProxyAPI 环境变量
+cargo run
+
+# 窗口 2：桌面版
+cargo run --bin agent-desktop
+```
+
+桌面版不会单独保存模型密钥，也不会直接读取 CLIProxyAPI OAuth token；模型调用和账号验证都由 Rust Agent 后端统一完成。
+
 ## API 示例
 
 健康检查：
