@@ -29,7 +29,7 @@ pub struct CliProxyModel {
     pub owned_by: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CliProxyVerification {
     pub reachable: bool,
     pub model_count: usize,

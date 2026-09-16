@@ -100,6 +100,7 @@ impl AgentRuntime {
             .complete(ModelRequest {
                 system_prompt: system_prompt.to_string(),
                 user_prompt,
+                model: request.model.clone(),
             })
             .await?
             .text;
@@ -116,6 +117,7 @@ impl AgentRuntime {
                 .complete(ModelRequest {
                     system_prompt: system_prompt.to_string(),
                     user_prompt: correction_prompt,
+                    model: request.model.clone(),
                 })
                 .await?
                 .text;
@@ -224,6 +226,7 @@ mod tests {
             .run(AgentRequest {
                 session_id: "s1".to_string(),
                 user_id: Some("u1".to_string()),
+                model: None,
                 input: "请研究 Rust 的费用预算".to_string(),
             })
             .await

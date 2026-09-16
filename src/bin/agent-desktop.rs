@@ -4,6 +4,9 @@ use eframe::egui::{
     self, Align, Color32, Frame, Layout, RichText, ScrollArea, Stroke, TextEdit, Ui, Vec2, Visuals,
 };
 use reqwest::Client;
+use rust_ai_agent::cliproxy::{
+    CliProxyLoginStart, CliProxyLoginStatus, CliProxyModel, CliProxyVerification,
+};
 use rust_ai_agent::model::{AgentRequest, AgentResponse};
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
@@ -53,6 +56,11 @@ enum UiEvent {
         task_id: String,
         message: String,
     },
+    LoginStarted(CliProxyLoginStart),
+    LoginStatus(CliProxyLoginStatus),
+    ModelsLoaded(Vec<CliProxyModel>),
+    ModelVerified(CliProxyVerification),
+    ApiFailed(String),
 }
 
 struct DesktopApp {
@@ -63,6 +71,12 @@ struct DesktopApp {
     view: ViewMode,
     input: String,
     status: String,
+    login_provider: String,
+    login_state: Option<String>,
+    login_url: Option<String>,
+    models: Vec<CliProxyModel>,
+    selected_model: String,
+    api_request_running: bool,
     event_tx: mpsc::Sender<UiEvent>,
     event_rx: mpsc::Receiver<UiEvent>,
 }
@@ -92,6 +106,12 @@ impl DesktopApp {
             view: ViewMode::Planning,
             input: String::new(),
             status: "就绪".to_string(),
+            login_provider: "codex".to_string(),
+            login_state: None,
+            login_url: None,
+            models: Vec::new(),
+            selected_model: String::new(),
+            api_request_running: false,
             event_tx,
             event_rx,
         }
@@ -132,6 +152,7 @@ impl DesktopApp {
         let request = AgentRequest {
             session_id,
             user_id: Some(self.user_id.clone()),
+            model: (!self.selected_model.trim().is_empty()).then(|| self.selected_model.clone()),
             input,
         };
         spawn_agent_request(
@@ -172,8 +193,100 @@ impl DesktopApp {
                     }
                     self.status = "请求失败".to_string();
                 }
+                UiEvent::LoginStarted(response) => {
+                    self.api_request_running = false;
+                    self.login_state = response.state.clone();
+                    self.login_url = response.url.clone();
+                    self.status = "OAuth 授权链接已生成，请在浏览器完成登录".to_string();
+                }
+                UiEvent::LoginStatus(response) => {
+                    self.api_request_running = false;
+                    self.status = if response.authenticated {
+                        "账号验证成功".to_string()
+                    } else if let Some(error) = response.error {
+                        format!("登录失败：{error}")
+                    } else {
+                        format!("登录状态：{}", response.status)
+                    };
+                }
+                UiEvent::ModelsLoaded(models) => {
+                    self.api_request_running = false;
+                    if self.selected_model.is_empty() {
+                        self.selected_model = models
+                            .first()
+                            .map(|model| model.id.clone())
+                            .unwrap_or_default();
+                    }
+                    self.models = models;
+                    self.status = format!("已读取 {} 个可用模型", self.models.len());
+                }
+                UiEvent::ModelVerified(response) => {
+                    self.api_request_running = false;
+                    self.status = match response.selected_model_available {
+                        Some(true) => {
+                            format!("模型 {} 可用", response.selected_model.unwrap_or_default())
+                        }
+                        Some(false) => format!(
+                            "模型 {} 不在当前订阅模型列表",
+                            response.selected_model.unwrap_or_default()
+                        ),
+                        None => format!("CLIProxyAPI 在线，共 {} 个模型", response.model_count),
+                    };
+                }
+                UiEvent::ApiFailed(message) => {
+                    self.api_request_running = false;
+                    self.status = format!("API 操作失败：{message}");
+                }
             }
         }
+    }
+
+    fn start_login(&mut self) {
+        if self.api_request_running {
+            return;
+        }
+        self.api_request_running = true;
+        self.status = "正在向 CLIProxyAPI 请求 OAuth 授权链接...".to_string();
+        spawn_login_request(
+            self.event_tx.clone(),
+            self.server_url.clone(),
+            self.login_provider.clone(),
+        );
+    }
+
+    fn check_login(&mut self) {
+        let Some(state) = self.login_state.clone() else {
+            self.status = "请先点击账号登录".to_string();
+            return;
+        };
+        if self.api_request_running {
+            return;
+        }
+        self.api_request_running = true;
+        self.status = "正在检查账号登录状态...".to_string();
+        spawn_login_status_request(self.event_tx.clone(), self.server_url.clone(), state);
+    }
+
+    fn load_models(&mut self) {
+        if self.api_request_running {
+            return;
+        }
+        self.api_request_running = true;
+        self.status = "正在读取订阅模型...".to_string();
+        spawn_models_request(self.event_tx.clone(), self.server_url.clone());
+    }
+
+    fn verify_model(&mut self) {
+        if self.api_request_running {
+            return;
+        }
+        self.api_request_running = true;
+        self.status = "正在验证模型...".to_string();
+        spawn_verify_request(
+            self.event_tx.clone(),
+            self.server_url.clone(),
+            self.selected_model.clone(),
+        );
     }
 
     fn render_header(&mut self, ui: &mut Ui) {
@@ -204,6 +317,88 @@ impl DesktopApp {
             ui.label(RichText::new("用户").color(MUTED));
             ui.add(TextEdit::singleline(&mut self.user_id).desired_width(150.0));
         });
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("API 登录").color(MUTED));
+            egui::ComboBox::from_id_salt("login-provider")
+                .selected_text(&self.login_provider)
+                .show_ui(ui, |ui| {
+                    for provider in [
+                        "codex",
+                        "claude",
+                        "antigravity",
+                        "kimi",
+                        "xai",
+                        "devin",
+                        "meta",
+                    ] {
+                        ui.selectable_value(
+                            &mut self.login_provider,
+                            provider.to_string(),
+                            provider,
+                        );
+                    }
+                });
+            if ui
+                .add_enabled(!self.api_request_running, egui::Button::new("账号登录"))
+                .clicked()
+            {
+                self.start_login();
+            }
+            if ui
+                .add_enabled(
+                    !self.api_request_running && self.login_state.is_some(),
+                    egui::Button::new("检查登录"),
+                )
+                .clicked()
+            {
+                self.check_login();
+            }
+            if ui
+                .add_enabled(!self.api_request_running, egui::Button::new("刷新模型"))
+                .clicked()
+            {
+                self.load_models();
+            }
+            ui.label(RichText::new("模型").color(MUTED));
+            if self.models.is_empty() {
+                ui.add(TextEdit::singleline(&mut self.selected_model).desired_width(150.0));
+            } else {
+                egui::ComboBox::from_id_salt("model-picker")
+                    .selected_text(if self.selected_model.is_empty() {
+                        "选择模型"
+                    } else {
+                        &self.selected_model
+                    })
+                    .show_ui(ui, |ui| {
+                        for model in &self.models {
+                            ui.selectable_value(
+                                &mut self.selected_model,
+                                model.id.clone(),
+                                &model.id,
+                            );
+                        }
+                    });
+            }
+            if ui
+                .add_enabled(
+                    !self.api_request_running && !self.selected_model.trim().is_empty(),
+                    egui::Button::new("验证模型"),
+                )
+                .clicked()
+            {
+                self.verify_model();
+            }
+        });
+        if let Some(url) = &self.login_url {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("OAuth").color(MUTED));
+                ui.hyperlink_to("打开浏览器授权", url);
+                if let Some(state) = &self.login_state {
+                    ui.label(RichText::new(format!("state: {}", truncate(state, 18))).color(MUTED));
+                }
+            });
+        }
     }
 
     fn render_task_list(&mut self, ui: &mut Ui) {
@@ -525,6 +720,121 @@ fn spawn_agent_request(
             },
             Err(message) => UiEvent::Failed { task_id, message },
         };
+        let _ = event_tx.send(event);
+    });
+}
+
+fn spawn_login_request(event_tx: mpsc::Sender<UiEvent>, server_url: String, provider: String) {
+    thread::spawn(move || {
+        let result = Runtime::new()
+            .map_err(|error| error.to_string())
+            .and_then(|runtime| {
+                runtime.block_on(async move {
+                    Client::new()
+                        .post(format!(
+                            "{}/v1/providers/cliproxyapi/login",
+                            server_url.trim_end_matches('/')
+                        ))
+                        .json(&serde_json::json!({ "provider": provider }))
+                        .send()
+                        .await
+                        .map_err(|error| error.to_string())?
+                        .error_for_status()
+                        .map_err(|error| error.to_string())?
+                        .json::<CliProxyLoginStart>()
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+            });
+        let event = result
+            .map(UiEvent::LoginStarted)
+            .unwrap_or_else(UiEvent::ApiFailed);
+        let _ = event_tx.send(event);
+    });
+}
+
+fn spawn_login_status_request(event_tx: mpsc::Sender<UiEvent>, server_url: String, state: String) {
+    thread::spawn(move || {
+        let result = Runtime::new()
+            .map_err(|error| error.to_string())
+            .and_then(|runtime| {
+                runtime.block_on(async move {
+                    Client::new()
+                        .get(format!(
+                            "{}/v1/providers/cliproxyapi/login/status",
+                            server_url.trim_end_matches('/')
+                        ))
+                        .query(&[("state", state)])
+                        .send()
+                        .await
+                        .map_err(|error| error.to_string())?
+                        .error_for_status()
+                        .map_err(|error| error.to_string())?
+                        .json::<CliProxyLoginStatus>()
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+            });
+        let event = result
+            .map(UiEvent::LoginStatus)
+            .unwrap_or_else(UiEvent::ApiFailed);
+        let _ = event_tx.send(event);
+    });
+}
+
+fn spawn_models_request(event_tx: mpsc::Sender<UiEvent>, server_url: String) {
+    thread::spawn(move || {
+        let result = Runtime::new()
+            .map_err(|error| error.to_string())
+            .and_then(|runtime| {
+                runtime.block_on(async move {
+                    Client::new()
+                        .get(format!(
+                            "{}/v1/providers/cliproxyapi/models",
+                            server_url.trim_end_matches('/')
+                        ))
+                        .send()
+                        .await
+                        .map_err(|error| error.to_string())?
+                        .error_for_status()
+                        .map_err(|error| error.to_string())?
+                        .json::<Vec<CliProxyModel>>()
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+            });
+        let event = result
+            .map(UiEvent::ModelsLoaded)
+            .unwrap_or_else(UiEvent::ApiFailed);
+        let _ = event_tx.send(event);
+    });
+}
+
+fn spawn_verify_request(event_tx: mpsc::Sender<UiEvent>, server_url: String, model: String) {
+    thread::spawn(move || {
+        let result = Runtime::new()
+            .map_err(|error| error.to_string())
+            .and_then(|runtime| {
+                runtime.block_on(async move {
+                    Client::new()
+                        .post(format!(
+                            "{}/v1/providers/cliproxyapi/verify",
+                            server_url.trim_end_matches('/')
+                        ))
+                        .json(&serde_json::json!({ "model": model }))
+                        .send()
+                        .await
+                        .map_err(|error| error.to_string())?
+                        .error_for_status()
+                        .map_err(|error| error.to_string())?
+                        .json::<CliProxyVerification>()
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+            });
+        let event = result
+            .map(UiEvent::ModelVerified)
+            .unwrap_or_else(UiEvent::ApiFailed);
         let _ = event_tx.send(event);
     });
 }

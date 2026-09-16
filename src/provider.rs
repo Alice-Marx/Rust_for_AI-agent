@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 pub struct ModelRequest {
     pub system_prompt: String,
     pub user_prompt: String,
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -136,7 +137,7 @@ impl ModelProvider for OpenAiCompatibleModel {
 
     async fn complete(&self, request: ModelRequest) -> Result<ModelResponse> {
         let body = ChatRequest {
-            model: self.model.clone(),
+            model: request.model.unwrap_or_else(|| self.model.clone()),
             messages: vec![
                 ChatMessage {
                     role: "system",

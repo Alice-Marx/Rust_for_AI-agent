@@ -291,6 +291,8 @@ Start-Process $url
 - “聊天式规划”显示当前任务的完整对话，右侧显示计划步骤和反思结果。
 - “多任务并排”把多个任务同时展示在工作区，每个任务拥有独立 session，可以分别打开继续对话。
 - 顶部可以修改 Rust Agent 服务地址和用户 ID。
+- 顶部可以选择 Codex/Claude/Kimi 等 OAuth 服务，生成授权链接、检查登录状态、读取模型并验证模型。
+- 选择的模型会随当前 Agent 请求发送，桌面端不需要重启后端即可切换模型。
 - Agent 请求在后台线程执行，窗口不会因为模型请求阻塞；后端不可用时会在当前任务中显示错误。
 
 启动桌面版：
@@ -317,7 +319,7 @@ cargo run
 cargo run --bin agent-desktop
 ```
 
-桌面版不会单独保存模型密钥，也不会直接读取 CLIProxyAPI OAuth token；模型调用和账号验证都由 Rust Agent 后端统一完成。
+首次使用时，在顶部“API 登录”区域选择服务，点击“账号登录”，再点击 OAuth 链接完成浏览器授权；授权完成后点击“检查登录”，随后点击“刷新模型”和“验证模型”。桌面版不会单独保存模型密钥，也不会直接读取 CLIProxyAPI OAuth token；账号验证由 Rust Agent 后端转发给 CLIProxyAPI 完成。
 
 ## API 示例
 

@@ -11,6 +11,8 @@ pub struct AgentRequest {
     pub session_id: String,
     #[serde(default)]
     pub user_id: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
     pub input: String,
 }
 

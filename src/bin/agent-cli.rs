@@ -316,6 +316,7 @@ fn request(session_id: &str, user_id: &str, input: String) -> AgentRequest {
     AgentRequest {
         session_id: session_id.to_string(),
         user_id: Some(user_id.to_string()),
+        model: None,
         input,
     }
 }
