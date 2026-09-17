@@ -3,7 +3,7 @@
 
 #define MyAppName "Rust AI Agent"
 #define MyAppPublisher "AliceMarx"
-#define MyAppURL "https://github.com/ljwei-stak/Rust_for_AI-agent"
+#define MyAppURL "https://github.com/Alice-Marx/Rust_for_AI-agent"
 #define MyAppExeName "agent-desktop.exe"
 #ifndef MyAppVersion
   #define MyAppVersion "0.1.0"
@@ -50,8 +50,10 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 Source: "{#BuildRoot}\rust-ai-agent.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BuildRoot}\agent-desktop.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BuildRoot}\agent-cli.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BuildRoot}\cliproxyapi\*"; DestDir: "{app}\cliproxyapi"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "Start-RustAIAgent.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\README.md"; DestDir: "{app}"; DestName: "README.md"; Flags: ignoreversion
+Source: "{#BuildRoot}\THIRD-PARTY-NOTICES\*"; DestDir: "{app}\THIRD-PARTY-NOTICES"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [InstallDelete]
 ; Remove ZIP-era program files after migration. Persistent user data stays in

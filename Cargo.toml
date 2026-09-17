@@ -1,6 +1,6 @@
 [package]
 name = "rust-ai-agent"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 default-run = "rust-ai-agent"
 description = "A production-minded Rust AI agent foundation with memory, collaboration, planning and evaluation"

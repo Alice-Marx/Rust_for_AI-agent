@@ -34,7 +34,7 @@ $env:Path = "$rustRoot\cargo\bin;$env:Path"
 ### 2. 下载并启动 Rust Agent
 
 ```powershell
-git clone https://github.com/ljwei-stak/Rust_for_AI-agent.git F:\codex\Rust_for_AI-agent
+git clone https://github.com/Alice-Marx/Rust_for_AI-agent.git F:\codex\Rust_for_AI-agent
 Set-Location F:\codex\Rust_for_AI-agent
 
 # 第一次运行会编译依赖；默认没有模型密钥也可以启动离线演示模式
@@ -53,7 +53,20 @@ Invoke-RestMethod http://127.0.0.1:8080/health
 
 CLIProxyAPI 作为独立的 Go sidecar 运行，负责 OAuth 登录、订阅账号轮换和凭据保存；本 Rust 项目不读取或保存 OAuth token。参考实现来自 [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)。
 
-### 3. 准备 CLIProxyAPI
+### 桌面安装包：零配置登录（推荐）
+
+从 `v0.1.1` 开始，Windows 安装包已经内置 CLIProxyAPI Windows x64 sidecar。首次通过开始菜单或桌面快捷方式启动时，启动器会自动：
+
+- 创建只监听 `127.0.0.1:18317` 的 CLIProxyAPI 配置；
+- 生成仅供本机 Agent 使用的随机 API / Management 密钥；
+- 在 `%LOCALAPPDATA%\RustAIAgentData\CLIProxyAPI` 保存配置、运行日志和 OAuth 凭据；
+- 启动 Rust Agent，并使“账号登录”“刷新模型”“验证模型”立即可用。
+
+因此使用桌面安装包时，不需要安装 Go、不需要手写 YAML、也不需要设置 `CLIPROXYAPI_*` 环境变量。打开桌面版后选择服务，点击“账号登录”，在浏览器完成授权，再依次点击“检查登录”和“刷新模型”。未登录账号时模型列表为空是正常现象。
+
+如果 sidecar 无法启动，桌面端会显示可读提示；详细原因位于 `%LOCALAPPDATA%\RustAIAgentData\launcher.log`。该目录不会在升级或卸载时删除，因此订阅账号 OAuth 凭据不会丢失。
+
+### 3. 从源码运行时手动准备 CLIProxyAPI
 
 可以从 [CLIProxyAPI Releases](https://github.com/router-for-me/CLIProxyAPI/releases) 下载 Windows 可执行文件；或者从源码构建：
 
@@ -232,7 +245,7 @@ cargo run
 
 ### 常见问题
 
-- `503 CLIProxyAPI is not configured`：当前 Rust Agent 进程没有读取到 `AGENT_PROVIDER=cliproxyapi` 或 CLIProxyAPI 相关环境变量，请在启动 Rust Agent 的同一个 PowerShell 窗口重新设置变量。
+- `503 CLIProxyAPI is not configured`：如果使用 `v0.1.1` 或更高版本的桌面安装包，请完全退出后重新从开始菜单启动桌面版；启动器会自动配置本机 sidecar。若仍失败，查看 `%LOCALAPPDATA%\RustAIAgentData\launcher.log`。从源码运行时，则需要在启动 Rust Agent 的同一个 PowerShell 窗口设置 `AGENT_PROVIDER=cliproxyapi` 和 `CLIPROXYAPI_*` 环境变量。
 - `CLIProxyAPI models request failed`：检查 CLIProxyAPI 是否运行在 `8317` 端口、`CLIPROXYAPI_API_KEY` 是否与 `config.yaml` 的 `api-keys` 一致。
 - 登录接口返回 404：检查 CLIProxyAPI 是否配置了 `remote-management.secret-key`，并确认 `CLIPROXYAPI_MANAGEMENT_KEY` 一致；`allow-remote: false` 允许本机调用，但仍然要求管理密钥。
 - 登录状态长时间为 `wait`：确认浏览器已经完成授权，并保持 CLIProxyAPI 进程运行；OAuth 状态可能因超时失效，需要重新发起登录。
@@ -325,11 +338,12 @@ cargo run --bin agent-desktop
 
 ### Windows 桌面安装包
 
-安装包包含以下三个原生程序：
+安装包包含下列原生程序和运行组件：
 
 - `rust-ai-agent.exe`：后端服务。
 - `agent-desktop.exe`：桌面 GUI。
 - `agent-cli.exe`：原生 Rust CLI。
+- `cliproxyapi\cli-proxy-api.exe`：随安装包分发的本机 CLIProxyAPI sidecar。
 
 桌面版使用 **Inno Setup 7** 制作标准 Windows 安装程序。安装包会把这三个程序安装到 `%LOCALAPPDATA%\Programs\Rust AI Agent`，创建开始菜单快捷方式（可选桌面快捷方式），并把安装目录加入当前用户的 PATH。因此安装桌面版后，重新打开 PowerShell 就可以直接运行 `agent-cli`，不需要额外安装 CLI。
 
@@ -349,10 +363,10 @@ Set-Location F:\codex\Rust_for_AI-agent
 生成文件：
 
 ```text
-dist\Rust-AI-Agent-Setup-0.1.0-x64.exe
+dist\Rust-AI-Agent-Setup-0.1.1-x64.exe
 ```
 
-双击该 `.exe` 并按向导安装。安装完成页可直接启动桌面版；桌面版启动器会在需要时隐藏启动本机后端服务。安装包会迁移并移除旧 ZIP 版的 `%LOCALAPPDATA%\RustAIAgent` 程序目录，但不会删除 `%LOCALAPPDATA%\RustAIAgentData` 或 CLIProxyAPI 的 `auth-dir` 账号凭据。
+双击该 `.exe` 并按向导安装。安装完成页可直接启动桌面版；桌面版启动器会在需要时隐藏启动本机 CLIProxyAPI 和 Rust Agent 后端服务。安装包会迁移并移除旧 ZIP 版的 `%LOCALAPPDATA%\RustAIAgent` 程序目录，但不会删除 `%LOCALAPPDATA%\RustAIAgentData` 或 CLIProxyAPI 的 OAuth 账号凭据。
 
 安装完成后可以双击桌面快捷方式启动后端和桌面版，也可以手动运行：
 

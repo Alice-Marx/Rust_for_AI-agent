@@ -113,7 +113,7 @@ async fn list_cliproxy_models(
 ) -> Result<Json<Vec<crate::cliproxy::CliProxyModel>>, ApiError> {
     let client = state
         .cliproxy
-        .ok_or_else(|| ApiError::service_unavailable("CLIProxyAPI is not configured"))?;
+        .ok_or_else(|| ApiError::service_unavailable(cliproxy_not_ready_message()))?;
     Ok(Json(client.list_models().await?))
 }
 
@@ -123,7 +123,7 @@ async fn verify_cliproxy(
 ) -> Result<Json<crate::cliproxy::CliProxyVerification>, ApiError> {
     let client = state
         .cliproxy
-        .ok_or_else(|| ApiError::service_unavailable("CLIProxyAPI is not configured"))?;
+        .ok_or_else(|| ApiError::service_unavailable(cliproxy_not_ready_message()))?;
     Ok(Json(client.verify(request.model).await?))
 }
 
@@ -138,7 +138,7 @@ async fn start_cliproxy_login(
 ) -> Result<Json<crate::cliproxy::CliProxyLoginStart>, ApiError> {
     let client = state
         .cliproxy
-        .ok_or_else(|| ApiError::service_unavailable("CLIProxyAPI is not configured"))?;
+        .ok_or_else(|| ApiError::service_unavailable(cliproxy_not_ready_message()))?;
     Ok(Json(client.start_login(&request.provider).await?))
 }
 
@@ -153,7 +153,7 @@ async fn cliproxy_login_status(
 ) -> Result<Json<crate::cliproxy::CliProxyLoginStatus>, ApiError> {
     let client = state
         .cliproxy
-        .ok_or_else(|| ApiError::service_unavailable("CLIProxyAPI is not configured"))?;
+        .ok_or_else(|| ApiError::service_unavailable(cliproxy_not_ready_message()))?;
     Ok(Json(client.login_status(&query.state).await?))
 }
 
@@ -163,12 +163,16 @@ async fn cancel_cliproxy_login(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let client = state
         .cliproxy
-        .ok_or_else(|| ApiError::service_unavailable("CLIProxyAPI is not configured"))?;
+        .ok_or_else(|| ApiError::service_unavailable(cliproxy_not_ready_message()))?;
     let cancelled = client.cancel_login(&query.state).await?;
     Ok(Json(serde_json::json!({
         "status": "ok",
         "cancelled": cancelled
     })))
+}
+
+fn cliproxy_not_ready_message() -> &'static str {
+    "CLIProxyAPI is not configured. Start the packaged desktop launcher, or configure AGENT_PROVIDER=cliproxyapi and CLIPROXYAPI_* before starting the Rust Agent service."
 }
 
 async fn run_agent(

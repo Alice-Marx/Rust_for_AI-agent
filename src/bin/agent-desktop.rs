@@ -1,4 +1,7 @@
-use std::{sync::mpsc, thread};
+use std::{
+    sync::{mpsc, Arc},
+    thread,
+};
 
 use eframe::egui::{
     self, Align, Color32, Frame, Layout, RichText, ScrollArea, Stroke, TextEdit, Ui, Vec2, Visuals,
@@ -83,6 +86,7 @@ struct DesktopApp {
 
 impl DesktopApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        cc.egui_ctx.set_fonts(chinese_font_definitions());
         cc.egui_ctx.set_visuals(Visuals::dark());
         let (event_tx, event_rx) = mpsc::channel();
         let tasks = cc
@@ -235,7 +239,7 @@ impl DesktopApp {
                 }
                 UiEvent::ApiFailed(message) => {
                     self.api_request_running = false;
-                    self.status = format!("API 操作失败：{message}");
+                    self.status = format!("API 操作失败：{}", friendly_api_error(&message));
                 }
             }
         }
@@ -851,6 +855,45 @@ fn truncate(value: &str, max_chars: usize) -> String {
     } else {
         result
     }
+}
+
+fn chinese_font_definitions() -> egui::FontDefinitions {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "noto-sans-sc".to_owned(),
+        Arc::new(egui::FontData::from_static(include_bytes!(
+            "../../assets/fonts/NotoSansSC-VF.ttf"
+        ))),
+    );
+    fonts
+        .families
+        .get_mut(&egui::FontFamily::Proportional)
+        .expect("egui must provide the proportional font family")
+        .insert(0, "noto-sans-sc".to_owned());
+    fonts
+        .families
+        .get_mut(&egui::FontFamily::Monospace)
+        .expect("egui must provide the monospace font family")
+        .insert(0, "noto-sans-sc".to_owned());
+    fonts
+}
+
+fn friendly_api_error(message: &str) -> String {
+    let normalized = message.to_ascii_lowercase();
+    if normalized.contains("/v1/providers/cliproxyapi")
+        && normalized.contains("503 service unavailable")
+    {
+        return "CLIProxyAPI 尚未就绪。请关闭后重新打开桌面版；若仍失败，请查看 %LOCALAPPDATA%\\RustAIAgentData\\launcher.log。".to_string();
+    }
+    if normalized.contains("/v1/providers/cliproxyapi")
+        && normalized.contains("500 internal server error")
+    {
+        return "CLIProxyAPI 启动或本机连接失败。请查看 %LOCALAPPDATA%\\RustAIAgentData\\launcher.log。".to_string();
+    }
+    if normalized.contains("connection refused") || normalized.contains("error sending request") {
+        return "无法连接 Rust Agent 后端。请关闭后重新打开桌面版。".to_string();
+    }
+    message.to_string()
 }
 
 fn main() -> eframe::Result {
