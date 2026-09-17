@@ -20,7 +20,9 @@ function Resolve-InnoCompiler {
         (Get-Command ISCC.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue),
         (Join-Path $env:ProgramFiles "Inno Setup 7\ISCC.exe"),
         (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 7\ISCC.exe"),
-        (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 7\ISCC.exe")
+        (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 7\ISCC.exe"),
+        (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"),
+        (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe")
     ) | Where-Object { $_ }
 
     foreach ($candidate in $candidates) {
@@ -29,7 +31,7 @@ function Resolve-InnoCompiler {
         }
     }
 
-    throw "未找到 Inno Setup 7 的 ISCC.exe。请安装 Inno Setup 7，或用 -InnoCompiler 指定 ISCC.exe 的完整路径。"
+    throw "未找到 Inno Setup 的 ISCC.exe。请安装 Inno Setup 6/7，或用 -InnoCompiler 指定 ISCC.exe 的完整路径。"
 }
 
 function Resolve-CliProxyApiExecutable {
@@ -137,6 +139,14 @@ Copy-Item -LiteralPath $noticesSource -Destination $noticesDestination -Recurse 
 
 $compiler = Resolve-InnoCompiler -RequestedPath $InnoCompiler
 $script = Join-Path $repoRoot "packaging\windows\wonderland.iss"
+
+# 启动器脚本含中文，必须带 UTF-8 BOM 才能被 Windows PowerShell 5.1 正确解析。
+$launcherScript = Join-Path $repoRoot "packaging\windows\Start-Wonderland.ps1"
+$launcherBytes = [System.IO.File]::ReadAllBytes($launcherScript)
+if ($launcherBytes.Length -lt 3 -or $launcherBytes[0] -ne 0xEF -or $launcherBytes[1] -ne 0xBB -or $launcherBytes[2] -ne 0xBF) {
+    throw "Start-Wonderland.ps1 缺少 UTF-8 BOM，Windows PowerShell 5.1 会解析失败。请为该文件添加 BOM 后重新构建。"
+}
+
 & $compiler "/DMyAppVersion=$version" $script
 if ($LASTEXITCODE -ne 0) {
     throw "Inno Setup 编译失败，退出码：$LASTEXITCODE"

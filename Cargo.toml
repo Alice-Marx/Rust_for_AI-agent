@@ -1,6 +1,6 @@
 [package]
 name = "wonderland"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 default-run = "wonderland"
 description = "Wonderland: a production-minded Rust AI agent foundation with memory, collaboration, planning and evaluation"

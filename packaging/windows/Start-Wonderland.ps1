@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 
 $installDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $backend = Join-Path $installDir "wonderland.exe"

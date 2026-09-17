@@ -5,5 +5,5 @@ release from [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIPro
 
 CLIProxyAPI is licensed under the MIT License. Its upstream license is included
 in the redistributed CLIProxyAPI bundle. OAuth credentials are owned and stored
-by CLIProxyAPI in the current user's data directory; Rust AI Agent does not read
+by CLIProxyAPI in the current user's data directory; Wonderland does not read
 or upload those credentials.
