@@ -331,7 +331,7 @@ cargo run --bin agent-desktop
 - `agent-desktop.exe`：桌面 GUI。
 - `agent-cli.exe`：原生 Rust CLI。
 
-安装脚本会把这三个程序安装到 `%LOCALAPPDATA%\RustAIAgent`，创建桌面快捷方式，并把安装目录加入当前用户的 PATH。因此安装桌面版后，重新打开 PowerShell 就可以直接运行 `agent-cli`，不需要额外安装 CLI。
+桌面版使用 **Inno Setup 7** 制作标准 Windows 安装程序。安装包会把这三个程序安装到 `%LOCALAPPDATA%\Programs\Rust AI Agent`，创建开始菜单快捷方式（可选桌面快捷方式），并把安装目录加入当前用户的 PATH。因此安装桌面版后，重新打开 PowerShell 就可以直接运行 `agent-cli`，不需要额外安装 CLI。
 
 生成 Windows x64 安装包：
 
@@ -340,21 +340,19 @@ Set-Location F:\codex\Rust_for_AI-agent
 & .\packaging\windows\build-windows-package.ps1
 ```
 
+构建脚本会使用 `D:\Jianwei_Li\rust` 中的 Rust/Cargo 缓存，并调用 Inno Setup 7 的 `ISCC.exe`。若编译器不在默认位置，可以显式指定：
+
+```powershell
+& .\packaging\windows\build-windows-package.ps1 -InnoCompiler "C:\Program Files\Inno Setup 7\ISCC.exe"
+```
+
 生成文件：
 
 ```text
-dist\Rust-AI-Agent-windows-x64.zip
+dist\Rust-AI-Agent-Setup-0.1.0-x64.exe
 ```
 
-解压后安装：
-
-```powershell
-Expand-Archive .\dist\Rust-AI-Agent-windows-x64.zip -DestinationPath .\dist\Rust-AI-Agent-windows-x64-unpacked -Force
-Set-Location .\dist\Rust-AI-Agent-windows-x64-unpacked
-powershell -ExecutionPolicy Bypass -File .\Install-RustAIAgent.ps1
-```
-
-也可以直接双击解压目录中的 `Install-RustAIAgent.cmd`。
+双击该 `.exe` 并按向导安装。安装完成页可直接启动桌面版；桌面版启动器会在需要时隐藏启动本机后端服务。安装包会迁移并移除旧 ZIP 版的 `%LOCALAPPDATA%\RustAIAgent` 程序目录，但不会删除 `%LOCALAPPDATA%\RustAIAgentData` 或 CLIProxyAPI 的 `auth-dir` 账号凭据。
 
 安装完成后可以双击桌面快捷方式启动后端和桌面版，也可以手动运行：
 
@@ -365,11 +363,7 @@ agent-cli chat
 
 卸载：
 
-```powershell
-powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\RustAIAgent\Uninstall-RustAIAgent.ps1"
-```
-
-卸载不会删除 `%LOCALAPPDATA%\RustAIAgentData` 或 CLIProxyAPI 的 `auth-dir` 账号凭据。
+在 Windows 的“已安装的应用”中选择 **Rust AI Agent** 卸载，或运行安装目录中的 `unins000.exe`。卸载不会删除 `%LOCALAPPDATA%\RustAIAgentData` 或 CLIProxyAPI 的 `auth-dir` 账号凭据。
 
 ### npm 独立 CLI
 
