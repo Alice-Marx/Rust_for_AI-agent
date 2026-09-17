@@ -1,12 +1,12 @@
-# Rust for AI Agent
+# Wonderland
 
-一个用 Rust 实现的 agentic 编码 Agent 框架。项目已从"单次问答流水线"升级为真正的 agentic 编码助手：模型在一个多轮 `tool_use → tool_result` 循环中自主读写文件、搜索代码、执行命令，配合细粒度权限管线、会话持久化与上下文自动压缩。核心设计（工具协议、权限模式、压缩策略等）移植自 Claude Code，仓库根目录的 `claude-code/` 为只读参考实现。工程结构参考了 [solenovex/rust-ai-agent](https://github.com/solenovex/rust-ai-agent) 的 Agent / session / tool 分层思路，以及 [solenovex/expense-tracker-api](https://github.com/solenovex/expense-tracker-api) 的 Axum API、健康检查和请求 tracing 方式。
+一个用 Rust 实现的 agentic 编码 Agent 框架。项目已从"单次问答流水线"升级为真正的 agentic 编码助手：模型在一个多轮 `tool_use → tool_result` 循环中自主读写文件、搜索代码、执行命令，配合细粒度权限管线、会话持久化与上下文自动压缩。核心设计（工具协议、权限模式、压缩策略等）移植自 Claude Code，仓库根目录的 `claude-code/` 为只读参考实现。工程结构参考了 [solenovex/wonderland](https://github.com/solenovex/wonderland) 的 Agent / session / tool 分层思路，以及 [solenovex/expense-tracker-api](https://github.com/solenovex/expense-tracker-api) 的 Axum API、健康检查和请求 tracing 方式。
 
 当前实现把 agentic 编码助手的完整闭环打通：
 
 - Agentic loop：模型响应中出现 `tool_use` 块时执行工具并把 `tool_result` 写回会话，直到模型停止调用工具或达到最大轮数（默认 25，可用 `with_max_turns` 调整）；工具失败与权限拒绝都会作为错误结果反馈给模型，不中断循环。
 - 九个内置工具：`FileRead` / `FileWrite` / `FileEdit` / `Glob` / `Grep` / `Bash` / `WebFetch` / `Task` / `TodoWrite`。`FileEdit` 做精确字符串替换并带 mtime + 内容 hash 的 staleness 检查（文件在读取后被外部修改会拒绝写入）；`Bash` 复合命令按 `&&` / `||` / `;` / `|` 拆分后逐段做权限评估，超长输出自动落盘；`WebFetch` 抓取网页并抽取正文（拒绝 localhost/私网地址，按 `WebFetch(domain:example.com)` 域名规则授权）；`Task` 把子任务委派给已注册的子 Agent（按 `Task(agent:research)` 规则授权）；`TodoWrite` 维护会话级任务清单（免权限提示，清单作为动态段注入系统提示词并持久化到会话）。
-- 权限管线：五种权限模式（`default` / `plan` / `acceptEdits` / `bypassPermissions` / `dontAsk`）+ 从 `<cwd>/.claude/settings.json` 与 `<cwd>/.rust-ai-agent/settings.json` 加载的 `allow / ask / deny` 规则管线（首命中胜出），外加不可绕过的 `.git/` 内部与 `.claude/` 目录写保护。
+- 权限管线：五种权限模式（`default` / `plan` / `acceptEdits` / `bypassPermissions` / `dontAsk`）+ 从 `<cwd>/.claude/settings.json` 与 `<cwd>/.wonderland/settings.json` 加载的 `allow / ask / deny` 规则管线（首命中胜出），外加不可绕过的 `.git/` 内部与 `.claude/` 目录写保护。
 - 会话持久化与自动压缩：每个会话一个 JSON 文件，每轮落盘，崩溃后可恢复完整工具调用轨迹；上下文估算超过阈值时自动把历史压缩为摘要，并保证不切断 `tool_use / tool_result` 配对。
 - 上下文构建：系统提示词按静态段（身份、工具规范、安全准则）在前、动态段（技能、环境信息、git 状态、项目指令）在后的顺序组织以保护 prompt cache；层级加载 `~/.claude/CLAUDE.md` 与从根到 `cwd` 各级的 `AGENTS.md` / `CLAUDE.md` / `.claude/CLAUDE.md`，支持 `@path` include。
 - 可观测性：`tracing` + `tower-http::TraceLayer`，每次 HTTP 请求、Agent 执行、Agent 委派都有 span；通过 `RUST_LOG` 调整级别。
@@ -71,7 +71,7 @@ $env:CARGO_TARGET_DIR = "$rustRoot\targets"
 $env:Path = "$rustRoot\cargo\bin;$env:Path"
 ```
 
-### 2. 下载并启动 Rust Agent
+### 2. 下载并启动 Wonderland
 
 ```powershell
 git clone https://github.com/Alice-Marx/Rust_for_AI-agent.git F:\codex\Rust_for_AI-agent
@@ -99,12 +99,12 @@ CLIProxyAPI 作为独立的 Go sidecar 运行，负责 OAuth 登录、订阅账�
 
 - 创建只监听 `127.0.0.1:18317` 的 CLIProxyAPI 配置；
 - 生成仅供本机 Agent 使用的随机 API / Management 密钥；
-- 在 `%LOCALAPPDATA%\RustAIAgentData\CLIProxyAPI` 保存配置、运行日志和 OAuth 凭据；
-- 启动 Rust Agent，并使“账号登录”“刷新模型”“验证模型”立即可用。
+- 在 `%LOCALAPPDATA%\WonderlandData\CLIProxyAPI` 保存配置、运行日志和 OAuth 凭据；
+- 启动 Wonderland，并使“账号登录”“刷新模型”“验证模型”立即可用。
 
 因此使用桌面安装包时，不需要安装 Go、不需要手写 YAML、也不需要设置 `CLIPROXYAPI_*` 环境变量。打开桌面版后选择服务，点击“账号登录”，在浏览器完成授权，再依次点击“检查登录”和“刷新模型”。未登录账号时模型列表为空是正常现象。
 
-如果 sidecar 无法启动，桌面端会显示可读提示；详细原因位于 `%LOCALAPPDATA%\RustAIAgentData\launcher.log`。该目录不会在升级或卸载时删除，因此订阅账号 OAuth 凭据不会丢失。
+如果 sidecar 无法启动，桌面端会显示可读提示；详细原因位于 `%LOCALAPPDATA%\WonderlandData\launcher.log`。该目录不会在升级或卸载时删除，因此订阅账号 OAuth 凭据不会丢失。
 
 ### 3. 从源码运行时手动准备 CLIProxyAPI
 
@@ -136,7 +136,7 @@ Set-Location F:\codex\_refs\CLIProxyAPI
 .\cliproxyapi.exe -config .\config.yaml
 ```
 
-保持这个窗口运行。CLIProxyAPI 默认监听 `http://127.0.0.1:8317`，Rust Agent 使用 `/v1` API，登录管理使用 `/v0/management` API。
+保持这个窗口运行。CLIProxyAPI 默认监听 `http://127.0.0.1:8317`，Wonderland 使用 `/v1` API，登录管理使用 `/v0/management` API。
 
 如果只是想使用 CLIProxyAPI 自带的命令行 OAuth，也可以运行以下命令后按浏览器提示登录：
 
@@ -150,7 +150,7 @@ devin:       -devin-login
 meta:        -meta-login
 ```
 
-### 4. 在 Rust Agent 中选择 API 并登录账号
+### 4. 在 Wonderland 中选择 API 并登录账号
 
 先在一个新的 PowerShell 窗口配置 Provider：
 
@@ -163,7 +163,7 @@ $env:CLIPROXYAPI_MANAGEMENT_URL="http://127.0.0.1:8317/v0/management"
 $env:CLIPROXYAPI_MANAGEMENT_KEY="local-management-key"
 ```
 
-再次启动 Rust Agent：
+再次启动 Wonderland：
 
 ```powershell
 Set-Location F:\codex\Rust_for_AI-agent
@@ -219,13 +219,13 @@ $env:CLIPROXYAPI_MODEL = "gpt-5.4"
 
 ### 5. 调用 Agent
 
-保持 Rust Agent 运行，调用 `/v1/agent/run`：
+保持 Wonderland 运行，调用 `/v1/agent/run`：
 
 ```powershell
 $request = @{
   session_id = "demo-session"
   user_id = "alice"
-  input = "请研究 Rust AI Agent，并总结我的费用预算"
+  input = "请研究 Wonderland，并总结我的费用预算"
 } | ConvertTo-Json
 
 Invoke-RestMethod `
@@ -247,7 +247,7 @@ Invoke-RestMethod `
 **关于 headless 权限**：HTTP 服务没有交互能力，权限评估为 `Ask` 时由 `DenyAllHandler` 一律拒绝（拒绝原因会作为工具错误反馈给模型，而不是中断请求）。要让 Agent 真正执行工具，请二选一：
 
 - 请求中传 `"mode": "bypassPermissions"`（仍会受 `.git/` / `.claude/` 写保护约束）；或
-- 在 `cwd` 下的 `.claude/settings.json` 或 `.rust-ai-agent/settings.json` 中配置 `permissions.allow` 规则，规则格式为 `"Bash(git *)"`（内容级前缀匹配）或 `"FileWrite"`（整工具放行）：
+- 在 `cwd` 下的 `.claude/settings.json` 或 `.wonderland/settings.json` 中配置 `permissions.allow` 规则，规则格式为 `"Bash(git *)"`（内容级前缀匹配）或 `"FileWrite"`（整工具放行）：
 
 ```json
 {
@@ -261,7 +261,7 @@ Invoke-RestMethod `
 此时模型调用路径是：
 
 ```text
-Rust Agent -> http://127.0.0.1:8317/v1/chat/completions -> CLIProxyAPI -> 已验证的订阅账号模型
+Wonderland -> http://127.0.0.1:8317/v1/chat/completions -> CLIProxyAPI -> 已验证的订阅账号模型
 ```
 
 如果需要取消尚未完成的登录：
@@ -304,7 +304,7 @@ cargo run
 | `cliproxyapi` | 使用本机 CLIProxyAPI 和订阅账号 | `CLIPROXYAPI_BASE_URL`、`CLIPROXYAPI_API_KEY`、`CLIPROXYAPI_MODEL` |
 | `openai` | 直接调用 OpenAI-compatible 服务 | `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL` |
 
-修改环境变量后需要重启 Rust Agent 进程。
+修改环境变量后需要重启 Wonderland 进程。
 
 ### 环境变量
 
@@ -315,12 +315,12 @@ cargo run
 | `AGENT_PERMISSION_MODE` | CLI 的默认权限模式（等价于 `--mode`） | 未设置（即 `default`） |
 | `AGENT_DATA_DIR` | 记忆、评估、会话等数据的保存目录 | `.agent-data/` |
 | `AGENT_SHELL` | Bash 工具使用的 shell | Windows 上优先 PATH 中的 `bash`，否则 `cmd /C`；其他平台 `sh -c` |
-| `AGENT_SERVER_URL` / `AGENT_USER_ID` / `AGENT_SESSION_ID` | CLI 的服务地址、用户、会话 | 见 `agent-cli --help` |
+| `AGENT_SERVER_URL` / `AGENT_USER_ID` / `AGENT_SESSION_ID` | CLI 的服务地址、用户、会话 | 见 `wonderland-cli --help` |
 | `RUST_LOG` | tracing 日志级别 | `info` |
 
 ### 常见问题
 
-- `503 CLIProxyAPI is not configured`：如果使用 `v0.1.1` 或更高版本的桌面安装包，请完全退出后重新从开始菜单启动桌面版；启动器会自动配置本机 sidecar。若仍失败，查看 `%LOCALAPPDATA%\RustAIAgentData\launcher.log`。从源码运行时，则需要在启动 Rust Agent 的同一个 PowerShell 窗口设置 `AGENT_PROVIDER=cliproxyapi` 和 `CLIPROXYAPI_*` 环境变量。
+- `503 CLIProxyAPI is not configured`：如果使用 `v0.1.1` 或更高版本的桌面安装包，请完全退出后重新从开始菜单启动桌面版；启动器会自动配置本机 sidecar。若仍失败，查看 `%LOCALAPPDATA%\WonderlandData\launcher.log`。从源码运行时，则需要在启动 Wonderland 的同一个 PowerShell 窗口设置 `AGENT_PROVIDER=cliproxyapi` 和 `CLIPROXYAPI_*` 环境变量。
 - `CLIProxyAPI models request failed`：检查 CLIProxyAPI 是否运行在 `8317` 端口、`CLIPROXYAPI_API_KEY` 是否与 `config.yaml` 的 `api-keys` 一致。
 - 登录接口返回 404：检查 CLIProxyAPI 是否配置了 `remote-management.secret-key`，并确认 `CLIPROXYAPI_MANAGEMENT_KEY` 一致；`allow-remote: false` 允许本机调用，但仍然要求管理密钥。
 - 登录状态长时间为 `wait`：确认浏览器已经完成授权，并保持 CLIProxyAPI 进程运行；OAuth 状态可能因超时失效，需要重新发起登录。
@@ -328,7 +328,7 @@ cargo run
 
 ## CLI 终端客户端
 
-CLI 是纯命令行客户端，适合服务器、远程 SSH、脚本和不需要图形界面的用户。它复用已经启动的 Rust Agent HTTP 服务，因此长期记忆、规划、评估和 CLIProxyAPI 账号配置保持一致。
+CLI 是纯命令行客户端，适合服务器、远程 SSH、脚本和不需要图形界面的用户。它复用已经启动的 Wonderland HTTP 服务，因此长期记忆、规划、评估和 CLIProxyAPI 账号配置保持一致。
 
 先保持后端服务运行，再执行：
 
@@ -336,28 +336,28 @@ CLI 是纯命令行客户端，适合服务器、远程 SSH、脚本和不需要
 Set-Location F:\codex\Rust_for_AI-agent
 
 # 查看所有命令
-cargo run --bin agent-cli -- --help
+cargo run --bin wonderland-cli -- --help
 
 # 进入连续聊天模式；输入 /exit 退出
-cargo run --bin agent-cli
+cargo run --bin wonderland-cli
 
 # 单次执行任务
-cargo run --bin agent-cli -- run "分析我的 Rust 项目并给出改进计划"
+cargo run --bin wonderland-cli -- run "分析我的 Rust 项目并给出改进计划"
 
 # 指定用户和会话，确保长期记忆隔离和会话连续
-cargo run --bin agent-cli -- --user-id alice --session-id project-001 chat
+cargo run --bin wonderland-cli -- --user-id alice --session-id project-001 chat
 
 # 检查后端、查看订阅模型、验证模型
-cargo run --bin agent-cli -- health
-cargo run --bin agent-cli -- models
-cargo run --bin agent-cli -- verify --model gpt-5.4
+cargo run --bin wonderland-cli -- health
+cargo run --bin wonderland-cli -- models
+cargo run --bin wonderland-cli -- verify --model gpt-5.4
 
 # 管理会话：列出全部会话、查看单个会话的消息历史与任务清单
-cargo run --bin agent-cli -- sessions
-cargo run --bin agent-cli -- session demo-session
+cargo run --bin wonderland-cli -- sessions
+cargo run --bin wonderland-cli -- session demo-session
 
 # 发起 CLIProxyAPI OAuth 登录；--wait 会在终端轮询验证结果
-cargo run --bin agent-cli -- login codex --wait
+cargo run --bin wonderland-cli -- login codex --wait
 ```
 
 CLI 提供全局 `--mode` 参数控制工具权限模式，也可用环境变量 `AGENT_PERMISSION_MODE` 设置。可选值与 Claude Code 对齐：
@@ -370,15 +370,15 @@ CLI 提供全局 `--mode` 参数控制工具权限模式，也可用环境变量
 | `bypassPermissions` | 全部放行（`.git/` 内部与 `.claude/` 目录写保护不可绕过） |
 | `dontAsk` | headless：不询问用户，未命中 allow 规则的调用直接拒绝 |
 
-注意：CLI 通过 HTTP 调用后端，Ask 决策在后端一律被拒绝（`DenyAllHandler`），所以想让 Agent 自由使用工具，应传 `--mode bypassPermissions`，或在项目目录的 `.claude/settings.json` / `.rust-ai-agent/settings.json` 中配置 `permissions.allow` 规则：
+注意：CLI 通过 HTTP 调用后端，Ask 决策在后端一律被拒绝（`DenyAllHandler`），所以想让 Agent 自由使用工具，应传 `--mode bypassPermissions`，或在项目目录的 `.claude/settings.json` / `.wonderland/settings.json` 中配置 `permissions.allow` 规则：
 
 ```powershell
 # 以 bypassPermissions 模式进入聊天
-cargo run --bin agent-cli -- --mode bypassPermissions chat
+cargo run --bin wonderland-cli -- --mode bypassPermissions chat
 
 # 等价的环境变量写法
 $env:AGENT_PERMISSION_MODE = "bypassPermissions"
-cargo run --bin agent-cli -- run "把 src 下的 TODO 注释汇总成 docs/todo.md"
+cargo run --bin wonderland-cli -- run "把 src 下的 TODO 注释汇总成 docs/todo.md"
 ```
 
 每次回答尾部会显示本轮的 turns / 工具调用次数 / token 用量；如果模型维护了任务清单，还会在回答后列出当前 todos。聊天模式内输入 `/help` 查看可用命令。
@@ -388,7 +388,7 @@ cargo run --bin agent-cli -- run "把 src 下的 TODO 注释汇总成 docs/todo.
 ```powershell
 $env:AGENT_SERVER_URL = "http://127.0.0.1:8080"
 $env:AGENT_USER_ID = "alice"
-cargo run --bin agent-cli -- chat
+cargo run --bin wonderland-cli -- chat
 ```
 
 终端登录命令会打印 OAuth URL。复制到浏览器完成账号授权；如果当前终端支持手动打开链接，也可以使用：
@@ -405,7 +405,7 @@ Start-Process $url
 - 左侧是历史任务列表，任务标题、聊天记录、执行计划和反思会保存到桌面端本地存储。
 - “聊天式规划”显示当前任务的完整对话，右侧显示计划步骤和反思结果。
 - “多任务并排”把多个任务同时展示在工作区，每个任务拥有独立 session，可以分别打开继续对话。
-- 顶部可以修改 Rust Agent 服务地址和用户 ID。
+- 顶部可以修改 Wonderland 服务地址和用户 ID。
 - 顶部可以选择 Codex/Claude/Kimi 等 OAuth 服务，生成授权链接、检查登录状态、读取模型并验证模型。
 - 选择的模型会随当前 Agent 请求发送，桌面端不需要重启后端即可切换模型。
 - Agent 请求在后台线程执行，窗口不会因为模型请求阻塞；后端不可用时会在当前任务中显示错误。
@@ -414,27 +414,27 @@ Start-Process $url
 
 ```powershell
 Set-Location F:\codex\Rust_for_AI-agent
-cargo run --bin agent-desktop
+cargo run --bin wonderland-desktop
 ```
 
 如果已经构建过，也可以直接运行：
 
 ```powershell
-cargo build --release --bin agent-desktop
-& "$env:CARGO_TARGET_DIR\release\agent-desktop.exe"
+cargo build --release --bin wonderland-desktop
+& "$env:CARGO_TARGET_DIR\release\wonderland-desktop.exe"
 ```
 
-桌面版启动前需要先启动 Rust Agent 后端：
+桌面版启动前需要先启动 Wonderland 后端：
 
 ```powershell
 # 窗口 1：后端，先配置 OPENAI 或 CLIProxyAPI 环境变量
 cargo run
 
 # 窗口 2：桌面版
-cargo run --bin agent-desktop
+cargo run --bin wonderland-desktop
 ```
 
-首次使用时，在顶部“API 登录”区域选择服务，点击“账号登录”，再点击 OAuth 链接完成浏览器授权；授权完成后点击“检查登录”，随后点击“刷新模型”和“验证模型”。桌面版不会单独保存模型密钥，也不会直接读取 CLIProxyAPI OAuth token；账号验证由 Rust Agent 后端转发给 CLIProxyAPI 完成。
+首次使用时，在顶部“API 登录”区域选择服务，点击“账号登录”，再点击 OAuth 链接完成浏览器授权；授权完成后点击“检查登录”，随后点击“刷新模型”和“验证模型”。桌面版不会单独保存模型密钥，也不会直接读取 CLIProxyAPI OAuth token；账号验证由 Wonderland 后端转发给 CLIProxyAPI 完成。
 
 ## 安装包和 npm CLI
 
@@ -442,12 +442,12 @@ cargo run --bin agent-desktop
 
 安装包包含下列原生程序和运行组件：
 
-- `rust-ai-agent.exe`：后端服务。
-- `agent-desktop.exe`：桌面 GUI。
-- `agent-cli.exe`：原生 Rust CLI。
+- `wonderland.exe`：后端服务。
+- `wonderland-desktop.exe`：桌面 GUI。
+- `wonderland-cli.exe`：原生 Rust CLI。
 - `cliproxyapi\cli-proxy-api.exe`：随安装包分发的本机 CLIProxyAPI sidecar。
 
-桌面版使用 **Inno Setup 7** 制作标准 Windows 安装程序。安装包会把这三个程序安装到 `%LOCALAPPDATA%\Programs\Rust AI Agent`，创建开始菜单快捷方式（可选桌面快捷方式），并把安装目录加入当前用户的 PATH。因此安装桌面版后，重新打开 PowerShell 就可以直接运行 `agent-cli`，不需要额外安装 CLI。
+桌面版使用 **Inno Setup 7** 制作标准 Windows 安装程序。安装包会把这三个程序安装到 `%LOCALAPPDATA%\Programs\Wonderland`，创建开始菜单快捷方式（可选桌面快捷方式），并把安装目录加入当前用户的 PATH。因此安装桌面版后，重新打开 PowerShell 就可以直接运行 `wonderland-cli`，不需要额外安装 CLI。
 
 生成 Windows x64 安装包：
 
@@ -465,45 +465,45 @@ Set-Location F:\codex\Rust_for_AI-agent
 生成文件：
 
 ```text
-dist\Rust-AI-Agent-Setup-0.2.0-x64.exe
+dist\Wonderland-Setup-0.2.1-x64.exe
 ```
 
-双击该 `.exe` 并按向导安装。安装完成页可直接启动桌面版；桌面版启动器会在需要时隐藏启动本机 CLIProxyAPI 和 Rust Agent 后端服务。安装包会迁移并移除旧 ZIP 版的 `%LOCALAPPDATA%\RustAIAgent` 程序目录，但不会删除 `%LOCALAPPDATA%\RustAIAgentData` 或 CLIProxyAPI 的 OAuth 账号凭据。
+双击该 `.exe` 并按向导安装。安装完成页可直接启动桌面版；桌面版启动器会在需要时隐藏启动本机 CLIProxyAPI 和 Wonderland 后端服务。安装包会迁移并移除旧 ZIP 版的 `%LOCALAPPDATA%\RustAIAgent` 程序目录，但不会删除 `%LOCALAPPDATA%\WonderlandData` 或 CLIProxyAPI 的 OAuth 账号凭据。
 
 安装完成后可以双击桌面快捷方式启动后端和桌面版，也可以手动运行：
 
 ```powershell
-agent-cli health
-agent-cli chat
+wonderland-cli health
+wonderland-cli chat
 ```
 
 卸载：
 
-在 Windows 的“已安装的应用”中选择 **Rust AI Agent** 卸载，或运行安装目录中的 `unins000.exe`。卸载不会删除 `%LOCALAPPDATA%\RustAIAgentData` 或 CLIProxyAPI 的 `auth-dir` 账号凭据。
+在 Windows 的“已安装的应用”中选择 **Wonderland** 卸载，或运行安装目录中的 `unins000.exe`。卸载不会删除 `%LOCALAPPDATA%\WonderlandData` 或 CLIProxyAPI 的 `auth-dir` 账号凭据。
 
 ### npm 独立 CLI
 
-`packaging/npm/agent-cli` 是零依赖 npm 包，不要求安装 Rust。它通过 HTTP 调用已经启动的 Rust Agent 后端，适合单独安装 CLI：
+`packaging/npm/wonderland-cli` 是零依赖 npm 包，不要求安装 Rust。它通过 HTTP 调用已经启动的 Wonderland 后端，适合单独安装 CLI：
 
 ```powershell
-npm install --global rust-ai-agent-cli
-agent-cli --help
-agent-cli chat
-agent-cli run "分析我的项目"
+npm install --global rust-ai-wonderland-cli
+wonderland-cli --help
+wonderland-cli chat
+wonderland-cli run "分析我的项目"
 ```
 
 如果还没有发布到 npm，也可以直接安装本地 tarball：
 
 ```powershell
 Set-Location F:\codex\Rust_for_AI-agent
-npm.cmd pack .\packaging\npm\agent-cli --pack-destination .\dist
-npm.cmd install --global .\dist\rust-ai-agent-cli-0.2.0.tgz
+npm.cmd pack .\packaging\npm\wonderland-cli --pack-destination .\dist
+npm.cmd install --global .\dist\wonderland-cli-0.2.1.tgz
 ```
 
 需要发布 npm 包时：
 
 ```powershell
-Set-Location F:\codex\Rust_for_AI-agent\packaging\npm\agent-cli
+Set-Location F:\codex\Rust_for_AI-agent\packaging\npm\wonderland-cli
 npm login
 npm publish
 ```
@@ -513,7 +513,7 @@ CLI 默认连接 `http://127.0.0.1:8080`，也可以设置：
 ```powershell
 $env:AGENT_SERVER_URL = "http://127.0.0.1:8080"
 $env:AGENT_USER_ID = "alice"
-agent-cli health
+wonderland-cli health
 ```
 
 ## API 示例
@@ -529,7 +529,7 @@ curl http://127.0.0.1:8080/health
 ```bash
 curl -X POST http://127.0.0.1:8080/v1/agent/run \
   -H 'content-type: application/json' \
-  -d '{"session_id":"demo-session","user_id":"alice","input":"请研究 Rust AI Agent，并总结我的费用预算","mode":"bypassPermissions","cwd":"F:/codex/Rust_for_AI-agent"}'
+  -d '{"session_id":"demo-session","user_id":"alice","input":"请研究 Wonderland，并总结我的费用预算","mode":"bypassPermissions","cwd":"F:/codex/Rust_for_AI-agent"}'
 ```
 
 会话查询（会话由后端按 `session_id` 持久化，包含完整的多轮消息与工具调用轨迹）：

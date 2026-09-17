@@ -6,17 +6,17 @@ use std::{
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use reqwest::Client;
-use rust_ai_agent::{
+use serde::{Deserialize, Serialize};
+use tokio::time::sleep;
+use uuid::Uuid;
+use wonderland::{
     cliproxy::{CliProxyLoginStart, CliProxyLoginStatus, CliProxyModel},
     model::{AgentRequest, AgentResponse},
     permissions::PermissionMode,
 };
-use serde::{Deserialize, Serialize};
-use tokio::time::sleep;
-use uuid::Uuid;
 
 #[derive(Debug, Parser)]
-#[command(name = "agent-cli", version, about = "Rust AI Agent 终端客户端")]
+#[command(name = "wonderland-cli", version, about = "Wonderland 终端客户端")]
 struct Cli {
     /// Rust Agent HTTP 服务地址
     #[arg(
@@ -122,8 +122,8 @@ struct SessionSummary {
 #[derive(Debug, Deserialize, Serialize)]
 struct SessionDetail {
     id: String,
-    todos: Vec<rust_ai_agent::model::TodoItem>,
-    usage: rust_ai_agent::provider::Usage,
+    todos: Vec<wonderland::model::TodoItem>,
+    usage: wonderland::provider::Usage,
     updated_at: String,
 }
 
@@ -365,7 +365,7 @@ async fn interactive_chat(
     session_id: &str,
     mode: Option<PermissionMode>,
 ) -> Result<()> {
-    println!("Rust AI Agent CLI | session={session_id}");
+    println!("Wonderland CLI | session={session_id}");
     println!("输入消息开始对话，输入 /help 查看命令，输入 /exit 退出。\n");
     let stdin = io::stdin();
     loop {
@@ -439,7 +439,7 @@ async fn login_flow(api: &AgentApi, provider: &str, wait: bool) -> Result<()> {
         return Ok(());
     };
     if !wait {
-        println!("登录后执行：agent-cli --server ... login {provider} --wait 不会复用本次 state，请使用 HTTP status 接口或桌面版轮询。 ");
+        println!("登录后执行：wonderland-cli --server ... login {provider} --wait 不会复用本次 state，请使用 HTTP status 接口或桌面版轮询。 ");
         return Ok(());
     }
 

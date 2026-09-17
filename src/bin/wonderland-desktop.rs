@@ -7,13 +7,13 @@ use eframe::egui::{
     self, Align, Color32, Frame, Layout, RichText, ScrollArea, Stroke, TextEdit, Ui, Vec2, Visuals,
 };
 use reqwest::Client;
-use rust_ai_agent::cliproxy::{
-    CliProxyLoginStart, CliProxyLoginStatus, CliProxyModel, CliProxyVerification,
-};
-use rust_ai_agent::model::{AgentRequest, AgentResponse};
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
 use uuid::Uuid;
+use wonderland::cliproxy::{
+    CliProxyLoginStart, CliProxyLoginStatus, CliProxyModel, CliProxyVerification,
+};
+use wonderland::model::{AgentRequest, AgentResponse};
 
 const BG: Color32 = Color32::from_rgb(20, 20, 23);
 const PANEL: Color32 = Color32::from_rgb(28, 28, 32);
@@ -305,7 +305,7 @@ impl DesktopApp {
 
     fn render_header(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            ui.heading(RichText::new("Rust AI Agent").strong());
+            ui.heading(RichText::new("Wonderland").strong());
             ui.label(RichText::new("桌面工作台").color(MUTED));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(RichText::new(&self.status).color(MUTED));
@@ -893,28 +893,34 @@ fn friendly_api_error(message: &str) -> String {
     if normalized.contains("/v1/providers/cliproxyapi")
         && normalized.contains("503 service unavailable")
     {
-        return "CLIProxyAPI 尚未就绪。请关闭后重新打开桌面版；若仍失败，请查看 %LOCALAPPDATA%\\RustAIAgentData\\launcher.log。".to_string();
+        return "CLIProxyAPI 尚未就绪。请关闭后重新打开 Wonderland 桌面版；若仍失败，请查看 %LOCALAPPDATA%\\WonderlandData\\launcher.log。".to_string();
     }
     if normalized.contains("/v1/providers/cliproxyapi")
         && normalized.contains("500 internal server error")
     {
-        return "CLIProxyAPI 启动或本机连接失败。请查看 %LOCALAPPDATA%\\RustAIAgentData\\launcher.log。".to_string();
+        return "CLIProxyAPI 启动或本机连接失败。请查看 %LOCALAPPDATA%\\WonderlandData\\launcher.log。".to_string();
     }
     if normalized.contains("connection refused") || normalized.contains("error sending request") {
-        return "无法连接 Rust Agent 后端。请关闭后重新打开桌面版。".to_string();
+        return "无法连接 Wonderland 后端。请关闭后重新打开桌面版。".to_string();
     }
     message.to_string()
 }
 
 fn main() -> eframe::Result {
+    let icon = egui::IconData {
+        rgba: include_bytes!("../../assets/icons/icon.rgba").to_vec(),
+        width: 256,
+        height: 256,
+    };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(Vec2::new(1280.0, 820.0))
-            .with_min_inner_size(Vec2::new(940.0, 620.0)),
+            .with_min_inner_size(Vec2::new(940.0, 620.0))
+            .with_icon(Arc::new(icon)),
         ..Default::default()
     };
     eframe::run_native(
-        "Rust AI Agent",
+        "Wonderland",
         options,
         Box::new(|cc| Ok(Box::new(DesktopApp::new(cc)))),
     )

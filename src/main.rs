@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use anyhow::Result;
-use rust_ai_agent::{
+use wonderland::{
     agent::AgentRuntime,
     api::{router, AppState},
     cliproxy::CliProxyApiClient,
@@ -56,7 +56,7 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| "127.0.0.1:8080".to_string())
         .parse()?;
     let listener = tokio::net::TcpListener::bind(address).await?;
-    tracing::info!(%address, "Rust AI Agent API started");
+    tracing::info!(%address, "Wonderland API started");
     axum::serve(
         listener,
         router(AppState {

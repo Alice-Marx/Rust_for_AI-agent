@@ -212,6 +212,11 @@ pub fn default_skill_directories(data_dir: &Path) -> Vec<SkillDirectory> {
         .or_else(|| env::current_dir().ok());
     if let Some(project_dir) = project_dir {
         directories.push(SkillDirectory::new(
+            project_dir.join(".wonderland").join("skills"),
+            SkillSource::Project,
+        ));
+        // 旧版目录名兼容保留。
+        directories.push(SkillDirectory::new(
             project_dir.join(".rust-ai-agent").join("skills"),
             SkillSource::Project,
         ));

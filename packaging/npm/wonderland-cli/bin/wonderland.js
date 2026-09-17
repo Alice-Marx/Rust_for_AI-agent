@@ -7,17 +7,17 @@ const defaultServer = process.env.AGENT_SERVER_URL || "http://127.0.0.1:8080";
 const defaultUser = process.env.AGENT_USER_ID || "local-user";
 
 function usage() {
-  console.log(`Rust AI Agent npm CLI
+  console.log(`Wonderland npm CLI
 
 Usage:
-  agent-cli [options] chat [prompt]
-  agent-cli [options] run <input>
-  agent-cli [options] health
-  agent-cli [options] models
-  agent-cli [options] verify [--model <model>]
-  agent-cli [options] login <provider> [--wait]
-  agent-cli [options] sessions
-  agent-cli [options] session <id>
+  wonderland-cli [options] chat [prompt]
+  wonderland-cli [options] run <input>
+  wonderland-cli [options] health
+  wonderland-cli [options] models
+  wonderland-cli [options] verify [--model <model>]
+  wonderland-cli [options] login <provider> [--wait]
+  wonderland-cli [options] sessions
+  wonderland-cli [options] session <id>
 
 Options:
   --server <url>       Rust Agent URL (default: ${defaultServer})
@@ -121,7 +121,7 @@ async function chat(options, prompt) {
     return;
   }
   const rl = readline.createInterface({ input: stdin, output: stdout });
-  console.log(`Rust AI Agent npm CLI | session=${options.sessionId}`);
+  console.log(`Wonderland npm CLI | session=${options.sessionId}`);
   console.log("输入消息开始对话，输入 /help 查看命令，输入 /exit 退出。\n");
   try {
     while (true) {

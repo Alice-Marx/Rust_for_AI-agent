@@ -1,16 +1,32 @@
 $ErrorActionPreference = "Stop"
 
 $installDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$backend = Join-Path $installDir "rust-ai-agent.exe"
-$desktop = Join-Path $installDir "agent-desktop.exe"
+$backend = Join-Path $installDir "wonderland.exe"
+$desktop = Join-Path $installDir "wonderland-desktop.exe"
 $sidecar = Join-Path $installDir "cliproxyapi\cli-proxy-api.exe"
-$dataDir = Join-Path $env:LOCALAPPDATA "RustAIAgentData"
+$dataDir = Join-Path $env:LOCALAPPDATA "WonderlandData"
+$legacyDataDir = Join-Path $env:LOCALAPPDATA "RustAIAgentData"
 $proxyDataDir = Join-Path $dataDir "CLIProxyAPI"
 $proxyConfig = Join-Path $proxyDataDir "config.yaml"
 $launcherSettings = Join-Path $proxyDataDir "launcher-settings.json"
 $launcherLog = Join-Path $dataDir "launcher.log"
 $proxyPort = 18317
 $proxyBaseUrl = "http://127.0.0.1:$proxyPort"
+
+# 数据目录迁移：旧版 RustAIAgentData → WonderlandData（如果新版目录不存在）
+if (-not (Test-Path -LiteralPath $dataDir) -and (Test-Path -LiteralPath $legacyDataDir)) {
+    try {
+        Move-Item -LiteralPath $legacyDataDir -Destination $dataDir -ErrorAction Stop
+        Write-Host "已迁移数据目录：$legacyDataDir → $dataDir"
+    } catch {
+        Write-Warning "迁移失败，将使用旧版目录：$_"
+        $dataDir = $legacyDataDir
+        $proxyDataDir = Join-Path $dataDir "CLIProxyAPI"
+        $proxyConfig = Join-Path $proxyDataDir "config.yaml"
+        $launcherSettings = Join-Path $proxyDataDir "launcher-settings.json"
+        $launcherLog = Join-Path $dataDir "launcher.log"
+    }
+}
 
 New-Item -ItemType Directory -Force -Path $dataDir, $proxyDataDir | Out-Null
 
@@ -102,19 +118,19 @@ function Get-AgentHealth {
 function Stop-ManagedBackend {
     param([string]$ExecutablePath)
 
-    Get-CimInstance Win32_Process -Filter "Name = 'rust-ai-agent.exe'" -ErrorAction SilentlyContinue |
+    Get-CimInstance Win32_Process -Filter "Name = 'wonderland.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.ExecutablePath -and $_.ExecutablePath -ieq $ExecutablePath } |
         ForEach-Object {
-            Write-LauncherLog "停止旧的受管 Rust Agent 进程：$($_.ProcessId)"
+            Write-LauncherLog "停止旧的受管 Wonderland 进程：$($_.ProcessId)"
             Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
         }
 }
 
 if (-not (Test-Path -LiteralPath $backend -PathType Leaf) -or -not (Test-Path -LiteralPath $desktop -PathType Leaf)) {
-    throw "Rust AI Agent 安装不完整。请重新运行安装包。"
+    throw "Wonderland 安装不完整。请重新运行安装包。"
 }
 if (-not (Test-Path -LiteralPath $sidecar -PathType Leaf)) {
-    throw "CLIProxyAPI sidecar 缺失。请重新运行 Rust AI Agent 安装包。"
+    throw "CLIProxyAPI sidecar 缺失。请重新运行 Wonderland 安装包。"
 }
 
 $settings = Get-LauncherSettings
@@ -165,17 +181,17 @@ if ($null -eq $health -or -not [bool]$health.cliproxyapi_configured) {
     Stop-ManagedBackend -ExecutablePath $backend
     Start-Sleep -Milliseconds 300
     if ($null -eq (Get-AgentHealth)) {
-        Write-LauncherLog "启动 Rust Agent 后端。"
+        Write-LauncherLog "启动 Wonderland 后端。"
         Start-Process -FilePath $backend `
             -WorkingDirectory $installDir `
             -WindowStyle Hidden `
-            -RedirectStandardOutput (Join-Path $dataDir "rust-ai-agent.out.log") `
-            -RedirectStandardError (Join-Path $dataDir "rust-ai-agent.err.log")
+            -RedirectStandardOutput (Join-Path $dataDir "wonderland.out.log") `
+            -RedirectStandardError (Join-Path $dataDir "wonderland.err.log")
         if (-not (Wait-ForLocalHttpEndpoint "http://127.0.0.1:8080/health")) {
-            Write-LauncherLog "Rust Agent 后端未能在 15 秒内启动。"
+            Write-LauncherLog "Wonderland 后端未能在 15 秒内启动。"
         }
     } else {
-        Write-LauncherLog "8080 端口已由其他 Rust Agent 占用，未替换该进程。"
+        Write-LauncherLog "8080 端口已由其他 Wonderland 占用，未替换该进程。"
     }
 }
 

@@ -1,12 +1,12 @@
-; Rust AI Agent Windows installer
+; Wonderland Windows installer
 ; Compile with Inno Setup 7. The build script passes MyAppVersion from Cargo.toml.
 
-#define MyAppName "Rust AI Agent"
+#define MyAppName "Wonderland"
 #define MyAppPublisher "AliceMarx"
 #define MyAppURL "https://github.com/Alice-Marx/Rust_for_AI-agent"
-#define MyAppExeName "agent-desktop.exe"
+#define MyAppExeName "wonderland-desktop.exe"
 #ifndef MyAppVersion
-  #define MyAppVersion "0.2.0"
+  #define MyAppVersion "0.2.1"
 #endif
 #define BuildRoot "..\..\dist\staging\windows-x64"
 
@@ -18,11 +18,11 @@ AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
-DefaultDirName={localappdata}\Programs\Rust AI Agent
+DefaultDirName={localappdata}\Programs\Wonderland
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=..\..\dist
-OutputBaseFilename=Rust-AI-Agent-Setup-{#MyAppVersion}-x64
+OutputBaseFilename=Wonderland-Setup-{#MyAppVersion}-x64
 SetupArchitecture=x64
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -47,25 +47,26 @@ Name: "chinesesimp"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
 
 [Files]
-Source: "{#BuildRoot}\rust-ai-agent.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#BuildRoot}\agent-desktop.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#BuildRoot}\agent-cli.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BuildRoot}\wonderland.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BuildRoot}\wonderland-desktop.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BuildRoot}\wonderland-cli.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BuildRoot}\cliproxyapi\*"; DestDir: "{app}\cliproxyapi"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "Start-RustAIAgent.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "Start-Wonderland.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\README.md"; DestDir: "{app}"; DestName: "README.md"; Flags: ignoreversion
 Source: "{#BuildRoot}\THIRD-PARTY-NOTICES\*"; DestDir: "{app}\THIRD-PARTY-NOTICES"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [InstallDelete]
-; Remove ZIP-era program files after migration. Persistent user data stays in
-; {localappdata}\RustAIAgentData and is never removed by this installer.
-Type: filesandordirs; Name: "{localappdata}\RustAIAgent"
+; Remove old program directories after migration. Persistent user data stays in
+; {localappdata}\WonderlandData (or migrated from RustAIAgentData) and is never removed.
+Type: filesandordirs; Name: "{localappdata}\Rust AI Agent"
+Type: filesandordirs; Name: "{localappdata}\Programs\Rust AI Agent"
 
 [Icons]
-Name: "{autoprograms}\{#MyAppName}"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Start-RustAIAgent.ps1"""; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Start-RustAIAgent.ps1"""; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{autoprograms}\{#MyAppName}"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Start-Wonderland.ps1"""; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Start-Wonderland.ps1"""; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Start-RustAIAgent.ps1"""; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Start-Wonderland.ps1"""; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
 
 [Code]
 function PathContains(const PathValue, Entry: String): Boolean;

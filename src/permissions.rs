@@ -259,12 +259,14 @@ pub fn parse_rule_string(s: &str) -> Option<(String, Option<String>)> {
     Some((s.to_string(), None))
 }
 
-/// 从 `<cwd>/.claude/settings.json` 与 `<cwd>/.rust-ai-agent/settings.json` 的
+/// 从 `<cwd>/.claude/settings.json` 与 `<cwd>/.wonderland/settings.json`
+/// （旧版 `.rust-ai-agent/settings.json` 兼容保留）的
 /// `permissions.allow/ask/deny` 数组加载规则；文件缺失或解析失败则忽略该文件。
 pub fn load_rules(cwd: &Path) -> Vec<PermissionRule> {
     let mut rules = Vec::new();
     let files = [
         cwd.join(".claude").join("settings.json"),
+        cwd.join(".wonderland").join("settings.json"),
         cwd.join(".rust-ai-agent").join("settings.json"),
     ];
     for path in files {

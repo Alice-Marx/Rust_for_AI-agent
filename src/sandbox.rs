@@ -70,8 +70,7 @@ impl SandboxExecutor {
             bail!("code exceeds the sandbox input limit")
         }
 
-        let directory =
-            std::env::temp_dir().join(format!("rust-ai-agent-sandbox-{}", Uuid::new_v4()));
+        let directory = std::env::temp_dir().join(format!("wonderland-sandbox-{}", Uuid::new_v4()));
         fs::create_dir_all(&directory).await?;
         let code_path = directory.join("main.py");
         fs::write(&code_path, request.code).await?;

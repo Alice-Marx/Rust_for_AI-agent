@@ -103,7 +103,10 @@ $legacyArtifacts = @(
     (Join-Path $distRoot "Rust-AI-Agent-windows-x64"),
     (Join-Path $distRoot "Rust-AI-Agent-Setup-0.1.0-x64.exe"),
     (Join-Path $distRoot "Rust-AI-Agent-Setup-0.1.1-x64.exe"),
-    (Join-Path $distRoot "Rust-AI-Agent-Setup-0.2.0-x64.exe")
+    (Join-Path $distRoot "Rust-AI-Agent-Setup-0.2.0-x64.exe"),
+    (Join-Path $distRoot "rust-ai-agent-cli-0.2.0.tgz"),
+    (Join-Path $distRoot "wonderland-cli-0.2.0.tgz"),
+    (Join-Path $distRoot "Wonderland-Setup-0.2.0-x64.exe")
 )
 foreach ($legacyArtifact in $legacyArtifacts) {
     if (Test-Path -LiteralPath $legacyArtifact) {
@@ -115,7 +118,7 @@ if (Test-Path -LiteralPath $staging) {
 }
 New-Item -ItemType Directory -Force -Path $staging | Out-Null
 
-foreach ($binary in @("rust-ai-agent.exe", "agent-desktop.exe", "agent-cli.exe")) {
+foreach ($binary in @("wonderland.exe", "wonderland-desktop.exe", "wonderland-cli.exe")) {
     $source = Join-Path $TargetDir "release\$binary"
     if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
         throw "缺少发布二进制文件：$source"
@@ -133,16 +136,16 @@ $noticesDestination = Join-Path $staging "THIRD-PARTY-NOTICES"
 Copy-Item -LiteralPath $noticesSource -Destination $noticesDestination -Recurse -Force
 
 $compiler = Resolve-InnoCompiler -RequestedPath $InnoCompiler
-$script = Join-Path $repoRoot "packaging\windows\rust-ai-agent.iss"
+$script = Join-Path $repoRoot "packaging\windows\wonderland.iss"
 & $compiler "/DMyAppVersion=$version" $script
 if ($LASTEXITCODE -ne 0) {
     throw "Inno Setup 编译失败，退出码：$LASTEXITCODE"
 }
 
-$installer = Join-Path $distRoot "Rust-AI-Agent-Setup-$version-x64.exe"
+$installer = Join-Path $distRoot "Wonderland-Setup-$version-x64.exe"
 if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
     throw "Inno Setup 没有生成预期安装包：$installer"
 }
 
 Write-Host "Inno Setup 安装包已生成：$installer"
-Write-Host "安装时会同时安装桌面版、后端服务和 agent-cli.exe。"
+Write-Host "安装时会同时安装桌面版、后端服务和 wonderland-cli.exe。"

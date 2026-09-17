@@ -185,7 +185,7 @@ fn truncate_chars_in_place(text: &mut String, max: usize) {
     }
 }
 
-const IDENTITY_SECTION: &str = r#"You are Rust AI Agent, an AI coding assistant. You help users with software engineering tasks by reading, editing, and searching code, and by running commands.
+const IDENTITY_SECTION: &str = r#"You are Wonderland, an AI coding assistant. You help users with software engineering tasks by reading, editing, and searching code, and by running commands.
 
 ## Tool Usage Rules
 
@@ -403,7 +403,7 @@ mod tests {
 
         let prompt = build_system_prompt(&env, Some("skill list"), Some("extra rules"));
 
-        let identity = prompt.find("You are Rust AI Agent").unwrap();
+        let identity = prompt.find("You are Wonderland").unwrap();
         let safety = prompt.find("Safety Guidelines").unwrap();
         let extra = prompt.find("extra rules").unwrap();
         let skills = prompt.find("skill list").unwrap();

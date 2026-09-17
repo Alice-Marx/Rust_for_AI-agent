@@ -12,7 +12,7 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 /// 返回给模型的正文上限（字符）。
 const MAX_TEXT_CHARS: usize = 20_000;
-const USER_AGENT: &str = concat!("rust-ai-agent/", env!("CARGO_PKG_VERSION"));
+const USER_AGENT: &str = concat!("wonderland/", env!("CARGO_PKG_VERSION"));
 
 fn client() -> Client {
     static CLIENT: OnceLock<Client> = OnceLock::new();
