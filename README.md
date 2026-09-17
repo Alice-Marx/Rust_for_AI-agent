@@ -5,8 +5,10 @@
 当前实现把 agentic 编码助手的完整闭环打通：
 
 - Agentic loop：模型响应中出现 `tool_use` 块时执行工具并把 `tool_result` 写回会话，直到模型停止调用工具或达到最大轮数（默认 25，可用 `with_max_turns` 调整）；工具失败与权限拒绝都会作为错误结果反馈给模型，不中断循环。
-- 九个内置工具：`FileRead` / `FileWrite` / `FileEdit` / `Glob` / `Grep` / `Bash` / `WebFetch` / `Task` / `TodoWrite`。`FileEdit` 做精确字符串替换并带 mtime + 内容 hash 的 staleness 检查（文件在读取后被外部修改会拒绝写入）；`Bash` 复合命令按 `&&` / `||` / `;` / `|` 拆分后逐段做权限评估，超长输出自动落盘；`WebFetch` 抓取网页并抽取正文（拒绝 localhost/私网地址，按 `WebFetch(domain:example.com)` 域名规则授权）；`Task` 把子任务委派给已注册的子 Agent（按 `Task(agent:research)` 规则授权）；`TodoWrite` 维护会话级任务清单（免权限提示，清单作为动态段注入系统提示词并持久化到会话）。
-- 权限管线：五种权限模式（`default` / `plan` / `acceptEdits` / `bypassPermissions` / `dontAsk`）+ 从 `<cwd>/.claude/settings.json` 与 `<cwd>/.wonderland/settings.json` 加载的 `allow / ask / deny` 规则管线（首命中胜出），外加不可绕过的 `.git/` 内部与 `.claude/` 目录写保护。
+- 十五个内置工具：`FileRead` / `FileWrite` / `FileEdit` / `Glob` / `Grep` / `Bash` / `WebFetch` / `Task` / `TodoWrite` / `ApplyPatch` / `NotebookEdit` / `TaskOutput` / `TaskStop` / `EnterPlanMode` / `ExitPlanMode`。`FileEdit` 做精确字符串替换并带 mtime + 内容 hash 的 staleness 检查（文件在读取后被外部修改会拒绝写入）；`Bash` 复合命令按 `&&` / `||` / `;` / `|` 拆分后逐段做权限评估，超长输出自动落盘，`run_in_background=true` 把长驻命令放进后台并由 `TaskOutput` / `TaskStop` 管理（借鉴 Claude Code）；`WebFetch` 抓取网页并抽取正文（拒绝 localhost/私网地址，按 `WebFetch(domain:example.com)` 域名规则授权）；`Task` 把子任务委派给子 Agent（内置 research / expense，或 `.claude/agents/*.md` 与 `.wonderland/agents/*.md` 文件定义的子代理，按 `Task(agent:name)` 规则授权）；`TodoWrite` 维护会话级任务清单（免权限提示，清单作为动态段注入系统提示词并持久化到会话）；`ApplyPatch` 借鉴 Codex 的 V4A 多文件补丁（`*** Update File:` / `@@` 定位提示 + 三级容错匹配，无需行号）；`NotebookEdit` 编辑 Jupyter `.ipynb` 单元格（按 cell id 或序号 replace/insert/delete）；`EnterPlanMode` / `ExitPlanMode` 在 run 中途切换 plan 只读模式并可在退出时恢复原权限模式。
+- 权限管线：五种权限模式（`default` / `plan` / `acceptEdits` / `bypassPermissions` / `dontAsk`）+ 从 `<cwd>/.claude/settings.json` 与 `<cwd>/.wonderland/settings.json` 加载的 `allow / ask / deny` 规则管线（首命中胜出），外加不可绕过的 `.git/` 内部与 `.claude/`、`.wonderland/` 目录写保护。
+- Hooks：借鉴 Claude Code 的命令 hook 机制，`settings.json` 的 `hooks` 字段配置 `PreToolUse` / `PostToolUse` / `SessionStart` / `Stop` 事件（matcher 支持 `Bash|FileWrite` 多值与空通配）；hook 进程从 stdin 收到事件 JSON，退出码 2 拦截操作（stderr 作为拒绝理由），stdout JSON 的 `decision: block|approve` 与 `additionalContext` 参与决策或注入上下文。
+- 文件定义子代理：`.claude/agents/*.md`（或 `.wonderland/agents/*.md`）用 YAML frontmatter（`name` / `description` / `tools` / `max_turns`）定义子代理，正文作为其系统提示词；`Task` 工具按名委派，frontmatter 的 `tools` 既是工具池也是白名单，Task/TodoWrite 禁止出现在子代理中（不允许嵌套委派）。
 - 会话持久化与自动压缩：每个会话一个 JSON 文件，每轮落盘，崩溃后可恢复完整工具调用轨迹；上下文估算超过阈值时自动把历史压缩为摘要，并保证不切断 `tool_use / tool_result` 配对。
 - 上下文构建：系统提示词按静态段（身份、工具规范、安全准则）在前、动态段（技能、环境信息、git 状态、项目指令）在后的顺序组织以保护 prompt cache；层级加载 `~/.claude/CLAUDE.md` 与从根到 `cwd` 各级的 `AGENTS.md` / `CLAUDE.md` / `.claude/CLAUDE.md`，支持 `@path` include。
 - 可观测性：`tracing` + `tower-http::TraceLayer`，每次 HTTP 请求、Agent 执行、Agent 委派都有 span；通过 `RUST_LOG` 调整级别。
@@ -30,7 +32,7 @@ src/
 ├── provider.rs     统一消息/工具调用协议：ChatMessage / ContentBlock /
 │                   ToolDefinition / Usage / StopReason / ModelProvider；
 │                   OpenAI-compatible 兼容层（请求构建与响应解析为纯函数）
-├── tools/          工具注册表与九个内置工具
+├── tools/          工具注册表与十五个内置工具（含后台任务 / V4A 补丁 / notebook / plan mode）
 │   ├── fs.rs       FileRead / FileWrite / FileEdit + 会话内已读文件状态
 │   │               （FileWrite/FileEdit 要求先读后写，带 staleness 检查）
 │   ├── search.rs   Glob / Grep（尊重 .gitignore，跳过 hidden 与 .git）
@@ -398,6 +400,55 @@ $url = "上一步输出的 OAuth URL"
 Start-Process $url
 ```
 
+## Hooks 与文件定义子代理
+
+### Hooks（借鉴 Claude Code）
+
+在项目 `.claude/settings.json` 或 `.wonderland/settings.json` 中配置命令 hook，引擎会在对应事件点执行并把结果纳入决策：
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|FileWrite",
+        "hooks": [
+          {"type": "command", "command": "python check_policy.py", "timeout": 30}
+        ]
+      }
+    ],
+    "SessionStart": [
+      {"hooks": [{"type": "command", "command": "echo 记住团队约定：所有提交用中文"}]}
+    ]
+  }
+}
+```
+
+- 支持事件：`PreToolUse`（可拦截）、`PostToolUse`（可附加上下文）、`SessionStart`（输出并入用户提示词）、`Stop`（仅通知）。
+- `matcher` 为空或 `"*"` 匹配所有工具，`"Bash|FileWrite"` 多值精确匹配。
+- hook 进程从 stdin 收到 `{"event","session_id","tool_name","tool_input","tool_output"}` JSON；环境变量 `WONDERLAND_PROJECT_DIR` 指向工作目录。
+- 退出码 `2` = 拦截（stderr 作为拒绝理由反馈给模型）；退出码 `0` 时 stdout 若为 JSON，`{"decision": "block", "reason": "..."}` 拦截、`{"decision": "approve"}` 直接放行、`{"additionalContext": "..."}` 注入附加上下文；stdout 为纯文本时按附加上下文处理；其他退出码忽略。hook 超时（默认 60 秒）按非阻塞处理。
+
+### 文件定义子代理（借鉴 Claude Code）
+
+在 `.claude/agents/researcher.md`（或 `.wonderland/agents/`）中定义：
+
+```markdown
+---
+name: explorer
+description: 只读地探索代码库并回答结构问题
+tools:
+  - FileRead
+  - Glob
+  - Grep
+max_turns: 10
+---
+
+你是代码库探索专家。用只读工具回答问题，引用具体文件路径与行号，不做任何修改。
+```
+
+之后模型就能通过 `Task(agent:explorer, task="...")` 委派。frontmatter 的 `tools` 既是该子代理的工具池也是权限白名单（缺省只有 `FileRead` / `Glob` / `Grep` / `WebFetch` 四个只读工具）；`Task` 与 `TodoWrite` 永远不进入子代理，避免嵌套委派。文件代理在每次 run 开始时从请求的 `cwd` 加载，与内置 research / expense 代理一起列在系统提示词中。
+
 ## 桌面版应用
 
 桌面版是原生 Rust `egui` 应用，界面按 ChatGPT 类工作台设计：
@@ -465,7 +516,7 @@ Set-Location F:\codex\Rust_for_AI-agent
 生成文件：
 
 ```text
-dist\Wonderland-Setup-0.2.1-x64.exe
+dist\Wonderland-Setup-0.3.0-x64.exe
 ```
 
 双击该 `.exe` 并按向导安装。安装完成页可直接启动桌面版；桌面版启动器会在需要时隐藏启动本机 CLIProxyAPI 和 Wonderland 后端服务。安装包会迁移并移除旧 ZIP 版的 `%LOCALAPPDATA%\RustAIAgent` 程序目录，但不会删除 `%LOCALAPPDATA%\WonderlandData` 或 CLIProxyAPI 的 OAuth 账号凭据。
@@ -497,7 +548,7 @@ wonderland-cli run "分析我的项目"
 ```powershell
 Set-Location F:\codex\Rust_for_AI-agent
 npm.cmd pack .\packaging\npm\wonderland-cli --pack-destination .\dist
-npm.cmd install --global .\dist\wonderland-cli-0.2.1.tgz
+npm.cmd install --global .\dist\wonderland-cli-0.3.0.tgz
 ```
 
 需要发布 npm 包时：

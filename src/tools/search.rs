@@ -324,6 +324,9 @@ mod tests {
             output_dir: dir.join("out"),
             session_id: "test".to_string(),
             todos: Vec::new(),
+            background: crate::tools::background::BackgroundTaskRegistry::new(),
+            mode: crate::permissions::PermissionMode::Default,
+            pre_plan_mode: None,
         }
     }
 

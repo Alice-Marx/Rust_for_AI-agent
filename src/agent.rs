@@ -1,4 +1,8 @@
-use std::{path::PathBuf, sync::Arc, time::Instant};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Instant,
+};
 
 use anyhow::Result;
 use serde_json::Value;
@@ -137,6 +141,19 @@ impl AgentRuntime {
         let mode = request.mode.unwrap_or(PermissionMode::Default);
         let rules = permissions::load_rules(&cwd);
         let model = request.model.clone().unwrap_or_default();
+        // 借鉴 Claude Code：hook 配置随 run 从项目 settings 加载。
+        let hooks = crate::hooks::load_hook_config(&cwd);
+        // 借鉴 Claude Code：agents/*.md 文件定义的子代理按需注册进目录。
+        let file_agents = crate::agent_defs::register_file_agents(
+            &cwd,
+            &self.directory,
+            self.provider.clone(),
+            &self.tools,
+        )
+        .await;
+        if !file_agents.is_empty() {
+            info!(agents = ?file_agents, "registered file-defined sub-agents");
+        }
 
         let memories = self
             .memory
@@ -153,6 +170,18 @@ impl AgentRuntime {
             activated_skills = skill_context.activated.len(),
             "prepared local skill context"
         );
+
+        // SessionStart hook：输出作为附加上下文并入用户提示词。
+        let session_start = crate::hooks::run_hooks(
+            &hooks,
+            "SessionStart",
+            &request.session_id,
+            "",
+            &serde_json::json!({ "input": request.input }),
+            None,
+            &cwd,
+        )
+        .await;
 
         let mut plan = self.planner.plan(&request.input).await?;
         if plan.steps.len() > self.max_steps {
@@ -173,8 +202,10 @@ impl AgentRuntime {
         let plan_json = serde_json::to_string(&plan)?;
         let env = gather_environment(&cwd);
         let system_prompt = build_system_prompt(&env, Some(&skills_section(&skill_context)), None);
+        let subagent_section = crate::agent_defs::subagent_listing(&self.directory).await;
+        let session_start_context = session_start.additional_context.unwrap_or_default();
         let user_prompt = format!(
-            "用户请求：{}\n\n计划：{}\n\n相关长期记忆：{}\n\n协作 Agent 结果：{}\n\n已启用本地技能（仅任务指南，不授予工具权限）：{}",
+            "用户请求：{}\n\n计划：{}\n\n相关长期记忆：{}\n\n协作 Agent 结果：{}\n\n已启用本地技能（仅任务指南，不授予工具权限）：{}{}\n\n{}",
             request.input,
             plan_json,
             if memory_context.is_empty() {
@@ -188,6 +219,12 @@ impl AgentRuntime {
                 &delegated_context
             },
             skill_context.instructions,
+            if session_start_context.is_empty() {
+                String::new()
+            } else {
+                format!("\n\n会话启动 hook 上下文：{session_start_context}")
+            },
+            subagent_section,
         );
 
         let mut session = self.sessions.load_or_create(&request.session_id)?;
@@ -201,11 +238,14 @@ impl AgentRuntime {
             .join("tool-results")
             .join(crate::session::sanitize_id(&request.session_id));
         let mut tool_ctx = ToolContext {
-            working_dir: cwd,
+            working_dir: cwd.clone(),
             read_state: ReadFileState::new(),
             output_dir,
             session_id: request.session_id.clone(),
             todos: session.todos.clone(),
+            background: crate::tools::BackgroundTaskRegistry::new(),
+            mode,
+            pre_plan_mode: None,
         };
 
         let mut final_text = String::new();
@@ -262,7 +302,15 @@ impl AgentRuntime {
             for (id, name, input) in tool_uses {
                 tool_calls += 1;
                 let output = self
-                    .execute_tool(&name, input, &mut tool_ctx, mode, &rules, handler.as_ref())
+                    .execute_tool(
+                        &name,
+                        input,
+                        &mut tool_ctx,
+                        &rules,
+                        handler.as_ref(),
+                        &hooks,
+                        &cwd,
+                    )
                     .await;
                 results.push(ContentBlock::tool_result(
                     id,
@@ -277,6 +325,18 @@ impl AgentRuntime {
             self.sessions.save(&mut session)?;
         }
         info!(turns, tool_calls, "agentic loop finished");
+
+        // Stop hook：run 结束时触发（输出仅供日志与前端通知）。
+        let _stop_outcome = crate::hooks::run_hooks(
+            &hooks,
+            "Stop",
+            &request.session_id,
+            "",
+            &serde_json::json!({ "output": final_text }),
+            None,
+            &cwd,
+        )
+        .await;
 
         mark_completed(&mut plan);
         let reflection = self.planner.reflect(&plan, &final_text).await?;
@@ -320,16 +380,19 @@ impl AgentRuntime {
     }
 
     /// 执行一次工具调用：查找工具 → 权限评估（Bash 复合命令逐段评估，
-    /// 任何一段 Deny 则整体 Deny，全部 Allow 才 Allow，否则 Ask）→ 调用。
+    /// 任何一段 Deny 则整体 Deny，全部 Allow 才 Allow，否则 Ask）→
+    /// PreToolUse hook（可拦截）→ 调用 → PostToolUse hook。
     /// 所有失败都转成 `ToolOutput::err` 反馈给模型，不中断 loop。
+    #[allow(clippy::too_many_arguments)]
     async fn execute_tool(
         &self,
         name: &str,
         input: Value,
         tool_ctx: &mut ToolContext,
-        mode: PermissionMode,
         rules: &[PermissionRule],
         handler: &dyn PermissionHandler,
+        hooks: &crate::hooks::HookConfig,
+        cwd: &Path,
     ) -> ToolOutput {
         let Some(tool) = self.tools.find(name) else {
             return ToolOutput::err(format!("Unknown tool: {name}"));
@@ -371,7 +434,7 @@ impl AgentRuntime {
                 is_read_only,
                 is_destructive,
                 target_paths: target_paths.clone(),
-                mode,
+                mode: tool_ctx.mode,
                 rules,
             }) {
                 PermissionDecision::Deny { reason } => {
@@ -410,10 +473,54 @@ impl AgentRuntime {
             }
         }
 
-        match tool.call(input, tool_ctx).await {
+        // PreToolUse hook：权限规则放行后再问一次 hook（退出码 2 / decision
+        // = block 可拦截本次调用）。
+        let pre_hook = crate::hooks::run_hooks(
+            hooks,
+            "PreToolUse",
+            &tool_ctx.session_id,
+            name,
+            &input,
+            None,
+            cwd,
+        )
+        .await;
+        if let crate::hooks::HookDecision::Block { reason } = pre_hook.decision {
+            return ToolOutput::err(
+                reason.unwrap_or_else(|| format!("blocked by PreToolUse hook for {name}")),
+            );
+        }
+
+        let call_result = tool.call(input, tool_ctx).await;
+        let mut output = match call_result {
             Ok(output) => output,
             Err(error) => ToolOutput::err(format!("Tool '{name}' failed: {error:#}")),
+        };
+
+        // PostToolUse hook：附加上下文追加到工具结果。
+        let post_hook = crate::hooks::run_hooks(
+            hooks,
+            "PostToolUse",
+            &tool_ctx.session_id,
+            name,
+            &Value::Null,
+            Some(&output.content),
+            cwd,
+        )
+        .await;
+        if let crate::hooks::HookDecision::Block { reason } = post_hook.decision {
+            output.is_error = true;
+            if let Some(reason) = reason {
+                output
+                    .content
+                    .push_str(&format!("\n[PostToolUse hook] {reason}"));
+            }
+        } else if let Some(context) = post_hook.additional_context {
+            output
+                .content
+                .push_str(&format!("\n[hook context] {context}"));
         }
+        output
     }
 
     /// 自动压缩：上下文估算超过压缩阈值（即 `context_window` 减去
@@ -1055,6 +1162,120 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert!(requests[0].system.contains("对话压缩"));
         assert!(requests[0].tools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pre_tool_use_hook_can_block_tool_call() {
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_use_response(
+                "call_1",
+                "FileWrite",
+                json!({"file_path": "hooked.txt", "content": "x"}),
+            ),
+            text_response("hook 拦截了写入"),
+        ]));
+        let (runtime, cwd) = test_runtime(provider.clone()).await;
+        // 项目规则放行 FileWrite，但 PreToolUse hook 用退出码 2 拦截。
+        std::fs::write(
+            cwd.path().join(".claude").join("settings.json"),
+            r#"{"permissions": {"allow": ["FileWrite"]}, "hooks": {"PreToolUse": [{"matcher": "FileWrite", "hooks": [{"type": "command", "command": "cat > /dev/null; echo no-writes-allowed >&2; exit 2", "timeout": 30}]}]}}"#,
+        )
+        .unwrap();
+
+        let response = runtime
+            .run(request("hookblock", cwd.path(), None, "写入文件"))
+            .await
+            .unwrap();
+
+        assert_eq!(response.output, "hook 拦截了写入");
+        let requests = provider.requests();
+        let tool_result = requests[1]
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .find_map(|block| match block {
+                ContentBlock::ToolResult {
+                    content, is_error, ..
+                } => Some((content.clone(), *is_error)),
+                _ => None,
+            })
+            .unwrap();
+        assert!(tool_result.1, "hook block should surface as tool error");
+        assert!(
+            tool_result.0.contains("no-writes-allowed"),
+            "{}",
+            tool_result.0
+        );
+        assert!(!cwd.path().join("hooked.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn enter_plan_mode_denies_writes_for_rest_of_run() {
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_use_response("c1", "EnterPlanMode", json!({})),
+            tool_use_response(
+                "c2",
+                "FileWrite",
+                json!({"file_path": "plan-violation.txt", "content": "x"}),
+            ),
+            text_response("计划模式拒绝了写入"),
+        ]));
+        let (runtime, cwd) = test_runtime(provider.clone()).await;
+        // BypassPermissions 起步：进入 plan 后写入必须被拒。
+        let response = runtime
+            .run(request(
+                "planmode",
+                cwd.path(),
+                Some(PermissionMode::BypassPermissions),
+                "先规划再写入",
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.output, "计划模式拒绝了写入");
+        let requests = provider.requests();
+        // 取最后一条 ToolResult（前面还有 EnterPlanMode 的成功结果）。
+        let denial = requests[2]
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                ContentBlock::ToolResult {
+                    content, is_error, ..
+                } => Some((content.clone(), *is_error)),
+                _ => None,
+            })
+            .next_back()
+            .unwrap();
+        assert!(denial.1);
+        assert!(denial.0.contains("Plan mode is active"), "{}", denial.0);
+        assert!(!cwd.path().join("plan-violation.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn background_bash_through_agent_loop() {
+        let provider = Arc::new(MockProvider::new(vec![
+            tool_use_response(
+                "c1",
+                "Bash",
+                json!({"command": "echo bg-marker", "run_in_background": true}),
+            ),
+            tool_use_response("c2", "TaskOutput", json!({"task_id": "<from-earlier>"})),
+            text_response("后台任务完成"),
+        ]));
+        let (runtime, cwd) = test_runtime(provider.clone()).await;
+        std::fs::write(
+            cwd.path().join(".claude").join("settings.json"),
+            r#"{"permissions": {"allow": ["Bash", "TaskOutput"]}}"#,
+        )
+        .unwrap();
+
+        let response = runtime
+            .run(request("bgrun", cwd.path(), None, "后台跑一个命令"))
+            .await
+            .unwrap();
+        assert_eq!(response.output, "后台任务完成");
+        assert_tool_pairs(&runtime.sessions.load("bgrun").unwrap().unwrap().messages);
     }
 
     #[test]

@@ -1,10 +1,12 @@
 pub mod agent;
+pub mod agent_defs;
 pub mod api;
 pub mod cliproxy;
 pub mod collaboration;
 pub mod context;
 pub mod evaluation;
 pub mod expenses;
+pub mod hooks;
 pub mod memory;
 pub mod model;
 pub mod observability;

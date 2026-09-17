@@ -108,7 +108,9 @@ $legacyArtifacts = @(
     (Join-Path $distRoot "Rust-AI-Agent-Setup-0.2.0-x64.exe"),
     (Join-Path $distRoot "rust-ai-agent-cli-0.2.0.tgz"),
     (Join-Path $distRoot "wonderland-cli-0.2.0.tgz"),
-    (Join-Path $distRoot "Wonderland-Setup-0.2.0-x64.exe")
+    (Join-Path $distRoot "wonderland-cli-0.2.1.tgz"),
+    (Join-Path $distRoot "Wonderland-Setup-0.2.0-x64.exe"),
+    (Join-Path $distRoot "Wonderland-Setup-0.2.1-x64.exe")
 )
 foreach ($legacyArtifact in $legacyArtifacts) {
     if (Test-Path -LiteralPath $legacyArtifact) {

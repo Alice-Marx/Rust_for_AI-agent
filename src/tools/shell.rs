@@ -106,7 +106,9 @@ impl Tool for BashTool {
          available in PATH, otherwise cmd /C; on other platforms sh -c. \
          Note: on Windows with cmd /C, Unix commands (ls, grep, sleep, ...) are unavailable. \
          Output longer than 30,000 characters is truncated and the full output is saved to a file. \
-         Commands time out after 120s by default (max 600s)."
+         Commands time out after 120s by default (max 600s). \
+         Set run_in_background=true for long-running commands (dev servers, watches): the call \
+         returns a task id immediately; retrieve output with TaskOutput, stop with TaskStop."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -120,6 +122,10 @@ impl Tool for BashTool {
                 "timeout_ms": {
                     "type": "integer",
                     "description": "Timeout in milliseconds (default 120000, max 600000)"
+                },
+                "run_in_background": {
+                    "type": "boolean",
+                    "description": "Start the command in the background and return a task id immediately (default false)"
                 }
             },
             "required": ["command"]
@@ -135,9 +141,40 @@ impl Tool for BashTool {
     }
 
     async fn call(&self, input: serde_json::Value, ctx: &mut ToolContext) -> Result<ToolOutput> {
-        let Some(command) = input.get("command").and_then(|v| v.as_str()) else {
+        let Some(command) = input
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        else {
             return Ok(ToolOutput::err("missing required parameter: command"));
         };
+        let run_in_background = input
+            .get("run_in_background")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if run_in_background {
+            match ctx.background.spawn(&command, &ctx.working_dir).await {
+                Ok(task_id) => Ok(ToolOutput::ok(format!(
+                    "Command started in background.\ntask_id: {task_id}\ncommand: {command}\n\n\
+                     Retrieve output with TaskOutput(task_id) and stop it with TaskStop(task_id)."
+                ))),
+                Err(error) => Ok(ToolOutput::err(format!(
+                    "failed to start background task: {error}"
+                ))),
+            }
+        } else {
+            self.run_foreground(&command, input, ctx).await
+        }
+    }
+}
+
+impl BashTool {
+    async fn run_foreground(
+        &self,
+        command: &str,
+        input: serde_json::Value,
+        ctx: &mut ToolContext,
+    ) -> Result<ToolOutput> {
         let timeout_ms = input
             .get("timeout_ms")
             .and_then(|v| v.as_u64())
@@ -254,6 +291,9 @@ mod tests {
             output_dir: dir.join("out"),
             session_id: "test".to_string(),
             todos: Vec::new(),
+            background: crate::tools::background::BackgroundTaskRegistry::new(),
+            mode: crate::permissions::PermissionMode::Default,
+            pre_plan_mode: None,
         }
     }
 

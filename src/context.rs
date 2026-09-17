@@ -189,9 +189,10 @@ const IDENTITY_SECTION: &str = r#"You are Wonderland, an AI coding assistant. Yo
 
 ## Tool Usage Rules
 
-- Always Read a file before modifying it. Use FileEdit for precise, targeted replacements; use FileWrite only for new files or complete rewrites.
+- Always Read a file before modifying it. Use FileEdit for precise, targeted replacements; use FileWrite only for new files or complete rewrites. Use ApplyPatch when changing several files or several regions at once.
 - Prefer the Grep and Glob tools for searching; do not use Bash for `grep` or `find`.
-- Use Bash for builds, tests, git, and other command execution.
+- Use Bash for builds, tests, git, and other command execution. For long-running commands (dev servers, file watchers) pass run_in_background=true and read output later with TaskOutput; stop them with TaskStop.
+- For non-trivial implementation work, consider calling EnterPlanMode first to explore read-only and design an approach, then present the plan and call ExitPlanMode.
 - When multiple tool calls have no dependencies between them, issue them in parallel.
 "#;
 

@@ -222,15 +222,15 @@ fn content_matches(pattern: &str, content: &str) -> bool {
 pub fn is_file_tool(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "FileRead" | "FileWrite" | "FileEdit" | "Glob" | "Grep"
+        "FileRead" | "FileWrite" | "FileEdit" | "Glob" | "Grep" | "ApplyPatch" | "NotebookEdit"
     )
 }
 
-/// 路径是否位于受保护目录（.git 内部 / .claude）。
+/// 路径是否位于受保护目录（.git 内部 / .claude / .wonderland）。
 fn is_protected_path(path: &Path) -> bool {
     path.components().any(|c| {
         let name = c.as_os_str();
-        name == ".git" || name == ".claude"
+        name == ".git" || name == ".claude" || name == ".wonderland"
     })
 }
 

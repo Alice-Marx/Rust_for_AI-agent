@@ -366,6 +366,9 @@ mod tests {
             output_dir: std::env::temp_dir().join("out"),
             session_id: "s".to_string(),
             todos: Vec::new(),
+            background: crate::tools::background::BackgroundTaskRegistry::new(),
+            mode: crate::permissions::PermissionMode::Default,
+            pre_plan_mode: None,
         };
         let output = WebFetch
             .call(serde_json::json!({}), &mut ctx)
@@ -383,6 +386,9 @@ mod tests {
             output_dir: std::env::temp_dir().join("out"),
             session_id: "s".to_string(),
             todos: Vec::new(),
+            background: crate::tools::background::BackgroundTaskRegistry::new(),
+            mode: crate::permissions::PermissionMode::Default,
+            pre_plan_mode: None,
         };
         let output = WebFetch
             .call(serde_json::json!({"url": "http://127.0.0.1:9/x"}), &mut ctx)

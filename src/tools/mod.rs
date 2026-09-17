@@ -1,4 +1,8 @@
+pub mod background;
 pub mod fs;
+pub mod notebook;
+pub mod patch;
+pub mod plan;
 pub mod search;
 pub mod shell;
 pub mod task;
@@ -10,7 +14,11 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+pub use background::{BackgroundTaskRegistry, TaskOutputTool, TaskStopTool};
 pub use fs::{FileEdit, FileRead, FileReadRecord, FileWrite, ReadFileState};
+pub use notebook::NotebookEdit;
+pub use patch::ApplyPatch;
+pub use plan::{EnterPlanMode, ExitPlanMode};
 pub use search::{GlobTool, GrepTool};
 pub use shell::BashTool;
 pub use task::TaskTool;
@@ -56,6 +64,12 @@ pub struct ToolContext {
     pub session_id: String,
     /// 会话级任务清单（TodoWrite 维护），由 AgentRuntime 与 Session 同步。
     pub todos: Vec<crate::model::TodoItem>,
+    /// 后台任务注册表（Bash run_in_background / TaskOutput / TaskStop）。
+    pub background: BackgroundTaskRegistry,
+    /// 当前 run 的生效权限模式（EnterPlanMode / ExitPlanMode 可切换）。
+    pub mode: crate::permissions::PermissionMode,
+    /// 进入计划模式前的模式，供 ExitPlanMode 恢复。
+    pub pre_plan_mode: Option<crate::permissions::PermissionMode>,
 }
 
 impl ToolContext {
@@ -66,6 +80,20 @@ impl ToolContext {
             p.to_path_buf()
         } else {
             self.working_dir.join(p)
+        }
+    }
+
+    /// 测试与子代理用的最小构造器：默认 Default 权限模式、空后台注册表。
+    pub fn for_tests(working_dir: PathBuf) -> Self {
+        Self {
+            working_dir: working_dir.clone(),
+            read_state: ReadFileState::new(),
+            output_dir: working_dir.join("out"),
+            session_id: "test".to_string(),
+            todos: Vec::new(),
+            background: BackgroundTaskRegistry::new(),
+            mode: crate::permissions::PermissionMode::Default,
+            pre_plan_mode: None,
         }
     }
 }
@@ -115,6 +143,12 @@ impl ToolRegistry {
         registry.register(Arc::new(GrepTool));
         registry.register(Arc::new(BashTool));
         registry.register(Arc::new(WebFetch));
+        registry.register(Arc::new(ApplyPatch));
+        registry.register(Arc::new(NotebookEdit));
+        registry.register(Arc::new(TaskOutputTool));
+        registry.register(Arc::new(TaskStopTool));
+        registry.register(Arc::new(EnterPlanMode));
+        registry.register(Arc::new(ExitPlanMode));
         registry.register(Arc::new(TaskTool::new(directory)));
         registry.register(Arc::new(TodoWrite));
         registry
@@ -130,6 +164,12 @@ impl ToolRegistry {
         registry.register(Arc::new(GrepTool));
         registry.register(Arc::new(BashTool));
         registry.register(Arc::new(WebFetch));
+        registry.register(Arc::new(ApplyPatch));
+        registry.register(Arc::new(NotebookEdit));
+        registry.register(Arc::new(TaskOutputTool));
+        registry.register(Arc::new(TaskStopTool));
+        registry.register(Arc::new(EnterPlanMode));
+        registry.register(Arc::new(ExitPlanMode));
         registry
     }
 
@@ -209,10 +249,16 @@ mod tests {
             "Grep",
             "Bash",
             "WebFetch",
+            "ApplyPatch",
+            "NotebookEdit",
+            "TaskOutput",
+            "TaskStop",
+            "EnterPlanMode",
+            "ExitPlanMode",
         ] {
             assert!(registry.find(name).is_some(), "missing tool {name}");
         }
-        assert_eq!(registry.iter().count(), 7);
+        assert_eq!(registry.iter().count(), 13);
     }
 
     #[test]
@@ -224,13 +270,20 @@ mod tests {
         assert!(registry.find("WebFetch").is_some());
         assert!(registry.find("TodoWrite").unwrap().is_always_allowed());
         assert!(!registry.find("Bash").unwrap().is_always_allowed());
+        // 模式切换工具免权限；后台查看只读。
+        assert!(registry.find("EnterPlanMode").unwrap().is_always_allowed());
+        assert!(registry.find("ExitPlanMode").unwrap().is_always_allowed());
+        assert!(registry
+            .find("TaskOutput")
+            .unwrap()
+            .is_read_only(&serde_json::json!({})));
     }
 
     #[test]
     fn tool_definitions_shape() {
         let registry = ToolRegistry::builtin();
         let defs = registry.tool_definitions();
-        assert_eq!(defs.len(), 7);
+        assert_eq!(defs.len(), 13);
         for def in &defs {
             assert!(!def.name.is_empty());
             assert!(!def.description.is_empty());
@@ -242,7 +295,7 @@ mod tests {
     fn openai_tool_definitions_shape() {
         let registry = ToolRegistry::builtin();
         let defs = registry.openai_tool_definitions();
-        assert_eq!(defs.len(), 7);
+        assert_eq!(defs.len(), 13);
         for def in &defs {
             assert_eq!(def["type"], "function");
             assert!(def["function"]["name"].is_string());
@@ -254,13 +307,7 @@ mod tests {
     #[test]
     fn resolve_path_relative_and_absolute() {
         let dir = tempfile::tempdir().unwrap();
-        let ctx = ToolContext {
-            working_dir: dir.path().to_path_buf(),
-            read_state: ReadFileState::new(),
-            output_dir: dir.path().join("out"),
-            session_id: "s".to_string(),
-            todos: Vec::new(),
-        };
+        let ctx = ToolContext::for_tests(dir.path().to_path_buf());
         assert_eq!(ctx.resolve_path("a/b.txt"), dir.path().join("a/b.txt"));
         let abs = if cfg!(windows) { "C:/tmp/x" } else { "/tmp/x" };
         assert_eq!(ctx.resolve_path(abs), PathBuf::from(abs));

@@ -97,6 +97,9 @@ mod tests {
             output_dir: std::env::temp_dir().join("out"),
             session_id: "s".to_string(),
             todos: Vec::new(),
+            background: crate::tools::background::BackgroundTaskRegistry::new(),
+            mode: crate::permissions::PermissionMode::Default,
+            pre_plan_mode: None,
         }
     }
 

@@ -389,10 +389,13 @@ mod tests {
     fn make_ctx(dir: &Path) -> ToolContext {
         ToolContext {
             working_dir: dir.to_path_buf(),
-            read_state: ReadFileState::new(),
+            read_state: crate::tools::ReadFileState::new(),
             output_dir: dir.join("out"),
             session_id: "test".to_string(),
             todos: Vec::new(),
+            background: crate::tools::background::BackgroundTaskRegistry::new(),
+            mode: crate::permissions::PermissionMode::Default,
+            pre_plan_mode: None,
         }
     }
 
