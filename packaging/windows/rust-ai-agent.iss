@@ -6,7 +6,7 @@
 #define MyAppURL "https://github.com/Alice-Marx/Rust_for_AI-agent"
 #define MyAppExeName "agent-desktop.exe"
 #ifndef MyAppVersion
-  #define MyAppVersion "0.1.0"
+  #define MyAppVersion "0.2.0"
 #endif
 #define BuildRoot "..\..\dist\staging\windows-x64"
 

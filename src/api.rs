@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     middleware,
     response::{IntoResponse, Response},
@@ -17,6 +17,7 @@ use crate::{
     expenses::ExpenseStore,
     memory::MemoryKind,
     model::{AgentRequest, MemoryWriteRequest, SandboxRequest},
+    skills::SkillSummary,
 };
 
 #[derive(Clone)]
@@ -34,6 +35,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/memory/search", get(search_memory))
         .route("/v1/sandbox/execute", post(execute_sandbox))
         .route("/v1/evaluations", get(list_evaluations))
+        .route("/v1/sessions", get(list_sessions))
+        .route("/v1/sessions/{id}", get(get_session))
+        .route("/v1/skills", get(list_skills))
+        .route("/v1/skills/reload", post(reload_skills))
         .route(
             "/v1/providers/cliproxyapi/models",
             get(list_cliproxy_models),
@@ -91,6 +96,7 @@ struct HealthResponse {
     sandbox_enabled: bool,
     provider: &'static str,
     cliproxyapi_configured: bool,
+    skills: usize,
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
@@ -100,6 +106,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         sandbox_enabled: state.runtime.sandbox.policy().enabled,
         provider: state.runtime.provider.name(),
         cliproxyapi_configured: state.cliproxy.is_some(),
+        skills: state.runtime.skills.summaries().await.len(),
     })
 }
 
@@ -250,6 +257,44 @@ async fn list_evaluations(
     )
 }
 
+async fn list_sessions(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<crate::session::SessionSummary>>, ApiError> {
+    Ok(Json(state.runtime.sessions.list()?))
+}
+
+async fn get_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::session::Session>, ApiError> {
+    let session = state
+        .runtime
+        .sessions
+        .load(&id)?
+        .ok_or_else(|| ApiError::not_found(format!("session not found: {id}")))?;
+    Ok(Json(session))
+}
+
+async fn list_skills(State(state): State<AppState>) -> Json<Vec<SkillSummary>> {
+    Json(state.runtime.skills.summaries().await)
+}
+
+#[derive(Serialize)]
+struct ReloadSkillsResponse {
+    status: &'static str,
+    skills: usize,
+}
+
+async fn reload_skills(
+    State(state): State<AppState>,
+) -> Result<Json<ReloadSkillsResponse>, ApiError> {
+    let skills = state.runtime.skills.reload().await?;
+    Ok(Json(ReloadSkillsResponse {
+        status: "ok",
+        skills,
+    }))
+}
+
 #[derive(Debug)]
 pub struct ApiError {
     status: StatusCode,
@@ -269,6 +314,13 @@ impl ApiError {
     fn service_unavailable(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
+            error: anyhow::anyhow!(message.into()),
+        }
+    }
+
+    fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
             error: anyhow::anyhow!(message.into()),
         }
     }

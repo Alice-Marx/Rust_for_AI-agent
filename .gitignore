@@ -3,3 +3,4 @@
 /.agent-data/
 *.log
 .env
+claude-code/

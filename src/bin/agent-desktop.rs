@@ -157,6 +157,9 @@ impl DesktopApp {
             session_id,
             user_id: Some(self.user_id.clone()),
             model: (!self.selected_model.trim().is_empty()).then(|| self.selected_model.clone()),
+            skills: Vec::new(),
+            mode: None,
+            cwd: None,
             input,
         };
         spawn_agent_request(
@@ -184,7 +187,14 @@ impl DesktopApp {
                             role: MessageRole::Agent,
                             text: response.output,
                         });
-                        self.status = format!("完成 · 评分 {:.0}", response.evaluation.total_score);
+                        self.status = format!(
+                            "完成 · 评分 {:.0} · {} 轮 · {} 次工具调用 · tokens {}/{}",
+                            response.evaluation.total_score,
+                            response.turns,
+                            response.tool_calls,
+                            response.usage.input_tokens,
+                            response.usage.output_tokens,
+                        );
                     }
                 }
                 UiEvent::Failed { task_id, message } => {

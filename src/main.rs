@@ -11,6 +11,9 @@ use rust_ai_agent::{
     observability::init_tracing,
     provider::provider_from_env,
     sandbox::{SandboxExecutor, SandboxPolicy},
+    session::SessionStore,
+    skills::{default_skill_directories, SkillCatalog},
+    tools::ToolRegistry,
 };
 
 #[tokio::main]
@@ -22,6 +25,7 @@ async fn main() -> Result<()> {
     );
     let memory = MemoryStore::open(data_dir.join("memory.json")).await?;
     let evaluations = EvaluationStore::open(data_dir.join("evaluations.json")).await?;
+    let skills = SkillCatalog::open(default_skill_directories(&data_dir)).await?;
     let provider = provider_from_env()?;
     let cliproxy = CliProxyApiClient::from_env().map(Arc::new);
     let sandbox = SandboxExecutor::new(SandboxPolicy {
@@ -30,8 +34,23 @@ async fn main() -> Result<()> {
         ..SandboxPolicy::default()
     });
 
-    let runtime = Arc::new(AgentRuntime::new(provider, memory, evaluations, sandbox));
-    runtime.register_default_agents().await;
+    let runtime = {
+        let mut runtime = AgentRuntime::new(
+            provider,
+            memory,
+            evaluations,
+            sandbox,
+            ToolRegistry::builtin(),
+            SessionStore::new(data_dir.join("sessions")),
+        )
+        .with_skills(skills);
+        runtime.register_default_agents().await;
+        // Task 工具需要 directory 才能委派子代理。
+        let tools = ToolRegistry::builtin_with_directory(runtime.directory.clone());
+        runtime.tools = tools;
+        runtime
+    };
+    let runtime = Arc::new(runtime);
 
     let address: SocketAddr = std::env::var("AGENT_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:8080".to_string())

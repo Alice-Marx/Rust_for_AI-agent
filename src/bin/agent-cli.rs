@@ -9,6 +9,7 @@ use reqwest::Client;
 use rust_ai_agent::{
     cliproxy::{CliProxyLoginStart, CliProxyLoginStatus, CliProxyModel},
     model::{AgentRequest, AgentResponse},
+    permissions::PermissionMode,
 };
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
@@ -33,8 +34,25 @@ struct Cli {
     #[arg(long, env = "AGENT_SESSION_ID")]
     session_id: Option<String>,
 
+    /// 权限模式：default / plan / acceptEdits / bypassPermissions / dontAsk
+    #[arg(long, env = "AGENT_PERMISSION_MODE", value_parser = parse_permission_mode)]
+    mode: Option<PermissionMode>,
+
     #[command(subcommand)]
     command: Option<Command>,
+}
+
+fn parse_permission_mode(value: &str) -> Result<PermissionMode, String> {
+    match value {
+        "default" => Ok(PermissionMode::Default),
+        "plan" => Ok(PermissionMode::Plan),
+        "acceptEdits" => Ok(PermissionMode::AcceptEdits),
+        "bypassPermissions" => Ok(PermissionMode::BypassPermissions),
+        "dontAsk" => Ok(PermissionMode::DontAsk),
+        other => Err(format!(
+            "未知权限模式：{other}（可选 default / plan / acceptEdits / bypassPermissions / dontAsk）"
+        )),
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -46,6 +64,9 @@ enum Command {
         input: String,
         #[arg(long)]
         session_id: Option<String>,
+        /// 显式启用本地 SKILL.md；可重复传入 --skill
+        #[arg(long = "skill")]
+        skills: Vec<String>,
     },
     /// 检查 Rust Agent 服务状态
     Health,
@@ -62,6 +83,12 @@ enum Command {
         #[arg(long, default_value_t = false)]
         wait: bool,
     },
+    /// 列出服务发现的本地 SKILL.md
+    Skills,
+    /// 列出后端保存的所有会话摘要
+    Sessions,
+    /// 查看指定会话的完整消息历史
+    Session { id: String },
 }
 
 #[derive(Clone)]
@@ -77,11 +104,27 @@ struct HealthResponse {
     agents: Vec<String>,
     sandbox_enabled: bool,
     cliproxyapi_configured: bool,
+    skills: usize,
 }
 
 #[derive(Debug, Serialize)]
 struct VerifyRequest {
     model: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct SessionSummary {
+    id: String,
+    message_count: usize,
+    updated_at: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct SessionDetail {
+    id: String,
+    todos: Vec<rust_ai_agent::model::TodoItem>,
+    usage: rust_ai_agent::provider::Usage,
+    updated_at: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -182,6 +225,45 @@ impl AgentApi {
             .context("无法解析登录状态响应")
     }
 
+    async fn skills(&self) -> Result<Vec<serde_json::Value>> {
+        self.client
+            .get(self.url("/v1/skills"))
+            .send()
+            .await
+            .context("无法连接本地技能接口")?
+            .error_for_status()
+            .context("查询本地技能失败")?
+            .json()
+            .await
+            .context("无法解析本地技能列表")
+    }
+
+    async fn sessions(&self) -> Result<Vec<SessionSummary>> {
+        self.client
+            .get(self.url("/v1/sessions"))
+            .send()
+            .await
+            .context("无法连接会话列表接口")?
+            .error_for_status()
+            .context("查询会话列表失败")?
+            .json()
+            .await
+            .context("无法解析会话列表")
+    }
+
+    async fn session_detail(&self, id: &str) -> Result<SessionDetail> {
+        self.client
+            .get(self.url(&format!("/v1/sessions/{id}")))
+            .send()
+            .await
+            .context("无法连接会话详情接口")?
+            .error_for_status()
+            .context("查询会话详情失败")?
+            .json()
+            .await
+            .context("无法解析会话详情")
+    }
+
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base_url, path)
     }
@@ -198,16 +280,29 @@ async fn main() -> Result<()> {
             prompt: Some(prompt),
         } => {
             print_response(
-                &api.run(request(&default_session, &cli.user_id, prompt))
-                    .await?,
+                &api.run(request(
+                    &default_session,
+                    &cli.user_id,
+                    prompt,
+                    Vec::new(),
+                    cli.mode,
+                ))
+                .await?,
             );
         }
         Command::Chat { prompt: None } => {
-            interactive_chat(&api, &cli.user_id, &default_session).await?
+            interactive_chat(&api, &cli.user_id, &default_session, cli.mode).await?
         }
-        Command::Run { input, session_id } => {
+        Command::Run {
+            input,
+            session_id,
+            skills,
+        } => {
             let session_id = session_id.as_deref().unwrap_or(&default_session);
-            print_response(&api.run(request(session_id, &cli.user_id, input)).await?);
+            print_response(
+                &api.run(request(session_id, &cli.user_id, input, skills, cli.mode))
+                    .await?,
+            );
         }
         Command::Health => {
             let health = api.health().await?;
@@ -233,11 +328,43 @@ async fn main() -> Result<()> {
             );
         }
         Command::Login { provider, wait } => login_flow(&api, &provider, wait).await?,
+        Command::Skills => println!("{}", serde_json::to_string_pretty(&api.skills().await?)?),
+        Command::Sessions => {
+            let sessions = api.sessions().await?;
+            if sessions.is_empty() {
+                println!("（暂无会话）");
+            }
+            for session in sessions {
+                println!(
+                    "{}  messages={}  updated={}",
+                    session.id, session.message_count, session.updated_at
+                );
+            }
+        }
+        Command::Session { id } => {
+            let session = api.session_detail(&id).await?;
+            println!("session: {}", session.id);
+            println!(
+                "tokens: {} in / {} out",
+                session.usage.input_tokens, session.usage.output_tokens
+            );
+            if !session.todos.is_empty() {
+                println!("\ntodos:");
+                for (index, todo) in session.todos.iter().enumerate() {
+                    println!("{}. {}", index + 1, todo.render());
+                }
+            }
+        }
     }
     Ok(())
 }
 
-async fn interactive_chat(api: &AgentApi, user_id: &str, session_id: &str) -> Result<()> {
+async fn interactive_chat(
+    api: &AgentApi,
+    user_id: &str,
+    session_id: &str,
+    mode: Option<PermissionMode>,
+) -> Result<()> {
     println!("Rust AI Agent CLI | session={session_id}");
     println!("输入消息开始对话，输入 /help 查看命令，输入 /exit 退出。\n");
     let stdin = io::stdin();
@@ -252,7 +379,10 @@ async fn interactive_chat(api: &AgentApi, user_id: &str, session_id: &str) -> Re
             "/exit" | "/quit" => break,
             "/help" => {
                 println!(
-                    "/exit 退出；/health 检查服务；/models 查看模型；其他文本发送给 Agent。\n"
+                    "/exit 退出；/health 检查服务；/models 查看模型；/skills 列出本地技能；\
+                     /sessions 列出会话；其他文本发送给 Agent。\n\
+                     全局参数 --mode <default|plan|acceptEdits|bypassPermissions|dontAsk> 控制工具权限；\
+                     回答尾部会显示本轮 turns / 工具调用数 / token 用量。\n"
                 );
             }
             "/health" => println!("{}", serde_json::to_string_pretty(&api.health().await?)?),
@@ -261,17 +391,35 @@ async fn interactive_chat(api: &AgentApi, user_id: &str, session_id: &str) -> Re
                     println!("- {}", model.id);
                 }
             }
+            "/skills" => println!("{}", serde_json::to_string_pretty(&api.skills().await?)?),
             message => {
                 print!("agent> ");
                 io::stdout().flush()?;
                 let response = api
-                    .run(request(session_id, user_id, message.to_string()))
+                    .run(request(
+                        session_id,
+                        user_id,
+                        message.to_string(),
+                        Vec::new(),
+                        mode,
+                    ))
                     .await?;
                 println!("{}\n", response.output);
+                if !response.todos.is_empty() {
+                    println!("todos:");
+                    for (index, todo) in response.todos.iter().enumerate() {
+                        println!("  {}. {}", index + 1, todo.render());
+                    }
+                    println!();
+                }
                 println!(
-                    "plan: {} steps | reflection: {}\n",
+                    "plan: {} steps | reflection: {} | turns: {} | tool calls: {} | tokens: {} in / {} out\n",
                     response.plan.steps.len(),
-                    response.reflection.passed
+                    response.reflection.passed,
+                    response.turns,
+                    response.tool_calls,
+                    response.usage.input_tokens,
+                    response.usage.output_tokens,
                 );
             }
         }
@@ -312,19 +460,40 @@ async fn login_flow(api: &AgentApi, provider: &str, wait: bool) -> Result<()> {
     Ok(())
 }
 
-fn request(session_id: &str, user_id: &str, input: String) -> AgentRequest {
+fn request(
+    session_id: &str,
+    user_id: &str,
+    input: String,
+    skills: Vec<String>,
+    mode: Option<PermissionMode>,
+) -> AgentRequest {
     AgentRequest {
         session_id: session_id.to_string(),
         user_id: Some(user_id.to_string()),
         model: None,
+        skills,
+        mode,
+        cwd: None,
         input,
     }
 }
 
 fn print_response(response: &AgentResponse) {
     println!("{}", response.output);
+    if !response.todos.is_empty() {
+        println!("\ntodos:");
+        for (index, todo) in response.todos.iter().enumerate() {
+            println!("  {}. {}", index + 1, todo.render());
+        }
+    }
     println!(
-        "\n[session={} execution={} score={:.1}]",
-        response.session_id, response.execution_id, response.evaluation.total_score
+        "\n[session={} execution={} score={:.1} turns={} tool_calls={} tokens={}in/{}out]",
+        response.session_id,
+        response.execution_id,
+        response.evaluation.total_score,
+        response.turns,
+        response.tool_calls,
+        response.usage.input_tokens,
+        response.usage.output_tokens,
     );
 }

@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$TargetDir = "D:\Jianwei_Li\rust\targets",
     [string]$InnoCompiler,
     [string]$CliProxyApiExecutable
@@ -101,7 +101,9 @@ $staging = Join-Path $distRoot "staging\windows-x64"
 $legacyArtifacts = @(
     (Join-Path $distRoot "Rust-AI-Agent-windows-x64.zip"),
     (Join-Path $distRoot "Rust-AI-Agent-windows-x64"),
-    (Join-Path $distRoot "Rust-AI-Agent-Setup-0.1.0-x64.exe")
+    (Join-Path $distRoot "Rust-AI-Agent-Setup-0.1.0-x64.exe"),
+    (Join-Path $distRoot "Rust-AI-Agent-Setup-0.1.1-x64.exe"),
+    (Join-Path $distRoot "Rust-AI-Agent-Setup-0.2.0-x64.exe")
 )
 foreach ($legacyArtifact in $legacyArtifacts) {
     if (Test-Path -LiteralPath $legacyArtifact) {

@@ -1,19 +1,59 @@
 # Rust for AI Agent
 
-一个可运行的 Rust AI Agent 基础工程，参考了 [solenovex/rust-ai-agent](https://github.com/solenovex/rust-ai-agent) 的 Agent / session / tool 分层思路，以及 [solenovex/expense-tracker-api](https://github.com/solenovex/expense-tracker-api) 的 Axum API、健康检查和请求 tracing 方式。
+一个用 Rust 实现的 agentic 编码 Agent 框架。项目已从"单次问答流水线"升级为真正的 agentic 编码助手：模型在一个多轮 `tool_use → tool_result` 循环中自主读写文件、搜索代码、执行命令，配合细粒度权限管线、会话持久化与上下文自动压缩。核心设计（工具协议、权限模式、压缩策略等）移植自 Claude Code，仓库根目录的 `claude-code/` 为只读参考实现。工程结构参考了 [solenovex/rust-ai-agent](https://github.com/solenovex/rust-ai-agent) 的 Agent / session / tool 分层思路，以及 [solenovex/expense-tracker-api](https://github.com/solenovex/expense-tracker-api) 的 Axum API、健康检查和请求 tracing 方式。
 
-当前实现把后续迭代需要的闭环先打通：
+当前实现把 agentic 编码助手的完整闭环打通：
 
+- Agentic loop：模型响应中出现 `tool_use` 块时执行工具并把 `tool_result` 写回会话，直到模型停止调用工具或达到最大轮数（默认 25，可用 `with_max_turns` 调整）；工具失败与权限拒绝都会作为错误结果反馈给模型，不中断循环。
+- 九个内置工具：`FileRead` / `FileWrite` / `FileEdit` / `Glob` / `Grep` / `Bash` / `WebFetch` / `Task` / `TodoWrite`。`FileEdit` 做精确字符串替换并带 mtime + 内容 hash 的 staleness 检查（文件在读取后被外部修改会拒绝写入）；`Bash` 复合命令按 `&&` / `||` / `;` / `|` 拆分后逐段做权限评估，超长输出自动落盘；`WebFetch` 抓取网页并抽取正文（拒绝 localhost/私网地址，按 `WebFetch(domain:example.com)` 域名规则授权）；`Task` 把子任务委派给已注册的子 Agent（按 `Task(agent:research)` 规则授权）；`TodoWrite` 维护会话级任务清单（免权限提示，清单作为动态段注入系统提示词并持久化到会话）。
+- 权限管线：五种权限模式（`default` / `plan` / `acceptEdits` / `bypassPermissions` / `dontAsk`）+ 从 `<cwd>/.claude/settings.json` 与 `<cwd>/.rust-ai-agent/settings.json` 加载的 `allow / ask / deny` 规则管线（首命中胜出），外加不可绕过的 `.git/` 内部与 `.claude/` 目录写保护。
+- 会话持久化与自动压缩：每个会话一个 JSON 文件，每轮落盘，崩溃后可恢复完整工具调用轨迹；上下文估算超过阈值时自动把历史压缩为摘要，并保证不切断 `tool_use / tool_result` 配对。
+- 上下文构建：系统提示词按静态段（身份、工具规范、安全准则）在前、动态段（技能、环境信息、git 状态、项目指令）在后的顺序组织以保护 prompt cache；层级加载 `~/.claude/CLAUDE.md` 与从根到 `cwd` 各级的 `AGENTS.md` / `CLAUDE.md` / `.claude/CLAUDE.md`，支持 `@path` include。
 - 可观测性：`tracing` + `tower-http::TraceLayer`，每次 HTTP 请求、Agent 执行、Agent 委派都有 span；通过 `RUST_LOG` 调整级别。
 - 长期记忆：JSON 持久化的跨会话记忆，支持按 `user_id` 和关键词检索；Agent 每次运行会自动写入对话摘要，也可通过 API 显式记忆。
 - 多智能体协作：`AgentDirectory` 支持注册和互调；内置 `research`、`expense` 两个示例 Agent。
-- 规划与反思：启发式 Planner 生成步骤，Reflection 做失败检测，失败时自动重试一次；后续可替换为 LLM Planner。
+- 规划与反思：启发式 Planner 生成步骤，Reflection 做失败检测；后续可替换为 LLM Planner。
 - 代码执行沙箱：默认关闭，只允许策略声明的语言并限制输入、输出和超时；当前是开发原型，不是安全边界。
 - 评估打分：每次运行落盘 `correctness / completeness / safety / latency` 和反馈，可通过 API 查询；后续可替换为真实评测集或人工标注。
 - CLIProxyAPI 账号接入：Rust 服务通过 OpenAI-compatible `/v1` 调用本地 CLIProxyAPI，并通过 Management API 发起 OAuth、轮询登录状态和验证订阅模型；OAuth 凭据仍由 CLIProxyAPI 管理。
 - 费用 API：沿用参考项目的 Axum `Expense / Store / Handler / Error` 分层，提供带 `x-api-key` 的 CRUD 和汇总接口，便于费用 Agent 作为真实协作者接入。
 
 Contributors: **AliceMarx**
+
+## 架构
+
+```text
+src/
+├── agent.rs        AgentRuntime：多轮 agentic loop（tool_use → tool_result）、
+│                   每轮会话落盘、上下文自动压缩（maybe_compact）、
+│                   记忆写入、规划/反思与评估收尾
+├── provider.rs     统一消息/工具调用协议：ChatMessage / ContentBlock /
+│                   ToolDefinition / Usage / StopReason / ModelProvider；
+│                   OpenAI-compatible 兼容层（请求构建与响应解析为纯函数）
+├── tools/          工具注册表与九个内置工具
+│   ├── fs.rs       FileRead / FileWrite / FileEdit + 会话内已读文件状态
+│   │               （FileWrite/FileEdit 要求先读后写，带 staleness 检查）
+│   ├── search.rs   Glob / Grep（尊重 .gitignore，跳过 hidden 与 .git）
+│   ├── shell.rs    Bash（复合命令拆分、超时、超长输出落盘、shell 自动选择）
+│   ├── webfetch.rs WebFetch（HTML 抽正文、SSRF 防护、按域名授权）
+│   ├── task.rs     Task（把子任务委派给 AgentDirectory 中的子 Agent）
+│   └── todo.rs     TodoWrite（会话级任务清单，免权限提示）
+├── permissions.rs  PermissionMode 五种模式、allow/ask/deny 规则管线
+│                   （evaluate 为纯函数，首命中胜出）、.git/.claude 写保护、
+│                   PermissionHandler（Ask 时的用户询问通道）
+├── session.rs      SessionStore：每会话一个 JSON 文件、原子写入、
+│                   摘要列表、id 净化防路径逃逸
+├── context.rs      系统提示词静态/动态分段、AGENTS.md/CLAUDE.md 层级加载
+│                   （含 @path include）、git 分支/状态/最近提交注入
+├── memory.rs       长期记忆
+├── planning.rs     启发式 Planner 与 Reflection
+├── skills.rs       本地 SKILL.md 技能目录
+├── evaluation.rs   运行评估打分
+├── sandbox.rs      代码执行沙箱（默认关闭）
+├── cliproxy.rs     CLIProxyAPI 客户端（模型列表、验证、OAuth 登录）
+├── expenses.rs     费用 API
+└── api.rs          Axum 路由表
+```
 
 ## 如何使用
 
@@ -195,6 +235,29 @@ Invoke-RestMethod `
   -Body $request
 ```
 
+请求和响应的完整字段见下文「API 示例」。除 `session_id` 和 `input` 外，`AgentRequest` 还支持：
+
+- `mode`：权限模式，可选 `default` / `plan` / `acceptEdits` / `bypassPermissions` / `dontAsk`，缺省为 `default`。
+- `cwd`：工具执行的工作目录，缺省为服务端当前目录；权限规则也从该目录加载。
+- `model`：覆盖本次请求的模型名。
+- `skills`：按目录名显式启用本地 SKILL.md 技能。
+
+`AgentResponse` 在原有 `output / plan / reflection / evaluation` 等字段之外，新增 `turns`（工具调用轮数）、`tool_calls`（工具调用总次数）、`usage`（本次 run 累计的 token 用量，含缓存命中细分）和 `todos`（本次 run 结束时的任务清单，由 `TodoWrite` 工具维护）。
+
+**关于 headless 权限**：HTTP 服务没有交互能力，权限评估为 `Ask` 时由 `DenyAllHandler` 一律拒绝（拒绝原因会作为工具错误反馈给模型，而不是中断请求）。要让 Agent 真正执行工具，请二选一：
+
+- 请求中传 `"mode": "bypassPermissions"`（仍会受 `.git/` / `.claude/` 写保护约束）；或
+- 在 `cwd` 下的 `.claude/settings.json` 或 `.rust-ai-agent/settings.json` 中配置 `permissions.allow` 规则，规则格式为 `"Bash(git *)"`（内容级前缀匹配）或 `"FileWrite"`（整工具放行）：
+
+```json
+{
+  "permissions": {
+    "allow": ["FileRead", "Glob", "Grep", "Bash(git *)", "FileWrite", "FileEdit"],
+    "deny": ["Bash(rm *)"]
+  }
+}
+```
+
 此时模型调用路径是：
 
 ```text
@@ -243,6 +306,18 @@ cargo run
 
 修改环境变量后需要重启 Rust Agent 进程。
 
+### 环境变量
+
+| 变量 | 说明 | 默认值 |
+| --- | --- | --- |
+| `AGENT_PROVIDER` | 模型后端：`offline` / `cliproxyapi` / `openai` | 按 `CLIPROXYAPI_*` / `OPENAI_API_KEY` 自动推断，否则 `offline` |
+| `AGENT_CONTEXT_WINDOW` | 模型上下文窗口大小（token），用于自动压缩阈值 | `200000` |
+| `AGENT_PERMISSION_MODE` | CLI 的默认权限模式（等价于 `--mode`） | 未设置（即 `default`） |
+| `AGENT_DATA_DIR` | 记忆、评估、会话等数据的保存目录 | `.agent-data/` |
+| `AGENT_SHELL` | Bash 工具使用的 shell | Windows 上优先 PATH 中的 `bash`，否则 `cmd /C`；其他平台 `sh -c` |
+| `AGENT_SERVER_URL` / `AGENT_USER_ID` / `AGENT_SESSION_ID` | CLI 的服务地址、用户、会话 | 见 `agent-cli --help` |
+| `RUST_LOG` | tracing 日志级别 | `info` |
+
 ### 常见问题
 
 - `503 CLIProxyAPI is not configured`：如果使用 `v0.1.1` 或更高版本的桌面安装包，请完全退出后重新从开始菜单启动桌面版；启动器会自动配置本机 sidecar。若仍失败，查看 `%LOCALAPPDATA%\RustAIAgentData\launcher.log`。从源码运行时，则需要在启动 Rust Agent 的同一个 PowerShell 窗口设置 `AGENT_PROVIDER=cliproxyapi` 和 `CLIPROXYAPI_*` 环境变量。
@@ -277,9 +352,36 @@ cargo run --bin agent-cli -- health
 cargo run --bin agent-cli -- models
 cargo run --bin agent-cli -- verify --model gpt-5.4
 
+# 管理会话：列出全部会话、查看单个会话的消息历史与任务清单
+cargo run --bin agent-cli -- sessions
+cargo run --bin agent-cli -- session demo-session
+
 # 发起 CLIProxyAPI OAuth 登录；--wait 会在终端轮询验证结果
 cargo run --bin agent-cli -- login codex --wait
 ```
+
+CLI 提供全局 `--mode` 参数控制工具权限模式，也可用环境变量 `AGENT_PERMISSION_MODE` 设置。可选值与 Claude Code 对齐：
+
+| 模式 | 行为 |
+| --- | --- |
+| `default` | 无 allow 规则命中的工具调用进入 Ask；HTTP 层 Ask 即拒绝 |
+| `plan` | 只读：拒绝一切写入类工具调用 |
+| `acceptEdits` | 自动放行非破坏性的文件读写工具（FileRead/FileWrite/FileEdit/Glob/Grep），Bash 仍需规则或授权 |
+| `bypassPermissions` | 全部放行（`.git/` 内部与 `.claude/` 目录写保护不可绕过） |
+| `dontAsk` | headless：不询问用户，未命中 allow 规则的调用直接拒绝 |
+
+注意：CLI 通过 HTTP 调用后端，Ask 决策在后端一律被拒绝（`DenyAllHandler`），所以想让 Agent 自由使用工具，应传 `--mode bypassPermissions`，或在项目目录的 `.claude/settings.json` / `.rust-ai-agent/settings.json` 中配置 `permissions.allow` 规则：
+
+```powershell
+# 以 bypassPermissions 模式进入聊天
+cargo run --bin agent-cli -- --mode bypassPermissions chat
+
+# 等价的环境变量写法
+$env:AGENT_PERMISSION_MODE = "bypassPermissions"
+cargo run --bin agent-cli -- run "把 src 下的 TODO 注释汇总成 docs/todo.md"
+```
+
+每次回答尾部会显示本轮的 turns / 工具调用次数 / token 用量；如果模型维护了任务清单，还会在回答后列出当前 todos。聊天模式内输入 `/help` 查看可用命令。
 
 也可以通过环境变量固定服务地址和用户：
 
@@ -363,7 +465,7 @@ Set-Location F:\codex\Rust_for_AI-agent
 生成文件：
 
 ```text
-dist\Rust-AI-Agent-Setup-0.1.1-x64.exe
+dist\Rust-AI-Agent-Setup-0.2.0-x64.exe
 ```
 
 双击该 `.exe` 并按向导安装。安装完成页可直接启动桌面版；桌面版启动器会在需要时隐藏启动本机 CLIProxyAPI 和 Rust Agent 后端服务。安装包会迁移并移除旧 ZIP 版的 `%LOCALAPPDATA%\RustAIAgent` 程序目录，但不会删除 `%LOCALAPPDATA%\RustAIAgentData` 或 CLIProxyAPI 的 OAuth 账号凭据。
@@ -395,7 +497,7 @@ agent-cli run "分析我的项目"
 ```powershell
 Set-Location F:\codex\Rust_for_AI-agent
 npm.cmd pack .\packaging\npm\agent-cli --pack-destination .\dist
-npm.cmd install --global .\dist\rust-ai-agent-cli-0.1.0.tgz
+npm.cmd install --global .\dist\rust-ai-agent-cli-0.2.0.tgz
 ```
 
 需要发布 npm 包时：
@@ -422,12 +524,22 @@ agent-cli health
 curl http://127.0.0.1:8080/health
 ```
 
-运行 Agent：
+运行 Agent（`mode` 和 `cwd` 可选；响应中包含 `turns`、`tool_calls` 和 `usage` 字段）：
 
 ```bash
 curl -X POST http://127.0.0.1:8080/v1/agent/run \
   -H 'content-type: application/json' \
-  -d '{"session_id":"demo-session","user_id":"alice","input":"请研究 Rust AI Agent，并总结我的费用预算"}'
+  -d '{"session_id":"demo-session","user_id":"alice","input":"请研究 Rust AI Agent，并总结我的费用预算","mode":"bypassPermissions","cwd":"F:/codex/Rust_for_AI-agent"}'
+```
+
+会话查询（会话由后端按 `session_id` 持久化，包含完整的多轮消息与工具调用轨迹）：
+
+```bash
+# 列出所有会话摘要（id / message_count / updated_at，按更新时间倒序）
+curl http://127.0.0.1:8080/v1/sessions
+
+# 读取单个会话的完整内容
+curl http://127.0.0.1:8080/v1/sessions/demo-session
 ```
 
 显式写入和检索长期记忆：
@@ -467,10 +579,20 @@ AGENT_ENABLE_SANDBOX=true AGENT_SANDBOX_TIMEOUT_MS=2000 cargo run
 
 ```bash
 cargo fmt -- --check
-cargo test
+cargo test --lib   # 112 个测试
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
+## 设计来源
+
+本次架构升级的核心设计移植自 Claude Code（仓库根目录的 `claude-code/` 为只读参考实现，不参与编译）：
+
+- **工具协议**：`ChatMessage / ContentBlock（text / tool_use / tool_result）/ ToolDefinition / Usage / StopReason` 的中立消息格式，以及 OpenAI-compatible 端点上的 tool_calls 双向转换。
+- **权限管线**：五种 `PermissionMode`、`allow / ask / deny` 规则（`"Bash(git *)"` 前缀匹配语法）、首命中胜出的评估顺序、`.git/` 内部写保护，以及 Bash 复合命令逐段评估（任何一段 Deny 则整体 Deny）。
+- **上下文压缩**：阈值公式 `context_window - min(max_output_tokens, 20000) - 13000`（13000 对应 Claude Code 的 `AUTOCOMPACT_BUFFER_TOKENS`），压缩时保留最后一个「干净」user 消息及其后缀，保证不切断 tool_use/tool_result 配对。
+- **上下文构建**：系统提示词静态段在前、动态段在后以保护 prompt cache；`CLAUDE.md` / `AGENTS.md` 层级加载与 `@path` include 语义。
+- **TodoWrite / WebFetch / Task**：会话级任务清单的 content + activeForm 双形态与单一 in_progress 约束；WebFetch 的域名级权限规则与本地/私网地址拒绝；Task 的子代理委派语义。
+
 ## 设计说明
 
-工程刻意把 `ModelProvider`、`Planner`、`AgentWorker`、`MemoryStore` 和 `EvaluationStore` 做成可替换接口，先用确定性实现把数据流和观测闭环跑通，再逐步接入向量检索、真正的工具调用、OpenTelemetry、领域评测集和隔离执行服务。
+工程刻意把 `ModelProvider`、`Planner`、`Tool`、`PermissionHandler`、`MemoryStore` 和 `EvaluationStore` 做成可替换接口：`ModelProvider` 已有 offline / OpenAI-compatible（含 CLIProxyAPI）实现，`PermissionHandler` 在 HTTP headless 场景使用 `DenyAllHandler`，交互式前端可注入自己的实现弹窗询问用户。后续可在此基础上接入向量检索、OpenTelemetry、领域评测集和隔离执行服务。

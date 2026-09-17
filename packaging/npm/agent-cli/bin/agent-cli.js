@@ -16,12 +16,15 @@ Usage:
   agent-cli [options] models
   agent-cli [options] verify [--model <model>]
   agent-cli [options] login <provider> [--wait]
+  agent-cli [options] sessions
+  agent-cli [options] session <id>
 
 Options:
   --server <url>       Rust Agent URL (default: ${defaultServer})
   --user-id <id>       User ID (default: ${defaultUser})
   --session-id <id>    Session ID
-  -h, --help           Show this help
+  --mode <mode>        Permission mode: default / plan / acceptEdits / bypassPermissions / dontAsk
+  -h, --help           Show that help
 `);
 }
 
@@ -34,6 +37,7 @@ function parseArgs(argv) {
     args: [],
     wait: false,
     model: null,
+    mode: process.env.AGENT_PERMISSION_MODE || null,
   };
   let index = 0;
   while (index < argv.length) {
@@ -43,6 +47,7 @@ function parseArgs(argv) {
     else if (value === "--session-id") options.sessionId = argv[++index];
     else if (value === "--model") options.model = argv[++index];
     else if (value === "--wait") options.wait = true;
+    else if (value === "--mode") options.mode = argv[++index];
     else if (value === "-h" || value === "--help") options.help = true;
     else if (!options.command) options.command = value;
     else options.args.push(value);
@@ -83,19 +88,31 @@ async function request(options, path, init = {}) {
 }
 
 async function runAgent(options, input) {
+  const body = {
+    session_id: options.sessionId,
+    user_id: options.userId,
+    input,
+  };
+  if (options.mode) body.mode = options.mode;
   return request(options, "/v1/agent/run", {
     method: "POST",
-    body: JSON.stringify({
-      session_id: options.sessionId,
-      user_id: options.userId,
-      input,
-    }),
+    body: JSON.stringify(body),
   });
+}
+
+function renderTodos(todos) {
+  if (!Array.isArray(todos) || !todos.length) return "";
+  const lines = todos.map((todo, index) => {
+    const active = todo.active_form || todo.content;
+    return `${index + 1}. [${todo.status}] ${active}`;
+  });
+  return `\ntodos:\n${lines.map((line) => `  ${line}`).join("\n")}\n`;
 }
 
 function printResponse(response) {
   console.log(response.output);
-  console.log(`\n[session=${response.session_id} execution=${response.execution_id} score=${Number(response.evaluation?.total_score || 0).toFixed(1)}]`);
+  console.log(renderTodos(response.todos));
+  console.log(`[session=${response.session_id} execution=${response.execution_id} score=${Number(response.evaluation?.total_score || 0).toFixed(1)} turns=${response.turns ?? 0} tool_calls=${response.tool_calls ?? 0} tokens=${response.usage?.input_tokens ?? 0}in/${response.usage?.output_tokens ?? 0}out]`);
 }
 
 async function chat(options, prompt) {
@@ -112,7 +129,7 @@ async function chat(options, prompt) {
       if (!input) continue;
       if (input === "/exit" || input === "/quit") break;
       if (input === "/help") {
-        console.log("/exit 退出；/health 检查服务；/models 查看模型；其他文本发送给 Agent。\n");
+        console.log("/exit 退出；/health 检查服务；/models 查看模型；/sessions 列出会话；其他文本发送给 Agent。\n");
         continue;
       }
       if (input === "/health") {
@@ -122,6 +139,13 @@ async function chat(options, prompt) {
       if (input === "/models") {
         const models = await request(options, "/v1/providers/cliproxyapi/models");
         console.log(models.map((model) => `- ${model.id}`).join("\n"));
+        continue;
+      }
+      if (input === "/sessions") {
+        const sessions = await request(options, "/v1/sessions");
+        for (const session of sessions) {
+          console.log(`${session.id}  messages=${session.message_count}  updated=${session.updated_at}`);
+        }
         continue;
       }
       printResponse(await runAgent(options, input));
@@ -182,6 +206,27 @@ async function main() {
       if (!options.args[0]) throw new Error("login 需要 provider，例如 codex");
       await login(options, options.args[0]);
       break;
+    case "sessions": {
+      const sessions = await request(options, "/v1/sessions");
+      if (!sessions.length) console.log("（暂无会话）");
+      for (const session of sessions) {
+        console.log(`${session.id}  messages=${session.message_count}  updated=${session.updated_at}`);
+      }
+      break;
+    }
+    case "session": {
+      if (!options.args[0]) throw new Error("session 需要会话 ID");
+      const session = await request(options, `/v1/sessions/${encodeURIComponent(options.args[0])}`);
+      console.log(`session: ${session.id}`);
+      console.log(`tokens: ${session.usage?.input_tokens ?? 0} in / ${session.usage?.output_tokens ?? 0} out`);
+      if (Array.isArray(session.todos) && session.todos.length) {
+        console.log("todos:");
+        session.todos.forEach((todo, index) => {
+          console.log(`  ${index + 1}. [${todo.status}] ${todo.active_form || todo.content}`);
+        });
+      }
+      break;
+    }
     default:
       throw new Error(`未知命令：${options.command}`);
   }
