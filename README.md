@@ -1,11 +1,13 @@
 # Wonderland · Rust AI Agent
 
-Wonderland 是支持多模型 API 与订阅账号的 Rust 编码工作区，提供 Windows 桌面应用、原生 CLI、npm CLI 和本地 HTTP 服务。当前版本 **0.6.0**。
+Wonderland 是支持多模型 API 与订阅账号的 Rust 编码工作区，提供 Windows 桌面应用、原生 CLI、npm CLI 和本地 HTTP 服务。当前版本 **0.7.0**。
 
 ![Wonderland 桌面工作区](docs/images/desktop-welcome.png)
 
 ## 本次升级
 
+- **项目工作台**：文件浏览与编辑、Git 变更、最近项目、内嵌终端和系统终端；按项目保留任务目录与运行中会话。
+- **官方 CLI 直连**：直接打开 Codex、Claude Code、Kimi CLI/Code、DeepSeek Harness 和自定义程序，保留原工具的登录、配置与升级方式。
 - **实时输出**：Chat Completions、OpenAI Responses、Anthropic Messages 的 SSE 统一到文本、推理、工具调用和用量事件；CLI 默认流式，桌面实时显示并可取消。断流会明确报告失败。
 - **模型协议适配**：GPT-5 / Codex 使用 Responses，保存加密推理原始封装与缓存键；Claude 使用 Messages，保留 thinking 签名与 redacted thinking，设置缓存断点；DeepSeek / Kimi 保留工具续轮的 reasoning_content，按能力发送 thinking 参数。
 - **桌面工作区**：深色中文界面、代码块复制、会话恢复、模型目录、推理档位、权限确认、API 配置、订阅登录、MCP 状态和检索面板。Ctrl+Enter 发送，Enter 换行。
@@ -14,17 +16,35 @@ Wonderland 是支持多模型 API 与订阅账号的 Rust 编码工作区，提�
 - **会话检索**：SQLite FTS5 trigram 索引，支持中文及子串查询、用户过滤、命中片段；短词回退 LIKE；会话 JSON 为原始记录，索引可重建。
 - **CLIProxyAPI 7.3.7**：分发原版 sidecar，复用订阅授权、账号刷新、额度与轮换能力；管理 API 可通过本服务完整转发，无须移植上游 Go 代码。
 
-协议适配不等于复现官方客户端的全部行为。模型效果还受模型版本、账号额度、提示词、工具和网络影响。Kimi 已使用订阅账号完成真实流式、读取、修改、再读取及推理续聊测试；OpenAI、Claude、DeepSeek 目前为模拟协议回归验证，未宣称与官方客户端效率相同。详见 [验证记录](docs/VALIDATION-0.6.0.md)。
+协议适配不等于复现官方客户端的全部行为。模型效果还受模型版本、账号额度、提示词、工具和网络影响。Kimi 已使用订阅账号完成真实流式、读取、修改、再读取及推理续聊测试；OpenAI、Claude、DeepSeek 目前为模拟协议回归验证，未宣称与官方客户端效率相同。详见 [验证记录](docs/VALIDATION-0.7.0.md)。
 
 ## Windows 桌面安装
 
 从 [GitHub Releases](https://github.com/Alice-Marx/Rust_for_AI-agent/releases) 下载：
 
-- `Wonderland-Setup-0.6.0-x64.exe`：当前用户安装程序，含桌面、服务、原生 CLI 和 CLIProxyAPI。
-- `Wonderland-0.6.0-windows-x64.zip`：便携包，解压后运行 `Start-Wonderland.ps1`。
+- `Wonderland-Setup-0.7.0-x64.exe`：当前用户安装程序，含桌面、服务、原生 CLI 和 CLIProxyAPI。
+- `Wonderland-0.7.0-windows-x64.zip`：便携包，解压后运行 `Start-Wonderland.ps1`。
 - `SHA256SUMS.txt`：产物 SHA-256 校验值。
 
 开始菜单的 Wonderland 快捷方式启动本地服务和桌面。默认服务地址为 `http://127.0.0.1:8080`，程序安装到 `%LOCALAPPDATA%\Programs\Wonderland`，数据保存在 `%LOCALAPPDATA%\WonderlandData`。升级和卸载保留用户数据。安装程序未进行代码签名。
+
+### 桌面工作台
+
+桌面应用顶部的工作区栏把对话、文件、Git 变更和 CLI 工作台放在同一个项目目录下。点击“打开项目”选择目录后，文件浏览器会识别 Rust、Python、JavaScript/TypeScript、Go、Java、Kotlin 和 C# 等常见项目，并对文本文件提供编辑、原子保存和外部修改提示。
+
+点击“终端”可打开内嵌 VT100/xterm 终端。终端使用当前用户权限运行，支持 Unicode、中文输入、粘贴、方向键、Ctrl+C、鼠标协议、替代屏幕和多个会话；终端不是 Agent 的安全沙箱。也可以点击“系统终端”在操作系统终端中打开同一工作区。
+
+“CLI 工作台”会检测 PATH 和常见安装目录中的工具，并通过“导入源码目录”添加本地已构建的入口。内置入口包括 Codex、Claude Code、Kimi CLI（Python）、Kimi Code（Node）、DeepSeek Harness 和 Wonderland CLI。选择“在内置终端打开”或“在系统终端打开”即可直接调用原程序；登录、账号、模型、权限和工具行为仍由各自官方 CLI 管理，桌面不会修改这些项目的源码。源码目录导入只保存入口配置，不会自动安装依赖或构建项目。
+
+本地 `claude-code` 分支与官方 Claude Code 会在列表中明确区分；Kimi Python 与 Kimi Node 可能都提供 `kimi` 命令，工作台会通过入口和版本指纹避免误启动。可以在“配置路径与参数”中为自定义 CLI 指定解释器和参数数组；启动目录使用当前工作区。
+
+终端和 CLI 会话会保留在各自启动时的工作目录。切换项目时，正在运行的任务不会被重定向；有历史的任务会继续显示原目录，新项目会创建新的任务上下文。关闭窗口前，桌面会提示未保存文件、运行中的 Agent 任务和终端进程。
+
+工作台使用原创矢量图标和高对比深色主题，支持 940×620 小窗口；终端渲染层兼容常见 VT100/xterm 控制序列，不宣称支持 Kitty、sixel 等所有终端扩展。
+
+![CLI 工作台](docs/images/desktop-cli.png)
+
+![内嵌原生终端](docs/images/desktop-terminal.png)
 
 ### API 密钥方式
 
@@ -61,7 +81,7 @@ wonderland-cli search "模型适配"
 wonderland-cli profile --model gpt-5.4
 ```
 
-发布前可安装本地包：`npm install -g ./dist/rust-ai-wonderland-cli-0.6.0.tgz`。命令别名为 `wonderland`、`wonderland-cli`；原生 `wonderland.exe` 是后端服务，因此安装两种 CLI 后建议使用 `wonderland-cli` 并检查 PATH 顺序。
+发布前可安装本地包：`npm install -g ./dist/rust-ai-wonderland-cli-0.7.0.tgz`。命令别名为 `wonderland`、`wonderland-cli`；原生 `wonderland.exe` 是后端服务，因此安装两种 CLI 后建议使用 `wonderland-cli` 并检查 PATH 顺序。
 
 原生 CLI 使用 `wonderland-cli --model gpt-5.4 profile`（全局参数放在子命令前）。`--no-stream` 等待完整回答，`--reasoning` 按模型能力选择档位。交互终端会询问需要批准的工具参数；重定向/非交互终端不会擅自批准。
 
@@ -188,5 +208,7 @@ npm test --prefix packaging/npm/wonderland-cli
 脚本尊重既有 Rust 环境，支持 `-TargetDir`、`-CliProxyApiExecutable`、`-SkipBuild`；Inno Setup 6/7 均可。默认下载 CLIProxyAPI 并验证上游 SHA-256；只打包显式允许的程序与许可证，排除账号和配置。产物在 `dist/`。
 
 `cargo build --features ui-snapshots --bin wonderland-desktop` 提供开发专用渲染回归模式：设置 `WONDERLAND_SNAPSHOT` 为 PNG 路径会保存应用自身 framebuffer 后退出，可加 `WONDERLAND_SNAPSHOT_SETTINGS=1`、`WONDERLAND_SNAPSHOT_CONVERSATION=1`。正式包不启用此功能。
+
+工作台截图可设置 `WONDERLAND_SNAPSHOT_PANE=cli|files|changes|terminal`；`WONDERLAND_SNAPSHOT_COMPACT=1` 检查小窗口。Linux 文件选择器运行时需要桌面 D-Bus、xdg-desktop-portal 和对应桌面后端；Linux 终端会话清理要求支持 pidfd 的内核（5.3+）。
 
 参考映射与许可见 [REFERENCES.md](REFERENCES.md) 和 [第三方说明](packaging/third-party/)。

@@ -1,6 +1,6 @@
 # rust-ai-wonderland-cli
 
-Wonderland 0.6.0 的零依赖终端客户端。Node.js 18+，连接已启动的 Wonderland Rust 后端；后端来自桌面安装包、便携包或源码构建。npm 包不包含后端。
+Wonderland 0.7.0 的零依赖终端客户端。Node.js 18+，连接已启动的 Wonderland Rust 后端；后端来自桌面安装包、便携包或源码构建。npm 包不包含后端。
 
 ```sh
 npm install -g rust-ai-wonderland-cli

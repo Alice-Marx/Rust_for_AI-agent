@@ -1,6 +1,6 @@
 [package]
 name = "wonderland"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 default-run = "wonderland"
 description = "Wonderland: a production-minded Rust AI agent foundation with memory, collaboration, planning and evaluation"
@@ -36,6 +36,9 @@ futures-util = "0.3.34"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_Security_Cryptography", "Win32_Security_Isolation", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Memory"] }
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+portable-pty = "0.9"
+vt100 = "0.16.2"
+rfd = "0.15"
 
 [features]
 ui-snapshots = ["dep:image"]

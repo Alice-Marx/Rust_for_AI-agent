@@ -8,10 +8,20 @@ impl DesktopApp {
             return;
         };
         self.snapshot_frames += 1;
+        if self.snapshot_frames == 1 {
+            if let Ok(mode) = std::env::var("WONDERLAND_SNAPSHOT_PANE") {
+                self.workbench.prepare_snapshot(&mode);
+            }
+        }
         if self.snapshot_frames == 1 && std::env::var_os("WONDERLAND_SNAPSHOT_COMPACT").is_some() {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(940.0, 620.0)));
         }
-        if self.snapshot_frames == 8 {
+        let capture_frame = if std::env::var_os("WONDERLAND_SNAPSHOT_PANE").is_some() {
+            70
+        } else {
+            8
+        };
+        if self.snapshot_frames == capture_frame {
             if std::env::var_os("WONDERLAND_SNAPSHOT_CONVERSATION").is_some() {
                 self.tasks[0].title = "修复求和函数".into();
                 self.tasks[0].messages=vec![ChatMessage{role:MessageRole::User,text:"检查 sum.js 中的求和逻辑，修复后验证结果。".into()},ChatMessage{role:MessageRole::Agent,text:"已修复 sum(a, b) 的运算符，并验证正数与负数输入。\n\n```javascript\nfunction sum(a, b) {\n  return a + b;\n}\n```\n\n- sum(2, 3) → 5\n- sum(-2, 5) → 3".into()}];
@@ -68,6 +78,7 @@ impl DesktopApp {
                 .clicked()
                 {
                     self.view = ViewMode::Parallel;
+                    self.workbench.pane = workbench::Pane::Chat;
                 }
                 if button(
                     ui,
@@ -79,6 +90,7 @@ impl DesktopApp {
                 .clicked()
                 {
                     self.view = ViewMode::Planning;
+                    self.workbench.pane = workbench::Pane::Chat;
                 }
             });
         });
@@ -635,7 +647,10 @@ impl DesktopApp {
         });
         ui.collapsing("工作区与服务", |ui| {
             ui.label("工作目录");
-            ui.add(TextEdit::singleline(&mut self.working_dir).desired_width(f32::INFINITY));
+            ui.label(RichText::new(&self.working_dir).small());
+            if ui.button("选择项目目录…").clicked() {
+                self.workbench.choose_root();
+            }
             ui.label("服务地址");
             ui.add(TextEdit::singleline(&mut self.server_url).desired_width(f32::INFINITY));
             ui.label("用户标识");

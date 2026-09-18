@@ -33,5 +33,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxi-dev libgl1-mesa-dev
-      - run: cargo check --locked --all-targets
+        # rfd uses xdg-portal + async-std (pure Rust D-Bus); GTK development
+        # packages are unnecessary. Native PTYs use libc and need no display.
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxi-dev libgl1-mesa-dev
+      - run: cargo check --locked --all-targets --features ui-snapshots
+      - name: Headless desktop bridge, workspace and native PTY tests
+        run: cargo test --locked --lib desktop_

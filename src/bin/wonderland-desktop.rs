@@ -20,6 +20,8 @@ use wonderland::model::{AgentRequest, AgentResponse};
 mod desktop_ui;
 #[path = "desktop/icons.rs"]
 mod icons;
+#[path = "desktop/workbench.rs"]
+mod workbench;
 
 const BG: Color32 = Color32::from_rgb(16, 19, 24);
 const PANEL: Color32 = Color32::from_rgb(21, 25, 32);
@@ -51,6 +53,8 @@ struct ChatMessage {
 struct Task {
     id: String,
     session_id: String,
+    #[serde(default)]
+    cwd: String,
     title: String,
     messages: Vec<ChatMessage>,
     plan: Vec<String>,
@@ -66,6 +70,12 @@ struct Task {
     reasoning: String,
     #[serde(default)]
     usage: wonderland::provider::Usage,
+}
+
+#[derive(Clone)]
+struct PendingTaskSwitch {
+    task_id: String,
+    cwd: String,
 }
 
 enum UiEvent {
@@ -116,6 +126,7 @@ struct DesktopApp {
     user_id: String,
     tasks: Vec<Task>,
     active_task: usize,
+    pending_task_switch: Option<PendingTaskSwitch>,
     view: ViewMode,
     input: String,
     status: String,
@@ -146,6 +157,9 @@ struct DesktopApp {
     has_api_key: bool,
     permission_mode: wonderland::permissions::PermissionMode,
     approvals: Vec<serde_json::Value>,
+    workbench: workbench::Workbench,
+    closing_requested: bool,
+    allow_close: bool,
 }
 
 impl DesktopApp {
@@ -223,6 +237,23 @@ impl DesktopApp {
             .unwrap_or_else(|| "local-user".to_string());
         let server_url_for_probe = server_url.clone();
         let event_tx_for_probe = event_tx.clone();
+        let fallback_dir = std::env::current_dir()
+            .unwrap_or_else(|_| std::env::temp_dir())
+            .display()
+            .to_string();
+        let startup_dir = std::env::var("AGENT_CWD").unwrap_or_else(|_| fallback_dir.clone());
+        let storage = cc.storage.filter(|_| !snapshot);
+        let preferred_dir: String = storage
+            .and_then(|storage| eframe::get_value(storage, "working_dir"))
+            .unwrap_or(startup_dir);
+        let saved_active: Option<String> =
+            storage.and_then(|storage| eframe::get_value(storage, "active_task_id"));
+        let (active_task, working_dir, restore_notice) = restore_task_workspace(
+            &mut tasks,
+            saved_active.as_deref(),
+            &preferred_dir,
+            &fallback_dir,
+        );
         let mut app = Self {
             #[cfg(feature = "ui-snapshots")]
             snapshot_frames: 0,
@@ -230,10 +261,11 @@ impl DesktopApp {
             server_url,
             user_id,
             tasks,
-            active_task: 0,
+            active_task,
+            pending_task_switch: None,
             view: ViewMode::Planning,
             input: String::new(),
-            status: "就绪".to_string(),
+            status: restore_notice.unwrap_or_else(|| "就绪".to_string()),
             login_provider: "codex".to_string(),
             login_state: None,
             login_url: None,
@@ -249,12 +281,7 @@ impl DesktopApp {
             mcp_servers: Vec::new(),
             accounts: Vec::new(),
             show_conn_panel: snapshot && std::env::var_os("WONDERLAND_SNAPSHOT_SETTINGS").is_some(),
-            working_dir: std::env::var("AGENT_CWD").unwrap_or_else(|_| {
-                std::env::current_dir()
-                    .unwrap_or_default()
-                    .display()
-                    .to_string()
-            }),
+            working_dir: working_dir.clone(),
             mcp_login: None,
             search_query: String::new(),
             search_hits: Vec::new(),
@@ -265,12 +292,15 @@ impl DesktopApp {
             has_api_key: false,
             permission_mode: wonderland::permissions::PermissionMode::Default,
             approvals: Vec::new(),
+            workbench: workbench::Workbench::new(&working_dir),
+            closing_requested: false,
+            allow_close: false,
         };
         if let Some(storage) = cc.storage.filter(|_| !snapshot) {
             app.selected_model = eframe::get_value(storage, "selected_model").unwrap_or_default();
             app.reasoning_effort =
                 eframe::get_value(storage, "reasoning_effort").unwrap_or_else(|| "auto".into());
-            app.working_dir = eframe::get_value(storage, "working_dir").unwrap_or(app.working_dir);
+            app.workbench.restore(storage);
         }
         spawn_json_request(
             app.event_tx.clone(),
@@ -283,21 +313,95 @@ impl DesktopApp {
     }
 
     fn add_task(&mut self) {
+        if self.workbench.has_pending_root() {
+            self.status = "请先确认或取消工作区切换".into();
+            return;
+        }
+        self.pending_task_switch = None;
         let number = self.tasks.len() + 1;
-        self.tasks.push(Task::new(&format!("任务 {number}")));
+        let mut task = Task::new(&format!("任务 {number}"));
+        task.cwd = self.working_dir.clone();
+        self.tasks.push(task);
         self.active_task = self.tasks.len() - 1;
         self.view = ViewMode::Planning;
         self.status = "已创建新任务".to_string();
     }
 
+    fn select_task(&mut self, index: usize) {
+        self.sync_workspace_change();
+        let Some(task) = self.tasks.get(index) else {
+            return;
+        };
+        if existing_workspace(&task.cwd).is_none() {
+            self.status = format!(
+                "任务目录已不存在：{}。请先恢复该目录；历史任务已保留。",
+                task.cwd
+            );
+            return;
+        }
+        if same_workspace(&task.cwd, &self.workbench.root.display().to_string()) {
+            if self.workbench.has_pending_root() {
+                self.status = "请先确认或取消工作区切换".into();
+                return;
+            }
+            self.pending_task_switch = None;
+            self.active_task = index;
+            self.working_dir = self.workbench.root.display().to_string();
+            self.view = ViewMode::Planning;
+            self.workbench.pane = workbench::Pane::Chat;
+            return;
+        }
+        self.pending_task_switch = Some(PendingTaskSwitch {
+            task_id: task.id.clone(),
+            cwd: task.cwd.clone(),
+        });
+        self.workbench
+            .request_root(std::path::PathBuf::from(&task.cwd));
+        self.sync_workspace_change();
+    }
+
+    fn sync_workspace_change(&mut self) {
+        if let Some(root) = self.workbench.changed_root.take() {
+            self.working_dir = root;
+            let selected = self.pending_task_switch.take().and_then(|pending| {
+                task_selected_for_root(&self.tasks, &pending, &self.working_dir)
+            });
+            if let Some(index) = selected {
+                // This root change was requested by selecting an existing task.
+                // Keep its session and running request instead of creating a task.
+                self.active_task = index;
+                self.view = ViewMode::Planning;
+                self.workbench.pane = workbench::Pane::Chat;
+            } else {
+                apply_manual_workspace(&mut self.tasks, &mut self.active_task, &self.working_dir);
+            }
+        } else if self.pending_task_switch.is_some() && !self.workbench.has_pending_root() {
+            // The user cancelled the workbench's unsaved-file confirmation.
+            self.pending_task_switch = None;
+        }
+    }
+
     fn send_active(&mut self) {
+        self.sync_workspace_change();
         let input = self.input.trim().to_string();
         if input.is_empty() {
             return;
         }
-        let Some(task) = self.tasks.get_mut(self.active_task) else {
+        let Some(task) = self.tasks.get(self.active_task) else {
             return;
         };
+        let cwd = match request_task_cwd(
+            task,
+            &self.workbench.root,
+            self.workbench.has_pending_root(),
+        ) {
+            Ok(cwd) => cwd,
+            Err(message) => {
+                self.status = message;
+                return;
+            }
+        };
+        let task = &mut self.tasks[self.active_task];
         if task.running {
             return;
         }
@@ -327,7 +431,7 @@ impl DesktopApp {
             model: (!self.selected_model.trim().is_empty()).then(|| self.selected_model.clone()),
             skills: Vec::new(),
             mode: Some(self.permission_mode),
-            cwd: Some(self.working_dir.clone()),
+            cwd: Some(cwd),
             reasoning_effort,
             input,
         };
@@ -440,11 +544,15 @@ impl DesktopApp {
                     self.status = "连接配置已就绪".into();
                 }
                 UiEvent::SessionLoaded(session) => {
-                    if let Some(index) = self.tasks.iter().position(|t| t.session_id == session.id)
+                    let index = if let Some(index) =
+                        self.tasks.iter().position(|t| t.session_id == session.id)
                     {
-                        self.active_task = index;
+                        index
                     } else {
                         let mut task = Task::new("历史会话");
+                        // The server's legacy session format does not record a cwd.
+                        // Bind imported sessions explicitly to the current workspace.
+                        task.cwd = self.workbench.root.display().to_string();
                         task.session_id = session.id;
                         task.usage = session.usage;
                         task.messages = session
@@ -469,8 +577,9 @@ impl DesktopApp {
                             task.title = truncate(&first.text, 24);
                         }
                         self.tasks.push(task);
-                        self.active_task = self.tasks.len() - 1;
-                    }
+                        self.tasks.len() - 1
+                    };
+                    self.select_task(index);
                 }
                 UiEvent::AccountsLoaded(accounts) => {
                     self.accounts = accounts;
@@ -643,6 +752,7 @@ impl DesktopApp {
             });
         });
         ui.add_space(6.0);
+        let mut selected = None;
         ScrollArea::vertical()
             .auto_shrink([false, false])
             .max_height((available - 350.0).max(120.0))
@@ -712,12 +822,14 @@ impl DesktopApp {
                         )
                     });
                     if response.clicked() {
-                        self.active_task = index;
-                        self.view = ViewMode::Planning;
+                        selected = Some(index);
                     }
                     ui.add_space(3.0);
                 }
             });
+        if let Some(index) = selected {
+            self.select_task(index);
+        }
         ui.add_space(16.0);
         ui.separator();
         ui.add_space(12.0);
@@ -980,8 +1092,7 @@ impl DesktopApp {
                 }
             });
             if let Some(index) = selected {
-                self.active_task = index;
-                self.view = ViewMode::Planning;
+                self.select_task(index);
             }
             offset += row_count;
             ui.add_space(10.0);
@@ -993,6 +1104,9 @@ impl DesktopApp {
 }
 
 impl eframe::App for DesktopApp {
+    fn persist_egui_memory(&self) -> bool {
+        !(cfg!(feature = "ui-snapshots") && std::env::var_os("WONDERLAND_SNAPSHOT").is_some())
+    }
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         #[cfg(feature = "ui-snapshots")]
         if std::env::var_os("WONDERLAND_SNAPSHOT").is_some() {
@@ -1008,10 +1122,32 @@ impl eframe::App for DesktopApp {
         eframe::set_value(storage, "selected_model", &self.selected_model);
         eframe::set_value(storage, "reasoning_effort", &self.reasoning_effort);
         eframe::set_value(storage, "working_dir", &self.working_dir);
+        if let Some(task) = self.tasks.get(self.active_task) {
+            eframe::set_value(storage, "active_task_id", &task.id);
+        }
+        self.workbench.save(storage);
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events();
+        self.workbench.poll(ctx);
+        self.sync_workspace_change();
+        if let Some(context) = self.workbench.chat_context.take() {
+            self.input = context;
+            self.view = ViewMode::Planning;
+        }
+        let snapshot =
+            cfg!(feature = "ui-snapshots") && std::env::var_os("WONDERLAND_SNAPSHOT").is_some();
+        if !snapshot
+            && !self.allow_close
+            && ctx.input(|i| i.viewport().close_requested())
+            && (self.workbench.has_unsaved()
+                || self.workbench.has_running()
+                || self.tasks.iter().any(|t| t.running))
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.closing_requested = true;
+        }
         #[cfg(feature = "ui-snapshots")]
         self.render_snapshot(ctx);
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -1023,8 +1159,40 @@ impl eframe::App for DesktopApp {
                     .inner_margin(egui::Margin::symmetric(24, 12)),
             )
             .show(ctx, |ui| self.render_header(ui));
+        egui::TopBottomPanel::top("workspace-toolbar")
+            .frame(
+                Frame::new()
+                    .fill(PANEL)
+                    .inner_margin(egui::Margin::symmetric(16, 8)),
+            )
+            .show(ctx, |ui| self.workbench.toolbar(ui));
+        self.workbench
+            .terminal_panel(ctx, self.closing_requested || !self.approvals.is_empty());
+        self.workbench.dialogs(ctx);
+        self.sync_workspace_change();
+        if self.closing_requested {
+            egui::Modal::new(egui::Id::new("close-workspace-dialog")).show(ctx, |ui| {
+                ui.heading("关闭工作区");
+                ui.label(
+                    "存在未保存编辑或正在运行的会话。退出会丢弃未保存编辑，并停止终端和对话任务。",
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("继续工作").clicked() {
+                        self.closing_requested = false;
+                    }
+                    if ui.button("停止并退出").clicked() {
+                        self.workbench.stop_all();
+                        self.cancellations.clear();
+                        self.allow_close = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+            });
+        }
         // Give the conversation room when settings are open on a small screen.
-        if !self.show_conn_panel || ctx.screen_rect().width() >= 1180.0 {
+        if self.workbench.pane == workbench::Pane::Chat
+            && (!self.show_conn_panel || ctx.screen_rect().width() >= 1180.0)
+        {
             egui::SidePanel::left("task-list")
                 .default_width(236.0)
                 .min_width(210.0)
@@ -1038,9 +1206,15 @@ impl eframe::App for DesktopApp {
         self.render_approval(ctx);
         egui::CentralPanel::default()
             .frame(Frame::new().fill(BG).inner_margin(24.0))
-            .show(ctx, |ui| match self.view {
-                ViewMode::Planning => self.render_planning(ui),
-                ViewMode::Parallel => self.render_parallel(ui),
+            .show(ctx, |ui| {
+                if self.workbench.pane != workbench::Pane::Chat {
+                    self.workbench.render_pane(ui);
+                } else {
+                    match self.view {
+                        ViewMode::Planning => self.render_planning(ui),
+                        ViewMode::Parallel => self.render_parallel(ui),
+                    }
+                }
             });
     }
 }
@@ -1054,11 +1228,235 @@ fn push_tool_note(task: &mut Task, label: String) {
     }
 }
 
+fn existing_workspace(path: &str) -> Option<std::path::PathBuf> {
+    if path.trim().is_empty() {
+        return None;
+    }
+    let path = std::path::Path::new(path).canonicalize().ok()?;
+    path.is_dir().then_some(path)
+}
+
+fn same_workspace(left: &str, right: &str) -> bool {
+    match (existing_workspace(left), existing_workspace(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn task_selected_for_root(
+    tasks: &[Task],
+    pending: &PendingTaskSwitch,
+    root: &str,
+) -> Option<usize> {
+    same_workspace(&pending.cwd, root)
+        .then(|| {
+            tasks
+                .iter()
+                .position(|task| task.id == pending.task_id && same_workspace(&task.cwd, root))
+        })
+        .flatten()
+}
+
+fn restore_task_workspace(
+    tasks: &mut Vec<Task>,
+    saved_active: Option<&str>,
+    preferred: &str,
+    fallback: &str,
+) -> (usize, String, Option<String>) {
+    let mut notice = None;
+    let root = if existing_workspace(preferred).is_some() {
+        preferred.to_owned()
+    } else {
+        notice = Some(format!(
+            "上次工作区已不存在：{preferred}。已打开当前目录，历史任务保持原目录。"
+        ));
+        fallback.to_owned()
+    };
+    if tasks.is_empty() {
+        tasks.push(Task::new("新任务"));
+    }
+    for task in tasks.iter_mut() {
+        if task.cwd.is_empty() {
+            task.cwd = root.clone();
+        }
+    }
+    let active = saved_active
+        .and_then(|id| tasks.iter().position(|task| task.id == id))
+        .unwrap_or(0);
+    if existing_workspace(&tasks[active].cwd).is_some() {
+        (active, tasks[active].cwd.clone(), notice)
+    } else {
+        notice = Some(format!(
+            "历史任务目录已不存在：{}。已保留历史，并在当前工作区新建任务。",
+            tasks[active].cwd
+        ));
+        let mut task = Task::new("新任务");
+        task.cwd = root.clone();
+        tasks.push(task);
+        (tasks.len() - 1, root, notice)
+    }
+}
+
+fn apply_manual_workspace(tasks: &mut Vec<Task>, active: &mut usize, root: &str) {
+    let preserve_current = tasks.get(*active).is_some_and(|task| {
+        (task.running || !task.messages.is_empty()) && !same_workspace(&task.cwd, root)
+    });
+    if preserve_current || tasks.get(*active).is_none() {
+        let mut task = Task::new(&format!("任务 {}", tasks.len() + 1));
+        task.cwd = root.into();
+        tasks.push(task);
+        *active = tasks.len() - 1;
+    } else if let Some(task) = tasks.get_mut(*active) {
+        task.cwd = root.into();
+    }
+}
+
+fn request_task_cwd(
+    task: &Task,
+    root: &std::path::Path,
+    root_pending: bool,
+) -> Result<String, String> {
+    if root_pending {
+        return Err("请先确认或取消工作区切换，再发送任务".into());
+    }
+    let current = root.display().to_string();
+    if existing_workspace(&task.cwd).is_none() {
+        return Err(format!("任务目录不存在：{}。未发送请求。", task.cwd));
+    }
+    if !same_workspace(&task.cwd, &current) {
+        return Err("任务目录与当前工作区不一致，请重新选择该任务后发送".into());
+    }
+    Ok(task.cwd.clone())
+}
+
+#[cfg(test)]
+mod workspace_task_tests {
+    use super::*;
+
+    fn task_at(root: &std::path::Path, running: bool) -> Task {
+        let mut task = Task::new("existing task");
+        task.cwd = root.display().to_string();
+        task.running = running;
+        task.messages.push(ChatMessage {
+            role: MessageRole::User,
+            text: "existing history".into(),
+        });
+        task
+    }
+
+    #[test]
+    fn task_selection_waits_for_matching_root_and_preserves_running_session() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let tasks = vec![task_at(first.path(), false), task_at(second.path(), true)];
+        let pending = PendingTaskSwitch {
+            task_id: tasks[1].id.clone(),
+            cwd: tasks[1].cwd.clone(),
+        };
+        assert_eq!(
+            task_selected_for_root(&tasks, &pending, &tasks[0].cwd),
+            None
+        );
+        assert_eq!(
+            task_selected_for_root(&tasks, &pending, &tasks[1].cwd),
+            Some(1)
+        );
+        assert!(tasks[1].running);
+        assert_eq!(tasks.len(), 2);
+        let reordered = vec![tasks[1].clone(), tasks[0].clone()];
+        assert_eq!(
+            task_selected_for_root(&reordered, &pending, &tasks[1].cwd),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn manual_workspace_preserves_history_but_same_root_does_not_duplicate_running_tasks() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let original = task_at(first.path(), true);
+        let original_id = original.id.clone();
+        let original_cwd = original.cwd.clone();
+        let mut tasks = vec![original];
+        let mut active = 0;
+        apply_manual_workspace(
+            &mut tasks,
+            &mut active,
+            &first.path().join(".").display().to_string(),
+        );
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, original_id);
+        apply_manual_workspace(
+            &mut tasks,
+            &mut active,
+            &second.path().display().to_string(),
+        );
+        assert_eq!(active, 1);
+        assert_eq!(tasks.len(), 2);
+        assert!(same_workspace(&tasks[0].cwd, &original_cwd));
+        assert!(tasks[0].running);
+        assert!(tasks[1].messages.is_empty());
+    }
+
+    #[test]
+    fn send_rejects_pending_missing_or_wrong_workspace_without_retargeting_task() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let mut task = task_at(first.path(), false);
+        assert!(request_task_cwd(&task, first.path(), true).is_err());
+        assert!(request_task_cwd(&task, second.path(), false).is_err());
+        assert_eq!(
+            request_task_cwd(&task, first.path(), false).unwrap(),
+            task.cwd
+        );
+        task.cwd = first.path().join("missing").display().to_string();
+        assert!(request_task_cwd(&task, first.path(), false).is_err());
+    }
+
+    #[test]
+    fn restoring_missing_directory_preserves_history_and_selects_valid_workspace() {
+        let fallback = tempfile::tempdir().unwrap();
+        let missing = fallback.path().join("deleted-project");
+        let historical = task_at(&missing, false);
+        let historical_id = historical.id.clone();
+        let historical_cwd = historical.cwd.clone();
+        let mut tasks = vec![historical];
+        let (active, root, notice) = restore_task_workspace(
+            &mut tasks,
+            Some(&historical_id),
+            &historical_cwd,
+            &fallback.path().display().to_string(),
+        );
+        assert_eq!(active, 1);
+        assert_eq!(tasks[0].cwd, historical_cwd);
+        assert_eq!(tasks[0].messages.len(), 1);
+        assert_eq!(root, fallback.path().display().to_string());
+        assert!(notice.is_some());
+        assert!(request_task_cwd(&tasks[active], fallback.path(), false).is_ok());
+    }
+
+    #[test]
+    fn restoring_selected_task_uses_its_directory_and_keeps_other_task_directories() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let mut tasks = vec![task_at(first.path(), false), task_at(second.path(), false)];
+        let id = tasks[1].id.clone();
+        let first_cwd = tasks[0].cwd.clone();
+        let (active, root, _) =
+            restore_task_workspace(&mut tasks, Some(&id), &first_cwd, &first_cwd);
+        assert_eq!(active, 1);
+        assert_eq!(root, tasks[1].cwd);
+        assert_eq!(tasks[0].cwd, first_cwd);
+        assert_eq!(tasks.len(), 2);
+    }
+}
+
 impl Task {
     fn new(title: &str) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
             session_id: Uuid::new_v4().to_string(),
+            cwd: String::new(),
             title: title.to_string(),
             messages: Vec::new(),
             plan: Vec::new(),

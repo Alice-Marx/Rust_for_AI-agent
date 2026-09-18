@@ -14,6 +14,9 @@ pub enum Icon {
     Arrow,
     Shield,
     Link,
+    Terminal,
+    Branch,
+    File,
 }
 
 pub fn draw(ui: &Ui, rect: Rect, icon: Icon, color: Color32) {
@@ -124,6 +127,36 @@ pub fn draw(ui: &Ui, rect: Rect, icon: Icon, color: Color32) {
             p.circle_stroke(at(19., 19.), 2. * rect.width() / 24., stroke);
             line(&[(7., 12.), (12., 12.), (16., 5.)]);
             line(&[(12., 12.), (16., 19.)]);
+        }
+        Icon::Terminal => {
+            p.rect_stroke(
+                Rect::from_min_max(at(2., 4.), at(22., 20.)),
+                3,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            line(&[(6., 8.), (10., 12.), (6., 16.)]);
+            line(&[(13., 16.), (18., 16.)]);
+        }
+        Icon::Branch => {
+            line(&[(6., 7.), (6., 17.)]);
+            line(&[(6., 14.), (16., 14.), (18., 12.), (18., 7.)]);
+            for (x, y) in [(6., 4.), (6., 20.), (18., 4.)] {
+                p.circle_stroke(at(x, y), 2.5 * rect.width() / 24., stroke);
+            }
+        }
+        Icon::File => {
+            line(&[
+                (5., 2.),
+                (14., 2.),
+                (20., 8.),
+                (20., 22.),
+                (5., 22.),
+                (5., 2.),
+            ]);
+            line(&[(14., 2.), (14., 8.), (20., 8.)]);
+            line(&[(9., 13.), (16., 13.)]);
+            line(&[(9., 17.), (15., 17.)]);
         }
     }
 }
