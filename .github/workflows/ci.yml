@@ -24,6 +24,7 @@ jobs:
       - run: npm test --prefix packaging/npm/wonderland-cli
   unix-compile:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-22.04, macos-latest]
     runs-on: ${{ matrix.os }}

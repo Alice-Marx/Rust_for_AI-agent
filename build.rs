@@ -1,5 +1,6 @@
 fn main() {
     // 把 Wonderland 图标嵌进 Windows 可执行文件（资源管理器 / 任务栏显示）。
+    #[cfg(windows)]
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
         let mut resource = winresource::WindowsResource::new();
