@@ -299,7 +299,14 @@ fn validate_version_identity(profile: &CliProfile, version: &str) -> Result<()> 
 pub fn prepare_shell(workspace: &Path) -> Result<LaunchSpec> {
     let cwd = validated_workspace(workspace)?;
     #[cfg(windows)]
-    let (executable, args) = (powershell()?, vec!["-NoLogo".into()]);
+    let (executable, args) = {
+        // Windows PowerShell 5 otherwise inherits the machine's OEM code page
+        // and can replace CJK output with '?' on non-Chinese Windows installs.
+        let mut args = encoded_powershell_args("");
+        args.retain(|arg| arg != "-NoProfile");
+        args.insert(1, "-NoExit".into());
+        (powershell()?, args)
+    };
     #[cfg(unix)]
     let (executable, args) = (
         env::var("SHELL")
@@ -522,7 +529,7 @@ pub fn posix_quote(value: &str) -> String {
 
 #[cfg(any(windows, test))]
 fn encoded_powershell_args(script: &str) -> Vec<String> {
-    let script = format!("[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding; $OutputEncoding = [Console]::OutputEncoding; {script}");
+    let script = format!("[Console]::InputEncoding = New-Object System.Text.UTF8Encoding; [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding; $OutputEncoding = [Console]::OutputEncoding; {script}");
     let bytes: Vec<_> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
     vec![
         "-NoLogo".into(),

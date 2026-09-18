@@ -77,7 +77,12 @@ fn verify_job_cleanup(shell_exits_first: bool) {
     let mut terminal = TerminalSession::spawn(
         TerminalCommand {
             program: PathBuf::from("/bin/bash"),
-            args: vec!["--noprofile".into(), "--norc".into(), "-i".into()],
+            args: vec![
+                "--noprofile".into(),
+                "--norc".into(),
+                "+H".into(),
+                "-i".into(),
+            ],
             cwd: workspace.path().into(),
             env: BTreeMap::new(),
             title: "session cleanup regression".into(),

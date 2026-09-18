@@ -1166,11 +1166,17 @@ mod tests {
 
     fn shell_command(cwd: &Path) -> TerminalCommand {
         #[cfg(windows)]
-        let (program, args) = (
-            PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()))
-                .join("System32/WindowsPowerShell/v1.0/powershell.exe"),
-            vec!["-NoLogo".into(), "-NoProfile".into(), "-NoExit".into()],
-        );
+        let (program, args) = {
+            let mut shell = crate::desktop_bridge::prepare_shell(cwd).unwrap();
+            shell.args.insert(1, "-NoProfile".into());
+            // Exercise the legacy Windows shell as well as modern pwsh: its
+            // default code page differs across English and Chinese machines.
+            let program = PathBuf::from(
+                std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()),
+            )
+            .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+            (program, shell.args)
+        };
         #[cfg(not(windows))]
         let (program, args) = (PathBuf::from("/bin/sh"), vec!["-i".into()]);
         TerminalCommand {
