@@ -209,10 +209,26 @@ pub fn build_system_prompt(
     skills_section: Option<&str>,
     extra_instructions: Option<&str>,
 ) -> String {
+    build_system_prompt_with_profile(env, skills_section, extra_instructions, None)
+}
+
+/// 同 `build_system_prompt`，但额外注入模型专属的工具使用指引。
+/// 指引属于静态段（紧跟安全准则），不会破坏 prompt cache 前缀。
+pub fn build_system_prompt_with_profile(
+    env: &EnvironmentInfo,
+    skills_section: Option<&str>,
+    extra_instructions: Option<&str>,
+    tool_guidance: Option<&str>,
+) -> String {
     let mut prompt = String::new();
     prompt.push_str(IDENTITY_SECTION);
     prompt.push('\n');
     prompt.push_str(SAFETY_SECTION);
+
+    if let Some(guidance) = tool_guidance.filter(|value| !value.trim().is_empty()) {
+        prompt.push_str(guidance.trim_end());
+        prompt.push('\n');
+    }
 
     if let Some(extra) = extra_instructions.filter(|value| !value.trim().is_empty()) {
         prompt.push_str("\n## Additional Instructions\n\n");
@@ -267,6 +283,27 @@ pub fn build_system_prompt(
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn tool_guidance_is_injected_before_dynamic_sections() {
+        let directory = tempfile::tempdir().unwrap();
+        let env = gather_environment(directory.path());
+        let guidance = "
+## Tool Preferences
+
+- prefer ApplyPatch
+";
+        let prompt = build_system_prompt_with_profile(&env, None, None, Some(guidance));
+        let at_guidance = prompt.find("## Tool Preferences").unwrap();
+        let at_environment = prompt.find("## Environment").unwrap();
+        assert!(at_guidance < at_environment);
+        // 空指引不产生空段。
+        let plain = build_system_prompt_with_profile(&env, None, None, Some("   "));
+        assert!(!plain.contains("## Tool Preferences"));
+        // 旧入口保持等价行为。
+        let legacy = build_system_prompt(&env, None, None);
+        assert!(!legacy.contains("## Tool Preferences"));
+    }
 
     #[test]
     fn instructions_from_parent_and_child_are_ordered_low_to_high_priority() {

@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::{
     collaboration::{AgentDirectory, ExpenseAgent, ResearchAgent},
-    context::{build_system_prompt, gather_environment},
+    context::{build_system_prompt_with_profile, gather_environment},
     evaluation::{score, EvaluationStore},
     memory::{MemoryKind, MemoryStore},
     model::{AgentRequest, AgentResponse, DelegatedResult},
@@ -53,10 +53,13 @@ pub struct AgentRuntime {
     pub sessions: SessionStore,
     /// 单次 run 内允许的最大工具调用轮数。
     pub max_turns: usize,
-    /// 模型的上下文窗口大小（token），用于自动压缩阈值。
-    pub context_window: u64,
-    /// 每次模型调用的最大输出 token 数。
-    pub max_output_tokens: u32,
+    /// 上下文窗口显式覆盖；`None` 时使用模型能力档案的取值。
+    pub context_window: Option<u64>,
+    /// 最大输出 token 显式覆盖；`None` 时使用模型能力档案的取值。
+    pub max_output_tokens: Option<u32>,
+    /// `AGENT_REASONING_EFFORT` 配置的推理档位；是否真正下发给
+    /// provider 由模型能力档案决定。
+    pub reasoning_effort: Option<String>,
 }
 
 impl AgentRuntime {
@@ -82,9 +85,11 @@ impl AgentRuntime {
             max_turns: 25,
             context_window: std::env::var("AGENT_CONTEXT_WINDOW")
                 .ok()
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(200_000),
-            max_output_tokens: 8_192,
+                .and_then(|value| value.parse().ok()),
+            max_output_tokens: std::env::var("AGENT_MAX_OUTPUT_TOKENS")
+                .ok()
+                .and_then(|value| value.parse().ok()),
+            reasoning_effort: crate::model_profile::configured_reasoning_effort(),
         }
     }
 
@@ -99,13 +104,28 @@ impl AgentRuntime {
     }
 
     pub fn with_context_window(mut self, context_window: u64) -> Self {
-        self.context_window = context_window;
+        self.context_window = Some(context_window);
         self
     }
 
     pub fn with_max_output_tokens(mut self, max_output_tokens: u32) -> Self {
-        self.max_output_tokens = max_output_tokens;
+        self.max_output_tokens = Some(max_output_tokens);
         self
+    }
+
+    pub fn with_reasoning_effort(mut self, reasoning_effort: Option<String>) -> Self {
+        self.reasoning_effort = reasoning_effort;
+        self
+    }
+
+    /// 本次 run 生效的模型能力档案：请求级模型名优先，其次 provider 默认模型。
+    pub fn model_profile_for(&self, requested_model: &str) -> crate::model_profile::ModelProfile {
+        let model = if requested_model.trim().is_empty() {
+            self.provider.default_model().unwrap_or_default()
+        } else {
+            requested_model.to_string()
+        };
+        crate::model_profile::ModelProfile::from_env(&model)
     }
 
     pub async fn register_default_agents(&self) {
@@ -140,7 +160,23 @@ impl AgentRuntime {
             .unwrap_or(std::env::current_dir()?);
         let mode = request.mode.unwrap_or(PermissionMode::Default);
         let rules = permissions::load_rules(&cwd);
-        let model = request.model.clone().unwrap_or_default();
+        let mut model = request.model.clone().unwrap_or_default();
+        if model.trim().is_empty() {
+            model = self.provider.default_model().unwrap_or_default();
+        }
+        let profile = self.model_profile_for(&model);
+        let context_window = self.context_window.unwrap_or(profile.context_window);
+        let max_output_tokens = self.max_output_tokens.unwrap_or(profile.max_output_tokens);
+        let reasoning_effort =
+            crate::model_profile::reasoning_effort_for(&profile, self.reasoning_effort.as_deref());
+        info!(
+            model = %model,
+            profile = profile.name,
+            context_window,
+            max_output_tokens,
+            reasoning_effort = reasoning_effort.as_deref().unwrap_or("none"),
+            "resolved model capability profile"
+        );
         // 借鉴 Claude Code：hook 配置随 run 从项目 settings 加载。
         let hooks = crate::hooks::load_hook_config(&cwd);
         // 借鉴 Claude Code：agents/*.md 文件定义的子代理按需注册进目录。
@@ -201,7 +237,12 @@ impl AgentRuntime {
             .join("\n");
         let plan_json = serde_json::to_string(&plan)?;
         let env = gather_environment(&cwd);
-        let system_prompt = build_system_prompt(&env, Some(&skills_section(&skill_context)), None);
+        let system_prompt = build_system_prompt_with_profile(
+            &env,
+            Some(&skills_section(&skill_context)),
+            None,
+            Some(&profile.tool_guidance(reasoning_effort.as_deref())),
+        );
         let subagent_section = crate::agent_defs::subagent_listing(&self.directory).await;
         let session_start_context = session_start.additional_context.unwrap_or_default();
         let user_prompt = format!(
@@ -228,6 +269,10 @@ impl AgentRuntime {
         );
 
         let mut session = self.sessions.load_or_create(&request.session_id)?;
+        // 会话归属用户：让 /v1/sessions?user_id=... 与长期记忆的隔离保持一致。
+        if request.user_id.is_some() {
+            session.user_id = request.user_id.clone();
+        }
         session.messages.push(ChatMessage::user(user_prompt));
 
         let output_dir = self
@@ -267,7 +312,8 @@ impl AgentRuntime {
                 break;
             }
 
-            self.maybe_compact(&mut session, &model).await?;
+            self.maybe_compact(&mut session, &model, context_window, max_output_tokens)
+                .await?;
             // todos 可能被上一轮 TodoWrite 更新，作为动态段注入系统提示词。
             let run_prompt = attach_todo_section(&system_prompt, &tool_ctx.todos);
 
@@ -278,8 +324,9 @@ impl AgentRuntime {
                     system: run_prompt,
                     messages: session.messages.clone(),
                     tools: self.tools.tool_definitions(),
-                    max_tokens: self.max_output_tokens,
+                    max_tokens: max_output_tokens,
                     temperature: None,
+                    reasoning_effort: reasoning_effort.clone(),
                 })
                 .await?;
             session.usage += response.usage;
@@ -528,7 +575,13 @@ impl AgentRuntime {
     /// 把历史对话压缩为一条摘要消息，并保留最后一个干净的 user 消息
     /// （含 Text 且无 ToolResult）及其之后的消息，保证 tool_use/tool_result
     /// 配对不被切断。摘要失败时退化为直接截断。
-    async fn maybe_compact(&self, session: &mut Session, model: &str) -> Result<()> {
+    async fn maybe_compact(
+        &self,
+        session: &mut Session,
+        model: &str,
+        context_window: u64,
+        max_output_tokens: u32,
+    ) -> Result<()> {
         let serialized_chars: u64 = session
             .messages
             .iter()
@@ -539,9 +592,7 @@ impl AgentRuntime {
             })
             .sum();
         let estimate = serialized_chars / CHARS_PER_TOKEN;
-        let effective = self
-            .context_window
-            .saturating_sub(u64::from(self.max_output_tokens.min(20_000)));
+        let effective = context_window.saturating_sub(u64::from(max_output_tokens.min(20_000)));
         let threshold = effective.saturating_sub(AUTOCOMPACT_BUFFER_TOKENS);
         if estimate <= threshold {
             return Ok(());
@@ -565,6 +616,7 @@ impl AgentRuntime {
                 tools: Vec::new(),
                 max_tokens: COMPACT_MAX_TOKENS,
                 temperature: None,
+                reasoning_effort: None,
             })
             .await;
 
@@ -660,7 +712,10 @@ fn render_message_for_summary(message: &ChatMessage) -> String {
                     format!("[tool_result] {content}")
                 }
             }
+            // 压缩摘要不携带思维链，避免把推理内容当成事实回灌给模型。
+            ContentBlock::Thinking { .. } => String::new(),
         })
+        .filter(|line| !line.is_empty())
         .collect::<Vec<_>>()
         .join("\n");
     format!("{role}: {body}")
@@ -840,7 +895,7 @@ mod tests {
                         pending.remove(position);
                         completed.push(tool_use_id.clone());
                     }
-                    ContentBlock::Text { .. } => {}
+                    ContentBlock::Text { .. } | ContentBlock::Thinking { .. } => {}
                 }
             }
         }

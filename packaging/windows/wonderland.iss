@@ -6,7 +6,7 @@
 #define MyAppURL "https://github.com/Alice-Marx/Rust_for_AI-agent"
 #define MyAppExeName "wonderland-desktop.exe"
 #ifndef MyAppVersion
-  #define MyAppVersion "0.3.0"
+  #define MyAppVersion "0.4.0"
 #endif
 #define BuildRoot "..\..\dist\staging\windows-x64"
 
@@ -37,9 +37,13 @@ VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription={#MyAppName} desktop application and CLI
 VersionInfoProductName={#MyAppName}
 
+; 简体中文语言包是 Inno 的非官方翻译，需要单独安装；缺失时只打包英文向导，
+; 应用本身的界面仍然是中文。
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
+#if FileExists(AddBackslash(CompilerPath) + "Languages\ChineseSimplified.isl")
 Name: "chinesesimp"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+#endif
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked

@@ -38,6 +38,18 @@ struct Cli {
     #[arg(long, env = "AGENT_PERMISSION_MODE", value_parser = parse_permission_mode)]
     mode: Option<PermissionMode>,
 
+    /// 工具执行与权限规则的工作目录；同时决定自定义命令的加载位置
+    #[arg(long, env = "AGENT_CWD")]
+    cwd: Option<String>,
+
+    /// 复用该用户最近一次会话，而不是新建会话
+    #[arg(long = "continue", default_value_t = false)]
+    resume: bool,
+
+    /// 单次请求使用的模型；缺省由后端按 provider 决定
+    #[arg(long, env = "AGENT_MODEL")]
+    model: Option<String>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -89,6 +101,12 @@ enum Command {
     Sessions,
     /// 查看指定会话的完整消息历史
     Session { id: String },
+    /// 列出后端注册的全部工具（内置 + MCP）
+    Tools,
+    /// 列出已连接的 MCP 服务器及其工具
+    Mcp,
+    /// 列出当前项目的自定义斜杠命令
+    Commands,
 }
 
 #[derive(Clone)]
@@ -117,6 +135,8 @@ struct SessionSummary {
     id: String,
     message_count: usize,
     updated_at: String,
+    #[serde(default)]
+    user_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -238,9 +258,38 @@ impl AgentApi {
             .context("无法解析本地技能列表")
     }
 
-    async fn sessions(&self) -> Result<Vec<SessionSummary>> {
+    async fn tools(&self) -> Result<Vec<serde_json::Value>> {
         self.client
-            .get(self.url("/v1/sessions"))
+            .get(self.url("/v1/tools"))
+            .send()
+            .await
+            .context("无法连接工具列表接口")?
+            .error_for_status()
+            .context("查询工具列表失败")?
+            .json()
+            .await
+            .context("无法解析工具列表")
+    }
+
+    async fn mcp_servers(&self) -> Result<Vec<serde_json::Value>> {
+        self.client
+            .get(self.url("/v1/mcp/servers"))
+            .send()
+            .await
+            .context("无法连接 MCP 接口")?
+            .error_for_status()
+            .context("查询 MCP 服务器失败")?
+            .json()
+            .await
+            .context("无法解析 MCP 服务器列表")
+    }
+
+    async fn sessions(&self, user_id: Option<&str>) -> Result<Vec<SessionSummary>> {
+        let mut request = self.client.get(self.url("/v1/sessions"));
+        if let Some(user_id) = user_id.filter(|value| !value.is_empty()) {
+            request = request.query(&[("user_id", user_id)]);
+        }
+        request
             .send()
             .await
             .context("无法连接会话列表接口")?
@@ -273,25 +322,43 @@ impl AgentApi {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let api = AgentApi::new(cli.server);
-    let default_session = cli.session_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let cwd = cli
+        .cwd
+        .clone()
+        .map(std::path::PathBuf::from)
+        .unwrap_or(std::env::current_dir()?);
+    let commands = wonderland::commands::load_commands(&cwd);
+    let default_session = match (&cli.session_id, cli.resume) {
+        (Some(session_id), _) => session_id.clone(),
+        (None, true) => resume_session(&api, &cli.user_id).await?,
+        (None, false) => Uuid::new_v4().to_string(),
+    };
+
+    let settings = RunSettings {
+        mode: cli.mode,
+        cwd: cli.cwd.clone(),
+        model: cli.model.clone(),
+    };
 
     match cli.command.unwrap_or(Command::Chat { prompt: None }) {
         Command::Chat {
             prompt: Some(prompt),
         } => {
             print_response(
-                &api.run(request(
-                    &default_session,
-                    &cli.user_id,
-                    prompt,
-                    Vec::new(),
-                    cli.mode,
-                ))
-                .await?,
+                &api.run(settings.request(&default_session, &cli.user_id, prompt, Vec::new()))
+                    .await?,
             );
         }
         Command::Chat { prompt: None } => {
-            interactive_chat(&api, &cli.user_id, &default_session, cli.mode).await?
+            interactive_chat(
+                &api,
+                &cli.user_id,
+                &default_session,
+                &settings,
+                &cwd,
+                &commands,
+            )
+            .await?
         }
         Command::Run {
             input,
@@ -300,7 +367,7 @@ async fn main() -> Result<()> {
         } => {
             let session_id = session_id.as_deref().unwrap_or(&default_session);
             print_response(
-                &api.run(request(session_id, &cli.user_id, input, skills, cli.mode))
+                &api.run(settings.request(session_id, &cli.user_id, input, skills))
                     .await?,
             );
         }
@@ -330,7 +397,7 @@ async fn main() -> Result<()> {
         Command::Login { provider, wait } => login_flow(&api, &provider, wait).await?,
         Command::Skills => println!("{}", serde_json::to_string_pretty(&api.skills().await?)?),
         Command::Sessions => {
-            let sessions = api.sessions().await?;
+            let sessions = api.sessions(Some(&cli.user_id)).await?;
             if sessions.is_empty() {
                 println!("（暂无会话）");
             }
@@ -344,10 +411,7 @@ async fn main() -> Result<()> {
         Command::Session { id } => {
             let session = api.session_detail(&id).await?;
             println!("session: {}", session.id);
-            println!(
-                "tokens: {} in / {} out",
-                session.usage.input_tokens, session.usage.output_tokens
-            );
+            print_usage(&session.usage);
             if !session.todos.is_empty() {
                 println!("\ntodos:");
                 for (index, todo) in session.todos.iter().enumerate() {
@@ -355,35 +419,109 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Command::Tools => {
+            for tool in api.tools().await? {
+                println!(
+                    "{:26} {:9} {}",
+                    tool["name"].as_str().unwrap_or("<unknown>"),
+                    tool["source"].as_str().unwrap_or("builtin"),
+                    if tool["read_only"].as_bool().unwrap_or(false) {
+                        "read-only"
+                    } else {
+                        "mutating"
+                    },
+                );
+            }
+        }
+        Command::Mcp => {
+            let servers = api.mcp_servers().await?;
+            if servers.is_empty() {
+                println!("（没有已连接的 MCP 服务器；在 .mcp.json 或 settings.json 的 mcpServers 中配置）");
+            }
+            for server in servers {
+                println!("{}:", server["name"].as_str().unwrap_or("<unknown>"));
+                if let Some(tools) = server["tools"].as_array() {
+                    for tool in tools {
+                        println!("  - {}", tool.as_str().unwrap_or_default());
+                    }
+                }
+            }
+        }
+        Command::Commands => println!("{}", wonderland::commands::render_command_list(&commands)),
     }
     Ok(())
+}
+
+/// 打印 token 用量（含缓存细分与缓存命中率）。
+fn print_usage(usage: &wonderland::provider::Usage) {
+    let cached = usage.cache_read_tokens;
+    let total_input = usage.input_tokens + cached + usage.cache_creation_tokens;
+    let hit_rate = if total_input == 0 {
+        0.0
+    } else {
+        cached as f64 * 100.0 / total_input as f64
+    };
+    println!(
+        "tokens: {} in ({} cached read / {} cache write) / {} out | cache 命中 {:.0}%",
+        usage.input_tokens,
+        usage.cache_read_tokens,
+        usage.cache_creation_tokens,
+        usage.output_tokens,
+        hit_rate
+    );
 }
 
 async fn interactive_chat(
     api: &AgentApi,
     user_id: &str,
     session_id: &str,
-    mode: Option<PermissionMode>,
+    settings: &RunSettings,
+    cwd: &std::path::Path,
+    commands: &[wonderland::commands::CustomCommand],
 ) -> Result<()> {
-    println!("Wonderland CLI | session={session_id}");
-    println!("输入消息开始对话，输入 /help 查看命令，输入 /exit 退出。\n");
+    println!(
+        "Wonderland CLI | session={session_id} | cwd={}",
+        cwd.display()
+    );
+    println!("输入消息开始对话，输入 /help 查看命令，输入 /exit 退出。");
+    if !commands.is_empty() {
+        println!(
+            "可用自定义命令：{}",
+            commands
+                .iter()
+                .map(|command| format!("/{}", command.name))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
+    println!();
     let stdin = io::stdin();
     loop {
         print!("you> ");
         io::stdout().flush()?;
         let mut line = String::new();
-        stdin.read_line(&mut line)?;
+        if stdin.read_line(&mut line)? == 0 {
+            break;
+        }
         let input = line.trim();
         match input {
             "" => continue,
             "/exit" | "/quit" => break,
             "/help" => {
+                println!("/exit 退出；/health 检查服务；/models 查看模型；/skills 列出本地技能；");
+                println!("/sessions 列出会话；/session 或 /cost 查看当前会话用量与清单；");
                 println!(
-                    "/exit 退出；/health 检查服务；/models 查看模型；/skills 列出本地技能；\
-                     /sessions 列出会话；其他文本发送给 Agent。\n\
-                     全局参数 --mode <default|plan|acceptEdits|bypassPermissions|dontAsk> 控制工具权限；\
-                     回答尾部会显示本轮 turns / 工具调用数 / token 用量。\n"
+                    "/tools 列出全部工具（含 MCP）；/mcp 列出 MCP 服务器；/commands 列出自定义命令；"
                 );
+                println!(
+                    "其他文本发送给 Agent；全局参数 --mode 控制工具权限，--cwd 指定工作目录，--model 覆盖模型。"
+                );
+                if !commands.is_empty() {
+                    println!();
+                    println!("自定义命令：");
+                    println!("{}", wonderland::commands::render_command_list(commands));
+                }
+                println!();
             }
             "/health" => println!("{}", serde_json::to_string_pretty(&api.health().await?)?),
             "/models" => {
@@ -392,38 +530,98 @@ async fn interactive_chat(
                 }
             }
             "/skills" => println!("{}", serde_json::to_string_pretty(&api.skills().await?)?),
-            message => {
-                print!("agent> ");
-                io::stdout().flush()?;
-                let response = api
-                    .run(request(
-                        session_id,
-                        user_id,
-                        message.to_string(),
-                        Vec::new(),
-                        mode,
-                    ))
-                    .await?;
-                println!("{}\n", response.output);
-                if !response.todos.is_empty() {
-                    println!("todos:");
-                    for (index, todo) in response.todos.iter().enumerate() {
-                        println!("  {}. {}", index + 1, todo.render());
-                    }
-                    println!();
+            "/sessions" => {
+                for session in api.sessions(Some(user_id)).await? {
+                    println!(
+                        "{}  messages={}  updated={}",
+                        session.id, session.message_count, session.updated_at
+                    );
                 }
-                println!(
-                    "plan: {} steps | reflection: {} | turns: {} | tool calls: {} | tokens: {} in / {} out\n",
-                    response.plan.steps.len(),
-                    response.reflection.passed,
-                    response.turns,
-                    response.tool_calls,
-                    response.usage.input_tokens,
-                    response.usage.output_tokens,
-                );
             }
+            "/session" | "/cost" => {
+                let session = api.session_detail(session_id).await?;
+                println!("session: {}", session.id);
+                print_usage(&session.usage);
+                for (index, todo) in session.todos.iter().enumerate() {
+                    println!("{}. {}", index + 1, todo.render());
+                }
+            }
+            "/tools" => {
+                for tool in api.tools().await? {
+                    println!(
+                        "{:26} {:9} {}",
+                        tool["name"].as_str().unwrap_or("<unknown>"),
+                        tool["source"].as_str().unwrap_or("builtin"),
+                        if tool["read_only"].as_bool().unwrap_or(false) {
+                            "read-only"
+                        } else {
+                            "mutating"
+                        },
+                    );
+                }
+            }
+            "/mcp" => {
+                for server in api.mcp_servers().await? {
+                    println!("- {}", server["name"].as_str().unwrap_or("<unknown>"));
+                }
+            }
+            "/commands" => println!("{}", wonderland::commands::render_command_list(commands)),
+            command if command.starts_with('/') => {
+                let (name, arguments) = match command.split_once(char::is_whitespace) {
+                    Some((name, arguments)) => (name, arguments),
+                    None => (command, ""),
+                };
+                match wonderland::commands::find_command(commands, name) {
+                    Some(custom) => {
+                        let expanded = wonderland::commands::expand(custom, arguments);
+                        println!("[命令 /{}] {}", custom.name, custom.description);
+                        run_turn(api, session_id, user_id, settings, expanded).await?;
+                    }
+                    None => {
+                        println!(
+                            "未知命令 {name}；输入 /help 查看内置命令，或 /commands 查看项目自定义命令。"
+                        );
+                    }
+                }
+            }
+            message => run_turn(api, session_id, user_id, settings, message.to_string()).await?,
         }
     }
+    Ok(())
+}
+
+/// 发送一条消息并打印回答、任务清单与用量。
+async fn run_turn(
+    api: &AgentApi,
+    session_id: &str,
+    user_id: &str,
+    settings: &RunSettings,
+    input: String,
+) -> Result<()> {
+    print!("agent> ");
+    io::stdout().flush()?;
+    let response = api
+        .run(settings.request(session_id, user_id, input, Vec::new()))
+        .await?;
+    println!("{}", response.output);
+    println!();
+    if !response.todos.is_empty() {
+        println!("todos:");
+        for (index, todo) in response.todos.iter().enumerate() {
+            println!("  {}. {}", index + 1, todo.render());
+        }
+        println!();
+    }
+    println!(
+        "plan: {} steps | reflection: {} | turns: {} | tool calls: {} | tokens: {} in / {} out",
+        response.plan.steps.len(),
+        response.reflection.passed,
+        response.turns,
+        response.tool_calls,
+        response.usage.input_tokens,
+        response.usage.output_tokens,
+    );
+    println!();
     Ok(())
 }
 
@@ -460,21 +658,48 @@ async fn login_flow(api: &AgentApi, provider: &str, wait: bool) -> Result<()> {
     Ok(())
 }
 
-fn request(
-    session_id: &str,
-    user_id: &str,
-    input: String,
-    skills: Vec<String>,
+/// 一次请求的公共设置（权限模式 / 工作目录 / 模型）。
+#[derive(Clone, Debug)]
+struct RunSettings {
     mode: Option<PermissionMode>,
-) -> AgentRequest {
-    AgentRequest {
-        session_id: session_id.to_string(),
-        user_id: Some(user_id.to_string()),
-        model: None,
-        skills,
-        mode,
-        cwd: None,
-        input,
+    cwd: Option<String>,
+    model: Option<String>,
+}
+
+impl RunSettings {
+    fn request(
+        &self,
+        session_id: &str,
+        user_id: &str,
+        input: String,
+        skills: Vec<String>,
+    ) -> AgentRequest {
+        AgentRequest {
+            session_id: session_id.to_string(),
+            user_id: Some(user_id.to_string()),
+            model: self.model.clone(),
+            skills,
+            mode: self.mode,
+            cwd: self.cwd.clone(),
+            input,
+        }
+    }
+}
+
+/// `--continue`：复用该用户最近更新的会话。
+async fn resume_session(api: &AgentApi, user_id: &str) -> Result<String> {
+    match api.sessions(Some(user_id)).await?.into_iter().next() {
+        Some(session) => {
+            println!(
+                "继续会话 {}（messages={} updated={}）",
+                session.id, session.message_count, session.updated_at
+            );
+            Ok(session.id)
+        }
+        None => {
+            println!("没有可继续的会话，新建一个。");
+            Ok(Uuid::new_v4().to_string())
+        }
     }
 }
 

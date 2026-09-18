@@ -440,11 +440,11 @@ fn patch_target_paths(patch: &str, ctx: &ToolContext) -> Vec<PathBuf> {
 
 #[async_trait::async_trait]
 impl Tool for ApplyPatch {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "ApplyPatch"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Apply a multi-file patch in the V4A format (borrowed from Codex). One call can add, \
          update, rename and delete several files atomically. Update hunks locate their target \
          by context lines (fuzzy matching tolerates trailing-whitespace differences), so no \

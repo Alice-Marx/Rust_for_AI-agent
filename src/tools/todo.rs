@@ -35,11 +35,11 @@ pub struct TodoWrite;
 
 #[async_trait::async_trait]
 impl Tool for TodoWrite {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "TodoWrite"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Update the todo list for the current session. Use it proactively for complex \
          multi-step tasks (3+ steps) to track progress: mark a task in_progress BEFORE \
          starting it, completed IMMEDIATELY after finishing it, and keep exactly one \

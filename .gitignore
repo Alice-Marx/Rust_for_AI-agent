@@ -3,5 +3,10 @@
 /.agent-data/
 *.log
 .env
+
+# 只读参考实现（上游项目检出，不参与编译与提交）
 claude-code/
 /codex/
+/kimi-cli/
+/kimi-code/
+/deepseek-harness/

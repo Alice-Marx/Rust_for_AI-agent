@@ -50,11 +50,11 @@ pub struct GlobTool;
 
 #[async_trait::async_trait]
 impl Tool for GlobTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "Glob"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Find files by glob pattern (e.g. \"**/*.rs\"). Respects .gitignore, skips hidden \
          files and .git. Returns paths relative to the search root, newest first, \
          limited to 100 results. A pattern without any path separator also matches file names."
@@ -129,11 +129,11 @@ pub struct GrepTool;
 
 #[async_trait::async_trait]
 impl Tool for GrepTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "Grep"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Search file contents with a regular expression. Modes: \"content\" (matching lines as \
          path:line:text), \"files_with_matches\" (default, newest first), \"count\" (path:count). \
          Respects .gitignore, skips hidden files, .git and binary files."

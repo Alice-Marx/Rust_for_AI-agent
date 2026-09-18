@@ -38,6 +38,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/sessions", get(list_sessions))
         .route("/v1/sessions/{id}", get(get_session))
         .route("/v1/skills", get(list_skills))
+        .route("/v1/tools", get(list_tools))
+        .route("/v1/mcp/servers", get(list_mcp_servers))
         .route("/v1/skills/reload", post(reload_skills))
         .route(
             "/v1/providers/cliproxyapi/models",
@@ -257,10 +259,24 @@ async fn list_evaluations(
     )
 }
 
+#[derive(Debug, Deserialize)]
+struct SessionQuery {
+    user_id: Option<String>,
+}
+
 async fn list_sessions(
     State(state): State<AppState>,
+    Query(query): Query<SessionQuery>,
 ) -> Result<Json<Vec<crate::session::SessionSummary>>, ApiError> {
-    Ok(Json(state.runtime.sessions.list()?))
+    let sessions = state.runtime.sessions.list()?;
+    let sessions = match query.user_id.as_deref().filter(|value| !value.is_empty()) {
+        Some(user_id) => sessions
+            .into_iter()
+            .filter(|session| session.user_id.as_deref() == Some(user_id))
+            .collect(),
+        None => sessions,
+    };
+    Ok(Json(sessions))
 }
 
 async fn get_session(
@@ -277,6 +293,57 @@ async fn get_session(
 
 async fn list_skills(State(state): State<AppState>) -> Json<Vec<SkillSummary>> {
     Json(state.runtime.skills.summaries().await)
+}
+
+#[derive(Serialize)]
+struct ToolSummary {
+    name: String,
+    read_only: bool,
+    always_allowed: bool,
+    /// 内置工具为 `builtin`，MCP 工具为 `mcp__<server>` 前缀对应的服务器名。
+    source: String,
+}
+
+/// 当前注册的全部工具（内置 + MCP），便于前端展示与排障。
+async fn list_tools(State(state): State<AppState>) -> Json<Vec<ToolSummary>> {
+    Json(
+        state
+            .runtime
+            .tools
+            .iter()
+            .map(|tool| ToolSummary {
+                name: tool.name().to_string(),
+                read_only: tool.is_read_only(&serde_json::json!({})),
+                always_allowed: tool.is_always_allowed(),
+                source: crate::mcp::tool_source(tool.name()),
+            })
+            .collect(),
+    )
+}
+
+#[derive(Serialize)]
+struct McpServerSummary {
+    name: String,
+    tools: Vec<String>,
+}
+
+/// 已连接的 MCP 服务器及其暴露的工具名。
+async fn list_mcp_servers(State(state): State<AppState>) -> Json<Vec<McpServerSummary>> {
+    let mut servers: Vec<McpServerSummary> = Vec::new();
+    for tool in state.runtime.tools.iter() {
+        let Some(server) = crate::mcp::tool_server(tool.name()) else {
+            continue;
+        };
+        match servers.iter_mut().find(|entry| entry.name == server) {
+            Some(entry) => entry.tools.push(tool.name().to_string()),
+            None => servers.push(McpServerSummary {
+                name: server.to_string(),
+                tools: vec![tool.name().to_string()],
+            }),
+        }
+    }
+    servers.sort_by(|left, right| left.name.cmp(&right.name));
+    Json(servers)
 }
 
 #[derive(Serialize)]

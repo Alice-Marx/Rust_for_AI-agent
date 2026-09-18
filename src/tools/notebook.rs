@@ -42,11 +42,11 @@ fn decode_source(source: &serde_json::Value) -> String {
 
 #[async_trait::async_trait]
 impl Tool for NotebookEdit {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "NotebookEdit"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Edit a cell in a Jupyter notebook (.ipynb). Identify the cell by its id \
          (preferred) or by its zero-based cell_number. edit_mode: replace (default), \
          insert (new cell before the given index; use a cell_number one past the end \

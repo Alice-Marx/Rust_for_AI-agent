@@ -10,11 +10,11 @@ pub struct EnterPlanMode;
 
 #[async_trait::async_trait]
 impl Tool for EnterPlanMode {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "EnterPlanMode"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Switch this task into plan mode before starting a non-trivial implementation: \
          explore the codebase in read-only mode, design an approach, and present it to \
          the user for approval. In plan mode all write tools are denied. Call \
@@ -59,11 +59,11 @@ pub struct ExitPlanMode;
 
 #[async_trait::async_trait]
 impl Tool for ExitPlanMode {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "ExitPlanMode"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Leave plan mode and restore the previous permission mode. Call this only after \
          you have presented the full plan in your final answer for user review. \
          Optionally list semantic Bash prompts (e.g. \"run tests\") the user may want \

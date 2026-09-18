@@ -22,15 +22,35 @@ function Resolve-InnoCompiler {
         (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 7\ISCC.exe"),
         (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 7\ISCC.exe"),
         (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"),
-        (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe")
+        (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 7\ISCC.exe"),
+        (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"),
+        (Join-Path "D:\Program Files (x86)" "Inno Setup 7\ISCC.exe"),
+        (Join-Path "D:\Program Files (x86)" "Inno Setup 6\ISCC.exe"),
+        (Join-Path "D:\Program Files" "Inno Setup 7\ISCC.exe"),
+        (Join-Path "D:\Program Files" "Inno Setup 6\ISCC.exe")
     ) | Where-Object { $_ }
 
+    # 以上位置都没有时，再在常见根目录下浅层搜索一次。
     foreach ($candidate in $candidates) {
         if (Test-Path -LiteralPath $candidate -PathType Leaf) {
             return (Resolve-Path -LiteralPath $candidate).Path
         }
     }
-
+    foreach ($root in @("D:\", "C:\")) {
+        if (-not (Test-Path -LiteralPath $root)) { continue }
+        $found = Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like "Program Files*" } |
+            ForEach-Object {
+                Get-ChildItem -LiteralPath $_.FullName -Directory -Filter "Inno Setup*" -ErrorAction SilentlyContinue
+            } |
+            ForEach-Object {
+                Get-ChildItem -LiteralPath $_.FullName -Filter "ISCC.exe" -File -ErrorAction SilentlyContinue
+            } |
+            Select-Object -First 1
+        if ($found) {
+            return $found.FullName
+        }
+    }
     throw "未找到 Inno Setup 的 ISCC.exe。请安装 Inno Setup 6/7，或用 -InnoCompiler 指定 ISCC.exe 的完整路径。"
 }
 
@@ -110,7 +130,9 @@ $legacyArtifacts = @(
     (Join-Path $distRoot "wonderland-cli-0.2.0.tgz"),
     (Join-Path $distRoot "wonderland-cli-0.2.1.tgz"),
     (Join-Path $distRoot "Wonderland-Setup-0.2.0-x64.exe"),
-    (Join-Path $distRoot "Wonderland-Setup-0.2.1-x64.exe")
+    (Join-Path $distRoot "Wonderland-Setup-0.2.1-x64.exe"),
+    (Join-Path $distRoot "Wonderland-Setup-0.3.0-x64.exe"),
+    (Join-Path $distRoot "wonderland-cli-0.3.0.tgz")
 )
 foreach ($legacyArtifact in $legacyArtifacts) {
     if (Test-Path -LiteralPath $legacyArtifact) {
@@ -161,3 +183,25 @@ if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
 
 Write-Host "Inno Setup 安装包已生成：$installer"
 Write-Host "安装时会同时安装桌面版、后端服务和 wonderland-cli.exe。"
+
+# npm CLI 包：与安装包同版本，方便只用命令行、或没有安装 Rust 的用户。
+$npmRoot = Join-Path $repoRoot "packaging\npm\wonderland-cli"
+$npmManifest = Join-Path $npmRoot "package.json"
+$npmVersion = (Get-Content -LiteralPath $npmManifest -Raw | ConvertFrom-Json).version
+if ($npmVersion -ne $version) {
+    throw "npm 包版本 $npmVersion 与 Cargo.toml 的 $version 不一致，请先同步版本号。"
+}
+$npmCommand = Get-Command npm.cmd -ErrorAction SilentlyContinue
+if (-not $npmCommand) {
+    Write-Warning "未找到 npm.cmd，跳过 npm CLI 包构建。"
+} else {
+    & $npmCommand.Source pack $npmRoot --pack-destination $distRoot
+    if ($LASTEXITCODE -ne 0) {
+        throw "npm pack 失败，退出码：$LASTEXITCODE"
+    }
+    $npmPackage = Join-Path $distRoot "wonderland-cli-$version.tgz"
+    if (-not (Test-Path -LiteralPath $npmPackage -PathType Leaf)) {
+        throw "npm pack 没有生成预期产物：$npmPackage"
+    }
+    Write-Host "npm CLI 包已生成：$npmPackage"
+}

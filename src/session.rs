@@ -17,6 +17,9 @@ pub struct Session {
     /// 会话级任务清单（TodoWrite 工具维护）；旧文件缺省为空。
     #[serde(default)]
     pub todos: Vec<TodoItem>,
+    /// 会话归属用户，用于按用户过滤会话列表（与长期记忆的隔离一致）。
+    #[serde(default)]
+    pub user_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -27,6 +30,8 @@ pub struct SessionSummary {
     pub id: String,
     pub message_count: usize,
     pub updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
 }
 
 /// 基于文件系统的会话存储，每个会话一个 `<dir>/<id>.json` 文件。
@@ -55,6 +60,7 @@ impl SessionStore {
             messages: Vec::new(),
             usage: Usage::default(),
             todos: Vec::new(),
+            user_id: None,
             created_at: now,
             updated_at: now,
         })
@@ -107,6 +113,7 @@ impl SessionStore {
                     id: session.id,
                     message_count: session.messages.len(),
                     updated_at: session.updated_at,
+                    user_id: session.user_id,
                 });
             if let Some(summary) = summary {
                 summaries.push(summary);
@@ -184,6 +191,48 @@ mod tests {
 
         let created = store.load_or_create("round-trip").unwrap();
         assert_eq!(created.messages.len(), 2);
+    }
+
+    #[test]
+    fn user_id_is_persisted_and_exposed_in_summaries() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(directory.path());
+        let mut alice = store.load_or_create("alice-session").unwrap();
+        alice.user_id = Some("alice".to_string());
+        store.save(&mut alice).unwrap();
+        let mut bob = store.load_or_create("bob-session").unwrap();
+        bob.user_id = Some("bob".to_string());
+        store.save(&mut bob).unwrap();
+        // 旧文件没有 user_id 字段，反序列化后应为 None 而不是报错。
+        std::fs::write(
+            directory.path().join("legacy.json"),
+            serde_json::json!({
+                "id": "legacy",
+                "messages": [],
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_tokens": 0,
+                    "cache_creation_tokens": 0
+                },
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            store.load("alice-session").unwrap().unwrap().user_id,
+            Some("alice".to_string())
+        );
+        assert!(store.load("legacy").unwrap().unwrap().user_id.is_none());
+
+        let summaries = store.list().unwrap();
+        let alice_summary = summaries.iter().find(|s| s.id == "alice-session").unwrap();
+        assert_eq!(alice_summary.user_id.as_deref(), Some("alice"));
+        let legacy_summary = summaries.iter().find(|s| s.id == "legacy").unwrap();
+        assert!(legacy_summary.user_id.is_none());
     }
 
     #[test]

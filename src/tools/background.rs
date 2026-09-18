@@ -163,11 +163,11 @@ pub struct TaskOutputTool;
 
 #[async_trait::async_trait]
 impl Tool for TaskOutputTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "TaskOutput"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Retrieve output from a background task started with Bash(run_in_background=true). \
          Set block=true (default) to wait up to timeout_ms for completion; set block=false \
          to poll current status immediately."
@@ -257,11 +257,11 @@ pub struct TaskStopTool;
 
 #[async_trait::async_trait]
 impl Tool for TaskStopTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "TaskStop"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Stop a running background task started with Bash(run_in_background=true)."
     }
 

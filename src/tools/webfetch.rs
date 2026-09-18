@@ -184,11 +184,11 @@ pub struct WebFetch;
 
 #[async_trait::async_trait]
 impl Tool for WebFetch {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "WebFetch"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Fetch content from an http(s) URL and return readable text. HTML pages are \
          stripped to plain text (scripts/styles removed, whitespace collapsed); JSON \
          and plain text are returned as-is. Response bodies are capped at 2 MB and the \

@@ -95,11 +95,11 @@ pub struct FileRead;
 
 #[async_trait::async_trait]
 impl Tool for FileRead {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "FileRead"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Read a text file. Output is line-numbered (`<line>\\t<content>`). \
          Use `offset` (1-based) and `limit` to page through large files; \
          output longer than 100,000 characters is truncated."
@@ -194,11 +194,11 @@ pub struct FileWrite;
 
 #[async_trait::async_trait]
 impl Tool for FileWrite {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "FileWrite"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Write content to a file, creating parent directories as needed. \
          If the file already exists it must have been read with FileRead first, \
          and it must not have been modified since."
@@ -269,11 +269,11 @@ pub struct FileEdit;
 
 #[async_trait::async_trait]
 impl Tool for FileEdit {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "FileEdit"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Replace an exact string in a file. The file must have been read with FileRead first. \
          Without `replace_all`, `old_string` must occur exactly once."
     }

@@ -1,14 +1,18 @@
 pub mod agent;
 pub mod agent_defs;
+pub mod anthropic;
 pub mod api;
 pub mod cliproxy;
 pub mod collaboration;
+pub mod commands;
 pub mod context;
 pub mod evaluation;
 pub mod expenses;
 pub mod hooks;
+pub mod mcp;
 pub mod memory;
 pub mod model;
+pub mod model_profile;
 pub mod observability;
 pub mod permissions;
 pub mod planning;
@@ -17,6 +21,7 @@ pub mod sandbox;
 pub mod session;
 pub mod skills;
 pub mod tools;
+pub mod vendors;
 
 pub use agent::AgentRuntime;
 pub use model::{AgentRequest, AgentResponse};

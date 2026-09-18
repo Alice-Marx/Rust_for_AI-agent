@@ -96,11 +96,11 @@ pub struct BashTool;
 
 #[async_trait::async_trait]
 impl Tool for BashTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "Bash"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Execute a shell command and return its combined stdout/stderr. \
          Shell selection: AGENT_SHELL env var if set; on Windows, Git Bash (bash -c) when \
          available in PATH, otherwise cmd /C; on other platforms sh -c. \

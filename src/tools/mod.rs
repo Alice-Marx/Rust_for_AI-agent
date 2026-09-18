@@ -100,9 +100,9 @@ impl ToolContext {
 
 #[async_trait::async_trait]
 pub trait Tool: Send + Sync {
-    fn name(&self) -> &'static str;
+    fn name(&self) -> &str;
     /// 给模型看的工具说明。
-    fn description(&self) -> &'static str;
+    fn description(&self) -> &str;
     /// JSON Schema object。
     fn input_schema(&self) -> serde_json::Value;
     fn is_read_only(&self, _input: &serde_json::Value) -> bool {

@@ -46,7 +46,20 @@ async fn main() -> Result<()> {
         .with_skills(skills);
         runtime.register_default_agents().await;
         // Task 工具需要 directory 才能委派子代理。
-        let tools = ToolRegistry::builtin_with_directory(runtime.directory.clone());
+        let mut tools = ToolRegistry::builtin_with_directory(runtime.directory.clone());
+        // MCP：把 .mcp.json / .claude/settings.json / .wonderland/settings.json
+        // 里配置的服务器工具（mcp__<server>__<tool>）注册进同一张工具表。
+        let cwd = std::env::current_dir()?;
+        let mcp = wonderland::mcp::load_tools(&cwd).await;
+        for (server, tool_count) in &mcp.servers {
+            tracing::info!(server = %server, tools = tool_count, "connected mcp server");
+        }
+        for (server, error) in &mcp.errors {
+            tracing::warn!(server = %server, %error, "mcp server unavailable");
+        }
+        for tool in mcp.tools {
+            tools.register(tool);
+        }
         runtime.tools = tools;
         runtime
     };

@@ -33,6 +33,13 @@ pub enum ContentBlock {
         #[serde(default)]
         is_error: bool,
     },
+    /// 模型的推理/思考内容（Anthropic thinking 块、DeepSeek `reasoning_content`）。
+    /// `signature` 仅 Anthropic 使用：回传历史时必须原样带回，否则请求会被拒绝。
+    Thinking {
+        thinking: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
 }
 
 impl ContentBlock {
@@ -57,6 +64,20 @@ impl ContentBlock {
             tool_use_id: tool_use_id.into(),
             content: content.into(),
             is_error,
+        }
+    }
+
+    pub fn thinking(thinking: impl Into<String>, signature: Option<String>) -> Self {
+        Self::Thinking {
+            thinking: thinking.into(),
+            signature,
+        }
+    }
+
+    pub fn as_thinking(&self) -> Option<&str> {
+        match self {
+            Self::Thinking { thinking, .. } => Some(thinking),
+            _ => None,
         }
     }
 }
@@ -89,6 +110,18 @@ impl ChatMessage {
             role: Role::Assistant,
             content,
         }
+    }
+
+    /// 拼接消息中所有 Thinking 块。
+    pub fn reasoning(&self) -> String {
+        self.content
+            .iter()
+            .filter_map(ContentBlock::as_thinking)
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            )
     }
 
     /// 拼接消息中所有 Text 块（用于离线模型的演示文案）。
@@ -149,6 +182,10 @@ pub struct ModelRequest {
     pub tools: Vec<ToolDefinition>,
     pub max_tokens: u32,
     pub temperature: Option<f32>,
+    /// 推理档位（low / medium / high）。OpenAI 兼容端点映射为 `reasoning_effort`，
+    /// Anthropic 映射为 `thinking.budget_tokens`；`None` 表示不下发推理参数。
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 /// 一次模型调用响应。
@@ -185,6 +222,11 @@ impl ModelResponse {
 pub trait ModelProvider: Send + Sync {
     fn name(&self) -> &'static str {
         "model-provider"
+    }
+
+    /// provider 自己的默认模型名，供 AgentRuntime 解析模型能力档案。
+    fn default_model(&self) -> Option<String> {
+        None
     }
 
     async fn complete(&self, request: &ModelRequest) -> Result<ModelResponse>;
@@ -269,6 +311,10 @@ impl ModelProvider for OpenAiCompatibleModel {
         self.provider_name
     }
 
+    fn default_model(&self) -> Option<String> {
+        Some(self.model.clone())
+    }
+
     async fn complete(&self, request: &ModelRequest) -> Result<ModelResponse> {
         let resolved = ModelRequest {
             model: if request.model.is_empty() {
@@ -342,8 +388,8 @@ pub fn build_openai_request(request: &ModelRequest) -> Value {
                                 "content": content,
                             }));
                         }
-                        // user 消息里不应出现 ToolUse，忽略。
-                        ContentBlock::ToolUse { .. } => {}
+                        // user 消息里不应出现 ToolUse 与 Thinking，忽略。
+                        ContentBlock::ToolUse { .. } | ContentBlock::Thinking { .. } => {}
                     }
                 }
                 if !text.is_empty() {
@@ -371,8 +417,9 @@ pub fn build_openai_request(request: &ModelRequest) -> Value {
                                 },
                             }));
                         }
-                        // assistant 消息里不应出现 ToolResult，忽略。
-                        ContentBlock::ToolResult { .. } => {}
+                        // assistant 消息里不应出现 ToolResult；Thinking 不回流到
+                        // OpenAI 兼容端点（DeepSeek/Kimi 等要求思维链只读不回传）。
+                        ContentBlock::ToolResult { .. } | ContentBlock::Thinking { .. } => {}
                     }
                 }
                 let mut entry = Map::new();
@@ -400,6 +447,15 @@ pub fn build_openai_request(request: &ModelRequest) -> Value {
     body.insert("max_tokens".to_string(), json!(request.max_tokens));
     if let Some(temperature) = request.temperature {
         body.insert("temperature".to_string(), json!(temperature));
+    }
+    // 只有模型能力档案声明支持 reasoning 时才由 AgentRuntime 下发该字段。
+    if let Some(effort) = request
+        .reasoning_effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        body.insert("reasoning_effort".to_string(), json!(effort));
     }
     if !request.tools.is_empty() {
         body.insert(
@@ -436,6 +492,18 @@ pub fn parse_openai_response(value: &Value) -> Result<ModelResponse> {
     let message = choice.get("message").cloned().unwrap_or(Value::Null);
 
     let mut blocks = Vec::new();
+    // DeepSeek / Kimi / Qwen 等端点把思维链放在 reasoning_content（部分端点用
+    // reasoning）。思维链只读：它保留在会话轨迹与展示层，但不回流到请求体中。
+    for key in ["reasoning_content", "reasoning"] {
+        if let Some(reasoning) = message
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|reasoning| !reasoning.trim().is_empty())
+        {
+            blocks.push(ContentBlock::thinking(reasoning, None));
+            break;
+        }
+    }
     if let Some(content) = message
         .get("content")
         .and_then(Value::as_str)
@@ -535,12 +603,27 @@ pub fn provider_from_env() -> Result<Arc<dyn ModelProvider>> {
             "cliproxyapi"
         } else if non_empty_env("OPENAI_API_KEY") {
             "openai"
+        } else if non_empty_env("ANTHROPIC_API_KEY") || non_empty_env("ANTHROPIC_AUTH_TOKEN") {
+            "anthropic"
         } else {
             "offline"
         }
     } else {
         configured_provider.as_str()
     };
+
+    // 厂商别名优先：deepseek / kimi / qwen / glm / grok / gemini / openrouter / ollama
+    // 直接可用，无需手写 base URL。
+    if let Some(preset) = crate::vendors::vendor_preset(provider) {
+        let (base_url, api_key, model) =
+            crate::vendors::resolve_vendor(preset, &|name| std::env::var(name).ok())?;
+        return Ok(Arc::new(OpenAiCompatibleModel::new_with_optional_key(
+            base_url,
+            api_key,
+            model,
+            preset.names[0],
+        )));
+    }
 
     match provider {
         "cliproxyapi" | "cli-proxy-api" => {
@@ -552,21 +635,40 @@ pub fn provider_from_env() -> Result<Arc<dyn ModelProvider>> {
                 "cliproxyapi",
             )))
         }
+        "anthropic" | "claude" => Ok(Arc::new(crate::anthropic::AnthropicModel::from_env()?)),
         "openai" | "openai-compatible" => {
-            let api_key = std::env::var("OPENAI_API_KEY")
+            // AGENT_BASE_URL / AGENT_API_KEY / AGENT_MODEL 可指向任意
+            // OpenAI-compatible 网关（自建代理、企业网关、其他云厂商）。
+            let api_key = std::env::var("AGENT_API_KEY")
                 .ok()
-                .filter(|value| !value.trim().is_empty())
-                .context("OPENAI_API_KEY is required when AGENT_PROVIDER=openai")?;
+                .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .context(
+                    "OPENAI_API_KEY (or AGENT_API_KEY) is required when AGENT_PROVIDER=openai",
+                )?;
             Ok(Arc::new(OpenAiCompatibleModel::new(
-                std::env::var("OPENAI_BASE_URL")
-                    .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
+                std::env::var("AGENT_BASE_URL")
+                    .ok()
+                    .or_else(|| std::env::var("OPENAI_BASE_URL").ok())
+                    .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
                 api_key,
-                std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string()),
+                std::env::var("AGENT_MODEL")
+                    .ok()
+                    .or_else(|| std::env::var("OPENAI_MODEL").ok())
+                    .unwrap_or_else(|| "gpt-4o-mini".to_string()),
             )))
         }
         "offline" | "rule-based" => Ok(Arc::new(RuleBasedModel)),
         other => {
-            anyhow::bail!("unsupported AGENT_PROVIDER={other}; use offline, openai, or cliproxyapi")
+            anyhow::bail!(
+                "unsupported AGENT_PROVIDER={other}; use offline, openai, anthropic, cliproxyapi, or a vendor alias ({})",
+                crate::vendors::VENDOR_PRESETS
+                    .iter()
+                    .map(|preset| preset.names[0])
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         }
     }
 }
@@ -590,6 +692,7 @@ mod tests {
             tools: Vec::new(),
             max_tokens: 4096,
             temperature: None,
+            reasoning_effort: None,
         }
     }
 
@@ -968,6 +1071,7 @@ mod tests {
             tools: Vec::new(),
             max_tokens: 1024,
             temperature: None,
+            reasoning_effort: None,
         };
         let response = model.complete(&request).await.unwrap();
         assert_eq!(model.name(), "offline");

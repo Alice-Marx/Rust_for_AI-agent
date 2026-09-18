@@ -20,11 +20,11 @@ impl TaskTool {
 
 #[async_trait::async_trait]
 impl Tool for TaskTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "Task"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Delegate a self-contained subtask to a registered sub-agent and return its \
          output. Use it for parallelizable or specialized work (e.g. research, \
          expense analysis) instead of doing everything yourself. The sub-agent has \
