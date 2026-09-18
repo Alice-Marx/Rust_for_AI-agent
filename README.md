@@ -17,6 +17,12 @@
 - 规划与反思：启发式 Planner 生成步骤，Reflection 做失败检测；后续可替换为 LLM Planner。
 - 代码执行沙箱：默认关闭，只允许策略声明的语言并限制输入、输出和超时；当前是开发原型，不是安全边界。
 - 评估打分：每次运行落盘 `correctness / completeness / safety / latency` 和反馈，可通过 API 查询；后续可替换为真实评测集或人工标注。
+- 流式输出（SSE）：provider 层统一产出增量事件（文本 / 思维链 / 工具调用参数 / usage），agent 层再补上工具执行进度；`POST /v1/agent/stream` 以 SSE 推送，最后补一帧完整响应。CLI 默认逐字打印，桌面端在气泡里实时增长。
+- 按模型族选择 wire 协议：同一个后端可以同时提供 chat.completions、Responses 与 Anthropic Messages 三条路径，`src/router.rs` 按模型 id 自动路由——GPT-5 系走 Responses（等价 Codex），Claude 系走 Messages（等价 Claude Code），DeepSeek / Kimi / Qwen 系走 chat.completions 并带 `prompt_cache_key`（等价 Kimi CLI）。`AGENT_WIRE` 可强制指定。
+- 订阅账号一体化：`AGENT_PROVIDER=subscription` 时主程序自己定位（必要时下载并校验）CLIProxyAPI sidecar、生成本机最小配置、拉起进程、做健康检查，并把 Codex / Claude / Kimi / Antigravity / xAI / Devin / Meta 的 OAuth 登录、账号列表、模型目录接到 `/v1/providers/cliproxyapi/*`。**只登录订阅账号即可使用，不需要任何 CLIPROXYAPI_* 环境变量。**
+- 会话检索索引：SQLite 派生索引随每轮落盘增量更新，`GET /v1/sessions/search?q=` 与 `wonderland-cli search` 支持按关键词（大小写不敏感）与用户过滤并返回命中片段；索引不可用时自动回退到线性扫描。
+- MCP 完整性：stdio 与 Streamable HTTP（含 SSE 响应、`mcp-session-id`）两种传输；服务器声明 resources / prompts 能力时自动补上 `mcp__<server>__list_resources` / `read_resource` / `list_prompts` / `get_prompt` 四个只读工具。
+- 沙箱纵深防御：Windows 上用 Job Object 约束（句柄关闭即杀、内存上限、进程数上限），Linux/macOS 有 bwrap / sandbox-exec 时做文件系统与网络隔离；每次执行都返回**真实生效**的约束清单与实际隔离机制，未做到的部分（如 Windows 断网）如实标注而不是假装。
 - 模型能力档案：按模型 id 自动解析上下文窗口、输出上限、推理参数风格、提示缓存策略与编辑工具偏好（`src/model_profile.rs`），并把模型专属的工具使用指引写进系统提示词静态段。因此同一个工具集在 Claude、GPT、DeepSeek、Kimi、Qwen、GLM、Grok、Gemini 上都会用各家最擅长的方式编辑文件。
 - 多厂商 API 适配：`AGENT_PROVIDER` 支持 `anthropic`（官方 Messages API 直连）以及 `deepseek` / `kimi` / `qwen` / `glm` / `grok` / `gemini` / `openrouter` / `ollama` 等 OpenAI-compatible 别名，配合 `openai`（任意兼容网关）与 `cliproxyapi`（订阅账号）共四条接入路径；每家的 base URL、API key 变量与默认模型都有内置约定，可用 `*_BASE_URL` / `*_MODEL` 覆盖。
 - Anthropic 原生能力：`/v1/messages` 直连时启用提示缓存断点（system + 最后一个工具 + 会话前缀）、扩展思考（`thinking.budget_tokens`，并自动抬高 `max_tokens`）、thinking 块签名回传，使 Claude 模型在本项目里的缓存命中与工具调用行为与官方客户端一致。
@@ -48,6 +54,12 @@ src/
 │                   缓存策略、编辑工具偏好与模型专属工具指引
 ├── mcp.rs          MCP stdio 客户端（JSON-RPC 握手、tools/list 分页、
 │                   tools/call、mcp__server__tool 工具适配）
+├── responses.rs    OpenAI Responses API provider（Codex 的 wire 协议：
+│                   store=false、encrypted reasoning 回传、prompt_cache_key）
+├── router.rs       按模型族把请求分派到 chat / responses / anthropic
+├── subscription.rs CLIProxyAPI sidecar 托管：定位或下载校验、配置生成、
+│                   进程生命周期、订阅账号 OAuth 与管理 API
+├── session_index.rs SQLite 会话检索索引（派生数据，可随时重建）
 ├── commands.rs     自定义斜杠命令（.claude/commands/*.md、命名空间与参数替换）
 ├── tools/          工具注册表与十五个内置工具（含后台任务 / V4A 补丁 / notebook / plan mode）
 │   ├── fs.rs       FileRead / FileWrite / FileEdit + 会话内已读文件状态
@@ -71,7 +83,7 @@ src/
 ├── sandbox.rs      代码执行沙箱（默认关闭）
 ├── cliproxy.rs     CLIProxyAPI 客户端（模型列表、验证、OAuth 登录）
 ├── expenses.rs     费用 API
-└── api.rs          Axum 路由表（含 /v1/tools、/v1/mcp/servers）
+└── api.rs          Axum 路由表（含 /v1/agent/stream SSE、/v1/tools、/v1/mcp/servers、/v1/sessions/search）
 ```
 
 ## 如何使用
@@ -320,6 +332,7 @@ cargo run
 | 值 | 说明 | 必需配置 |
 | --- | --- | --- |
 | `offline` | 离线演示，不访问外部模型 | 无 |
+| `subscription`（等价 `cliproxyapi`） | **订阅账号模式**：主程序托管 CLIProxyAPI sidecar，未找到可执行文件时会从 GitHub Release 下载并做 SHA-256 校验 | 只需要完成 OAuth 登录 |
 | `cliproxyapi` | 使用本机 CLIProxyAPI 和订阅账号 | `CLIPROXYAPI_BASE_URL`、`CLIPROXYAPI_API_KEY`、`CLIPROXYAPI_MODEL` |
 | `openai` | 任意 OpenAI-compatible 服务或网关 | `OPENAI_API_KEY`（或 `AGENT_API_KEY`），可覆盖 `OPENAI_BASE_URL` / `AGENT_BASE_URL`、`OPENAI_MODEL` / `AGENT_MODEL` |
 | `anthropic`（别名 `claude`） | Anthropic Messages API 原生直连 | `ANTHROPIC_API_KEY`，可选 `ANTHROPIC_BASE_URL`、`ANTHROPIC_MODEL` |
@@ -356,6 +369,10 @@ cargo run
 | `AGENT_MODEL` | CLI/子代理使用的模型名 | 未设置（由 provider 决定） |
 | `AGENT_CWD` | CLI 的工作目录（同时决定自定义命令加载位置） | 当前目录 |
 | `AGENT_MCP_TIMEOUT_MS` | MCP 单次请求超时 | `30000` |
+| `AGENT_WIRE` | 强制 wire 协议：`chat` / `responses` / `messages` | 未设置（按模型族路由） |
+| `CLIPROXYAPI_BIN` | sidecar 可执行文件路径 | 自动在程序目录、数据目录与 PATH 中查找 |
+| `CLIPROXYAPI_DATA_DIR` | sidecar 配置与凭据目录 | `%LOCALAPPDATA%\WonderlandData\CLIProxyAPI` |
+| `CLIPROXYAPI_PORT` | sidecar 监听端口 | `18317` |
 | `AGENT_PERMISSION_MODE` | CLI 的默认权限模式（等价于 `--mode`） | 未设置（即 `default`） |
 | `AGENT_DATA_DIR` | 记忆、评估、会话等数据的保存目录 | `.agent-data/` |
 | `AGENT_SHELL` | Bash 工具使用的 shell | Windows 上优先 PATH 中的 `bash`，否则 `cmd /C`；其他平台 `sh -c` |
@@ -369,6 +386,47 @@ cargo run
 - 登录接口返回 404：检查 CLIProxyAPI 是否配置了 `remote-management.secret-key`，并确认 `CLIPROXYAPI_MANAGEMENT_KEY` 一致；`allow-remote: false` 允许本机调用，但仍然要求管理密钥。
 - 登录状态长时间为 `wait`：确认浏览器已经完成授权，并保持 CLIProxyAPI 进程运行；OAuth 状态可能因超时失效，需要重新发起登录。
 - `/v1/providers/cliproxyapi/models` 没有模型：先完成至少一个订阅账号登录，再重新请求模型列表。
+
+## 订阅账号模式（不需要 API Key）
+
+设置一个环境变量即可：
+
+```powershell
+$env:AGENT_PROVIDER = "subscription"
+cargo run
+```
+
+之后主程序会：
+
+1. 在程序目录、`cliproxyapi` 子目录、数据目录与 PATH 中寻找 `cli-proxy-api`；找不到时从 GitHub Release 下载对应平台发布包，并用官方 `checksums.txt` 做 SHA-256 校验后解压；
+2. 在数据目录生成只监听 `127.0.0.1` 的最小配置（随机访问密钥由主程序生成并复用，长度控制在 bcrypt 的 72 字节上限内）；
+3. 拉起 sidecar 并轮询 `/healthz` 直到就绪；已经在跑的实例会被直接复用；
+4. 挂上三条 wire 路径：`subscription-chat`、`subscription-responses`、`anthropic`，按模型族路由；
+5. 把管理客户端自动指向该实例，因此登录、账号、模型接口开箱可用。
+
+登录订阅账号（Codex / Claude / Kimi / Antigravity / xAI / Devin / Meta 都支持）：
+
+```bash
+# 发起登录，拿到需要浏览器打开的授权链接
+curl -X POST http://127.0.0.1:8080/v1/providers/cliproxyapi/login -H "content-type: application/json" -d '{"provider":"kimi"}'
+
+# 轮询登录状态（state 来自上一步）
+curl "http://127.0.0.1:8080/v1/providers/cliproxyapi/login/status?state=<state>"
+
+# 查看已登录账号与可用模型
+curl http://127.0.0.1:8080/v1/providers/cliproxyapi/accounts
+curl http://127.0.0.1:8080/v1/providers/cliproxyapi/models
+```
+
+CLI 等价写法：
+
+```powershell
+wonderland-cli login kimi --wait
+wonderland-cli accounts
+wonderland-cli models
+```
+
+OAuth 凭据由 CLIProxyAPI 自己保存在 auth-dir，主程序既不读取也不落盘 token；卸载或升级不会删除该目录。
 
 ## CLI 终端客户端
 
@@ -415,7 +473,7 @@ cargo run --bin wonderland-cli -- commands
 cargo run --bin wonderland-cli -- login codex --wait
 ```
 
-聊天模式内还提供：`/cost`（当前会话 token 用量与提示缓存命中率）、`/session`、`/tools`、`/mcp`、`/commands`、`/skills`、`/sessions`、`/health`、`/models`。
+聊天模式内还提供：`/cost`（当前会话 token 用量与提示缓存命中率）、`/session`、`/tools`、`/mcp`、`/commands`、`/skills`、`/sessions`、`/health`、`/models`。 回答默认流式打印；`--reasoning low|medium|high|off` 控制推理档位，`--no-stream` 关闭流式。
 
 **自定义斜杠命令**（借鉴 Claude Code）：在项目里放 `.claude/commands/review.md`（或 `.wonderland/commands/`）：
 
@@ -535,6 +593,55 @@ max_turns: 10
 ```
 
 之后模型就能通过 `Task(agent:explorer, task="...")` 委派。frontmatter 的 `tools` 既是该子代理的工具池也是权限白名单（缺省只有 `FileRead` / `Glob` / `Grep` / `WebFetch` 四个只读工具）；`Task` 与 `TodoWrite` 永远不进入子代理，避免嵌套委派。文件代理在每次 run 开始时从请求的 `cwd` 加载，与内置 research / expense 代理一起列在系统提示词中。
+
+## 流式输出与会话检索
+
+流式接口与一次性接口并存：
+
+| 接口 | 用途 |
+| --- | --- |
+| `POST /v1/agent/run` | 一次性返回完整结果（原有行为） |
+| `POST /v1/agent/stream` | SSE 推流：`turn_start` / `text_delta` / `reasoning_delta` / `tool_use_start` / `tool_use_delta` / `tool_call` / `tool_result` / `usage` / `stop`，最后一帧 `response` 带完整 `AgentResponse` |
+| `GET /v1/sessions/search?q=&user_id=&limit=` | 会话关键词检索，返回命中片段 |
+
+CLI 默认走流式（`--no-stream` 可关闭）：文本逐字打印，思维链与工具进度写 stderr，因此重定向 stdout 仍能拿到干净的回答正文。
+
+```bash
+# 流式调用（-N 关闭 curl 缓冲）
+curl -N -X POST http://127.0.0.1:8080/v1/agent/stream -H "content-type: application/json" -d @request.json
+```
+
+会话检索把"上周那个改过压缩逻辑的会话"从线性扫描变成一次 SQL 查询：索引是派生数据（`sessions-index.sqlite`），启动时按会话目录重建一次，之后随每轮落盘增量更新；索引不可用时接口自动回退到线性扫描，不影响可用性。
+
+```powershell
+wonderland-cli search "compaction"
+```
+
+## MCP 传输与能力
+
+两种传输都支持，配置写在项目 `.mcp.json` / `.claude/settings.json` / `.wonderland/settings.json` 的 `mcpServers` 中：
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "F:/my-project"]
+    },
+    "remote-docs": {
+      "type": "http",
+      "url": "https://example.com/mcp",
+      "headers": { "authorization": "Bearer <token>" },
+      "read_only": true
+    }
+  }
+}
+```
+
+- HTTP 传输实现 Streamable HTTP，兼容 `application/json` 与 `text/event-stream` 两种响应，并自动带上 `mcp-session-id`。
+- 服务器在 `initialize` 里声明 `resources` / `prompts` 能力时，会自动注册四个只读工具：`mcp__<server>__list_resources` / `read_resource` / `list_prompts` / `get_prompt`。
+- 工具仍然按 `mcp__<server>__<tool>` 命名，权限管线、hooks、会话轨迹与内置工具完全一致。
 
 ## 桌面版应用
 
@@ -712,21 +819,31 @@ curl -H 'x-api-key: dev-secret-key' http://127.0.0.1:8080/expenses
 curl -H 'x-api-key: dev-secret-key' 'http://127.0.0.1:8080/expenses/summary?month=2026-07'
 ```
 
-## 沙箱安全边界
+## 沙箱与执行边界
 
-沙箱默认关闭。只有在隔离容器或虚拟机中，确认运行用户、文件系统、网络和资源配额均已限制后，才可临时启用：
+沙箱默认关闭。在隔离容器或虚拟机里确认运行用户、文件系统、网络与配额都已限制后，才建议启用：
 
 ```bash
 AGENT_ENABLE_SANDBOX=true AGENT_SANDBOX_TIMEOUT_MS=2000 cargo run
 ```
 
-当前实现只允许 `python`，使用独立临时目录、无环境变量、输入/输出大小限制、超时和进程退出清理，但 Python 本身仍可能访问宿主能力。生产环境必须额外使用容器/VM、非特权用户、网络隔离、seccomp/AppContainer 和 CPU/内存配额。
+启用后每次执行都会返回**真实生效的约束清单**（`limits` 字段）与实际使用的隔离机制（`isolation`）：
+
+| 平台 | 已实现 | 未实现（不要假设有） |
+| --- | --- | --- |
+| Windows | Job Object：句柄关闭即杀、内存上限、进程数上限；独立工作目录；清空环境变量；超时后确保子进程被杀 | 没有 AppContainer 或受限令牌；`allow_network=false` 只是策略声明，操作系统层面没有真正断网 |
+| Linux | 存在 `bwrap` 时用 `--unshare-all` + 只读根做文件系统与网络隔离 | 没有 bwrap 时只保留超时、工作目录与环境变量约束 |
+| macOS | 存在 `sandbox-exec` 时用 profile 拒绝网络、只允许写临时目录 | 同上 |
+
+策略字段：`allowed_languages`、`timeout_ms`、`max_output_bytes`、`memory_limit_mb`、`max_processes`、`allow_network`、`working_root`；`GET /health` 的 `sandbox` 字段会给出当前平台的隔离机制。
+
+结论：这是纵深防御，不是安全边界。生产部署必须额外使用容器或虚拟机、非特权用户、网络隔离与 CPU/内存配额。
 
 ## 开发检查
 
 ```bash
 cargo fmt -- --check
-cargo test --lib   # 191 个测试
+cargo test --lib   # 242 个测试
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
@@ -745,6 +862,8 @@ cargo clippy --all-targets --all-features -- -D warnings
 - **MCP**：`mcpServers` 配置形状与 `mcp__<server>__<tool>` 的工具命名约定。
 
 来自 Codex 的部分：
+
+- **Responses API 请求形状**：`instructions` 与 `input` 分离、`store: false`、`include: ["reasoning.encrypted_content"]`、`prompt_cache_key`、`reasoning.summary` 与流式事件名。
 
 - **apply_patch（V4A）**：`*** Update File:` / `@@` 定位提示与三级容错匹配的多文件补丁。
 - **推理档位**：`model_reasoning_effort` 的默认档位与「按模型族切换工具偏好」的做法（GPT 系优先补丁、其他优先精确替换）。

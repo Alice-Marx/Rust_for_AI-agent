@@ -12,9 +12,12 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::{json, Map, Value};
 
+use futures_util::StreamExt;
+
 use crate::model_profile::thinking_budget_tokens;
 use crate::provider::{
-    ChatMessage, ContentBlock, ModelProvider, ModelRequest, ModelResponse, Role, StopReason, Usage,
+    emit, ChatMessage, ContentBlock, ModelProvider, ModelRequest, ModelResponse, Role, SseBuffer,
+    StopReason, StreamEvent, StreamSink, Usage,
 };
 
 /// Anthropic API 版本头，与官方 SDK 默认值一致。
@@ -107,6 +110,52 @@ impl ModelProvider for AnthropicModel {
             serde_json::from_str(&raw).context("anthropic returned invalid JSON response")?;
         parse_anthropic_response(&value)
     }
+
+    async fn complete_stream(
+        &self,
+        request: &ModelRequest,
+        sink: Option<&StreamSink>,
+    ) -> Result<ModelResponse> {
+        let resolved = ModelRequest {
+            model: if request.model.is_empty() {
+                self.model.clone()
+            } else {
+                request.model.clone()
+            },
+            ..request.clone()
+        };
+        let body = build_anthropic_request_with_stream(&resolved, true);
+        let response = self
+            .client
+            .post(format!("{}/messages", self.base_url))
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .json(&body)
+            .send()
+            .await
+            .context("anthropic stream request failed")?;
+        let status = response.status();
+        if !status.is_success() {
+            let raw = response.text().await.unwrap_or_default();
+            anyhow::bail!("anthropic returned {status}: {raw}");
+        }
+        let mut stream = response.bytes_stream();
+        let mut decoder = SseBuffer::new();
+        let mut accumulator = AnthropicStreamAccumulator::default();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.context("anthropic stream interrupted")?;
+            for payload in decoder.push_bytes(&chunk) {
+                let trimmed = payload.trim();
+                if trimmed.is_empty() || trimmed == "[DONE]" {
+                    continue;
+                }
+                let value: Value = serde_json::from_str(trimmed)
+                    .with_context(|| format!("invalid anthropic stream chunk: {trimmed}"))?;
+                accumulator.apply(&value, sink)?;
+            }
+        }
+        accumulator.finish(sink)
+    }
 }
 
 fn cache_control() -> Value {
@@ -116,8 +165,16 @@ fn cache_control() -> Value {
 /// 把中立的 ModelRequest 转成 Anthropic Messages API 请求体。
 /// 纯函数，便于无网络单测。
 pub fn build_anthropic_request(request: &ModelRequest) -> Value {
+    build_anthropic_request_with_stream(request, false)
+}
+
+/// 同 build_anthropic_request，但可开启 SSE 流式。
+pub fn build_anthropic_request_with_stream(request: &ModelRequest, stream: bool) -> Value {
     let mut body = Map::new();
     body.insert("model".to_string(), json!(request.model));
+    if stream {
+        body.insert("stream".to_string(), json!(true));
+    }
 
     let budget_tokens = request
         .reasoning_effort
@@ -395,6 +452,321 @@ pub fn parse_anthropic_response(value: &Value) -> Result<ModelResponse> {
     })
 }
 
+/// Anthropic SSE 事件累积器：把流式事件还原为中立的 ModelResponse。
+#[derive(Debug, Default)]
+pub struct AnthropicStreamAccumulator {
+    blocks: Vec<AnthropicStreamBlock>,
+    input_usage: Usage,
+    output_tokens: u64,
+    stop_reason: Option<StopReason>,
+    failure: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+enum AnthropicStreamBlock {
+    #[default]
+    Unknown,
+    Text {
+        text: String,
+    },
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        json: String,
+    },
+}
+
+impl AnthropicStreamAccumulator {
+    pub fn apply(&mut self, event: &Value, sink: Option<&StreamSink>) -> Result<()> {
+        let kind = event
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let index = event.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+        match kind {
+            "message_start" => {
+                if let Some(usage) = event
+                    .get("message")
+                    .and_then(|message| message.get("usage"))
+                {
+                    self.input_usage = parse_stream_usage(usage);
+                }
+            }
+            "content_block_start" => {
+                let block = event.get("content_block").cloned().unwrap_or(Value::Null);
+                let started = match block
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                {
+                    "text" => AnthropicStreamBlock::Text {
+                        text: block
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                    },
+                    "thinking" | "redacted_thinking" => AnthropicStreamBlock::Thinking {
+                        thinking: block
+                            .get("thinking")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        signature: String::new(),
+                    },
+                    "tool_use" => {
+                        let id = block
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                        let name = block
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                        emit(
+                            sink,
+                            StreamEvent::ToolUseStart {
+                                id: id.clone(),
+                                name: name.clone(),
+                            },
+                        );
+                        AnthropicStreamBlock::ToolUse {
+                            id,
+                            name,
+                            json: String::new(),
+                        }
+                    }
+                    _ => AnthropicStreamBlock::Unknown,
+                };
+                self.set_block(index, started);
+            }
+            "content_block_delta" => {
+                let delta = event.get("delta").cloned().unwrap_or(Value::Null);
+                match delta
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                {
+                    "text_delta" => {
+                        let text = delta
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        if let AnthropicStreamBlock::Text { text: buffer } = self.slot(index) {
+                            buffer.push_str(text);
+                        }
+                        if !text.is_empty() {
+                            emit(
+                                sink,
+                                StreamEvent::TextDelta {
+                                    text: text.to_string(),
+                                },
+                            );
+                        }
+                    }
+                    "thinking_delta" => {
+                        let text = delta
+                            .get("thinking")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        if let AnthropicStreamBlock::Thinking { thinking, .. } = self.slot(index) {
+                            thinking.push_str(text);
+                        }
+                        if !text.is_empty() {
+                            emit(
+                                sink,
+                                StreamEvent::ReasoningDelta {
+                                    text: text.to_string(),
+                                },
+                            );
+                        }
+                    }
+                    "signature_delta" => {
+                        let signature = delta
+                            .get("signature")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        if let AnthropicStreamBlock::Thinking {
+                            signature: buffer, ..
+                        } = self.slot(index)
+                        {
+                            buffer.push_str(signature);
+                        }
+                    }
+                    "input_json_delta" => {
+                        let partial = delta
+                            .get("partial_json")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        let id = match self.slot(index) {
+                            AnthropicStreamBlock::ToolUse { id, json, .. } => {
+                                json.push_str(partial);
+                                id.clone()
+                            }
+                            _ => String::new(),
+                        };
+                        if !partial.is_empty() && !id.is_empty() {
+                            emit(
+                                sink,
+                                StreamEvent::ToolUseDelta {
+                                    id,
+                                    partial_json: partial.to_string(),
+                                },
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            "content_block_stop" => {
+                if let AnthropicStreamBlock::ToolUse { id, .. } = self.slot(index) {
+                    emit(sink, StreamEvent::ToolUseStop { id: id.clone() });
+                }
+            }
+            "message_delta" => {
+                if let Some(stop) = event
+                    .get("delta")
+                    .and_then(|delta| delta.get("stop_reason"))
+                    .and_then(Value::as_str)
+                {
+                    self.stop_reason = Some(match stop {
+                        "tool_use" => StopReason::ToolUse,
+                        "max_tokens" => StopReason::MaxTokens,
+                        "end_turn" | "stop_sequence" => StopReason::EndTurn,
+                        other => StopReason::Other(other.to_string()),
+                    });
+                }
+                if let Some(output) = event
+                    .get("usage")
+                    .and_then(|usage| usage.get("output_tokens"))
+                    .and_then(Value::as_u64)
+                {
+                    self.output_tokens = output;
+                }
+            }
+            "error" => {
+                self.failure = Some(
+                    event
+                        .get("error")
+                        .and_then(|error| error.get("message"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| "anthropic stream error".to_string()),
+                );
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn slot(&mut self, index: usize) -> &mut AnthropicStreamBlock {
+        while self.blocks.len() <= index {
+            self.blocks.push(AnthropicStreamBlock::Unknown);
+        }
+        &mut self.blocks[index]
+    }
+
+    fn set_block(&mut self, index: usize, block: AnthropicStreamBlock) {
+        while self.blocks.len() <= index {
+            self.blocks.push(AnthropicStreamBlock::Unknown);
+        }
+        self.blocks[index] = block;
+    }
+
+    pub fn finish(self, sink: Option<&StreamSink>) -> Result<ModelResponse> {
+        if let Some(message) = self.failure {
+            anyhow::bail!("anthropic stream failed: {message}");
+        }
+        let mut blocks = Vec::new();
+        let mut has_tool_use = false;
+        for block in &self.blocks {
+            match block {
+                AnthropicStreamBlock::Text { text } => {
+                    if !text.trim().is_empty() {
+                        blocks.push(ContentBlock::text(text.clone()));
+                    }
+                }
+                AnthropicStreamBlock::Thinking {
+                    thinking,
+                    signature,
+                } => {
+                    if !thinking.trim().is_empty() || !signature.is_empty() {
+                        blocks.push(ContentBlock::thinking(
+                            thinking.clone(),
+                            if signature.is_empty() {
+                                None
+                            } else {
+                                Some(signature.clone())
+                            },
+                        ));
+                    }
+                }
+                AnthropicStreamBlock::ToolUse { id, name, json } => {
+                    if id.is_empty() && name.is_empty() {
+                        continue;
+                    }
+                    has_tool_use = true;
+                    let input = serde_json::from_str(json)
+                        .unwrap_or_else(|_| json!({ "_invalid_arguments": json }));
+                    blocks.push(ContentBlock::tool_use(id.clone(), name.clone(), input));
+                }
+                AnthropicStreamBlock::Unknown => {}
+            }
+        }
+        let usage = Usage {
+            input_tokens: self.input_usage.input_tokens,
+            output_tokens: self.output_tokens,
+            cache_read_tokens: self.input_usage.cache_read_tokens,
+            cache_creation_tokens: self.input_usage.cache_creation_tokens,
+        };
+        let stop_reason = match self.stop_reason {
+            Some(StopReason::EndTurn) if has_tool_use => StopReason::ToolUse,
+            Some(reason) => reason,
+            None if has_tool_use => StopReason::ToolUse,
+            None => StopReason::EndTurn,
+        };
+        emit(sink, StreamEvent::Usage { usage });
+        emit(
+            sink,
+            StreamEvent::Stop {
+                stop_reason: stop_reason.clone(),
+            },
+        );
+        Ok(ModelResponse {
+            blocks,
+            stop_reason,
+            usage,
+        })
+    }
+}
+
+fn parse_stream_usage(usage: &Value) -> Usage {
+    Usage {
+        input_tokens: usage
+            .get("input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        output_tokens: usage
+            .get("output_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        cache_read_tokens: usage
+            .get("cache_read_input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        cache_creation_tokens: usage
+            .get("cache_creation_input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,6 +781,7 @@ mod tests {
             max_tokens: 4096,
             temperature: None,
             reasoning_effort: None,
+            prompt_cache_key: None,
         }
     }
 
@@ -476,6 +849,7 @@ mod tests {
             max_tokens: 1024,
             temperature: Some(0.7),
             reasoning_effort: Some("low".to_string()),
+            prompt_cache_key: None,
             ..request()
         });
         assert_eq!(body["thinking"]["type"], "enabled");
@@ -488,6 +862,7 @@ mod tests {
         let wide = build_anthropic_request(&ModelRequest {
             max_tokens: 32_000,
             reasoning_effort: Some("high".to_string()),
+            prompt_cache_key: None,
             ..request()
         });
         assert_eq!(wide["thinking"]["budget_tokens"], 16_000);

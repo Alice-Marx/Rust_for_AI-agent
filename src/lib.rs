@@ -17,9 +17,13 @@ pub mod observability;
 pub mod permissions;
 pub mod planning;
 pub mod provider;
+pub mod responses;
+pub mod router;
 pub mod sandbox;
 pub mod session;
+pub mod session_index;
 pub mod skills;
+pub mod subscription;
 pub mod tools;
 pub mod vendors;
 

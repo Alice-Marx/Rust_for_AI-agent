@@ -4,11 +4,16 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     middleware,
-    response::{IntoResponse, Response},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Response,
+    },
     routing::{get, post},
     Json, Router,
 };
+use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
 use tower_http::trace::TraceLayer;
 
 use crate::{
@@ -31,11 +36,13 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/v1/agent/run", post(run_agent))
+        .route("/v1/agent/stream", post(run_agent_stream))
         .route("/v1/memory", post(write_memory))
         .route("/v1/memory/search", get(search_memory))
         .route("/v1/sandbox/execute", post(execute_sandbox))
         .route("/v1/evaluations", get(list_evaluations))
         .route("/v1/sessions", get(list_sessions))
+        .route("/v1/sessions/search", get(search_sessions))
         .route("/v1/sessions/{id}", get(get_session))
         .route("/v1/skills", get(list_skills))
         .route("/v1/tools", get(list_tools))
@@ -44,6 +51,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/providers/cliproxyapi/models",
             get(list_cliproxy_models),
+        )
+        .route(
+            "/v1/providers/cliproxyapi/accounts",
+            get(list_cliproxy_accounts),
+        )
+        .route(
+            "/v1/providers/cliproxyapi/accounts/refresh",
+            post(refresh_cliproxy_accounts),
         )
         .route("/v1/providers/cliproxyapi/verify", post(verify_cliproxy))
         .route(
@@ -91,11 +106,82 @@ async fn require_expense_api_key(
     }
 }
 
+/// SSE 帧：先流式推送增量事件，最后补一帧完整响应（或错误）。
+#[derive(Serialize)]
+#[serde(tag = "frame", rename_all = "snake_case")]
+enum SseFrame {
+    Event {
+        event: crate::provider::StreamEvent,
+    },
+    Response {
+        response: Box<crate::model::AgentResponse>,
+    },
+    Error {
+        message: String,
+    },
+}
+
+/// 流式运行 Agent：以 SSE 推送增量事件，最后一条响应帧带上完整结果。
+///
+/// 事件形状见 provider::StreamEvent，例如
+/// data: {"type":"text_delta","text":"..."}
+async fn run_agent_stream(
+    State(state): State<AppState>,
+    Json(request): Json<AgentRequest>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let (sink, receiver) = tokio::sync::mpsc::unbounded_channel::<crate::provider::StreamEvent>();
+    let (frames, frame_receiver) = tokio::sync::mpsc::unbounded_channel::<SseFrame>();
+    let runtime = state.runtime.clone();
+    tokio::spawn(async move {
+        // 事件先转发为 frame，run 结束后补一帧完整响应（含 plan/todos/usage）。
+        let forward_frames = frames.clone();
+        let forward = tokio::spawn(async move {
+            let mut receiver = receiver;
+            while let Some(event) = receiver.recv().await {
+                if forward_frames.send(SseFrame::Event { event }).is_err() {
+                    break;
+                }
+            }
+        });
+        let outcome = runtime
+            .run_with_events(
+                request,
+                Arc::new(crate::permissions::DenyAllHandler),
+                Some(sink),
+            )
+            .await;
+        let _ = forward.await;
+        match outcome {
+            Ok(response) => {
+                let _ = frames.send(SseFrame::Response {
+                    response: Box::new(response),
+                });
+            }
+            Err(error) => {
+                let _ = frames.send(SseFrame::Error {
+                    message: error.to_string(),
+                });
+            }
+        }
+    });
+
+    let stream = futures_util::stream::unfold(frame_receiver, |mut receiver| async move {
+        let frame = receiver.recv().await?;
+        let payload = serde_json::to_string(&frame).unwrap_or_else(|_| "{}".to_string());
+        Some((Ok(Event::default().data(payload)), receiver))
+    });
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
 #[derive(Serialize)]
 struct HealthResponse {
     status: &'static str,
     agents: Vec<String>,
     sandbox_enabled: bool,
+    /// 沙箱策略与实际隔离机制。
+    sandbox: serde_json::Value,
+    /// 当前 provider 可用的 wire 协议（chat / responses / anthropic）。
+    protocols: Vec<String>,
     provider: &'static str,
     cliproxyapi_configured: bool,
     skills: usize,
@@ -106,6 +192,14 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         status: "ok",
         agents: state.runtime.directory.names().await,
         sandbox_enabled: state.runtime.sandbox.policy().enabled,
+        sandbox: state.runtime.sandbox.describe(),
+        protocols: state
+            .runtime
+            .provider
+            .available_protocols()
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
         provider: state.runtime.provider.name(),
         cliproxyapi_configured: state.cliproxy.is_some(),
         skills: state.runtime.skills.summaries().await.len(),
@@ -115,6 +209,34 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
 #[derive(Debug, Deserialize)]
 pub struct CliProxyVerifyRequest {
     pub model: Option<String>,
+}
+
+/// 已登录的订阅账号。
+async fn list_cliproxy_accounts(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<crate::cliproxy::CliProxyAccount>>, ApiError> {
+    let client = state
+        .cliproxy
+        .clone()
+        .ok_or_else(|| ApiError::service_unavailable("CLIProxyAPI is not configured"))?;
+    Ok(Json(client.list_accounts().await?))
+}
+
+#[derive(Serialize)]
+struct RefreshAccountsResponse {
+    refreshed: bool,
+}
+
+async fn refresh_cliproxy_accounts(
+    State(state): State<AppState>,
+) -> Result<Json<RefreshAccountsResponse>, ApiError> {
+    let client = state
+        .cliproxy
+        .clone()
+        .ok_or_else(|| ApiError::service_unavailable("CLIProxyAPI is not configured"))?;
+    Ok(Json(RefreshAccountsResponse {
+        refreshed: client.refresh_accounts().await?,
+    }))
 }
 
 async fn list_cliproxy_models(
@@ -262,6 +384,80 @@ async fn list_evaluations(
 #[derive(Debug, Deserialize)]
 struct SessionQuery {
     user_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionSearchQuery {
+    q: String,
+    user_id: Option<String>,
+    limit: Option<usize>,
+}
+
+/// 会话关键词检索（SQLite 索引）。索引未启用时回退到线性扫描。
+async fn search_sessions(
+    State(state): State<AppState>,
+    Query(query): Query<SessionSearchQuery>,
+) -> Result<Json<Vec<crate::session_index::IndexedSession>>, ApiError> {
+    let limit = query.limit.unwrap_or(20).clamp(1, 200);
+    if let Some(index) = &state.runtime.index {
+        return Ok(Json(index.search(
+            &query.q,
+            query.user_id.as_deref(),
+            limit,
+        )?));
+    }
+    Ok(Json(scan_sessions(
+        &state,
+        &query.q,
+        query.user_id.as_deref(),
+        limit,
+    )?))
+}
+
+/// 索引不可用时的兜底：直接扫会话文件。
+fn scan_sessions(
+    state: &AppState,
+    query: &str,
+    user_id: Option<&str>,
+    limit: usize,
+) -> anyhow::Result<Vec<crate::session_index::IndexedSession>> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut hits = Vec::new();
+    for summary in state.runtime.sessions.list()? {
+        if let Some(user_id) = user_id {
+            if summary.user_id.as_deref() != Some(user_id) {
+                continue;
+            }
+        }
+        let Some(session) = state.runtime.sessions.load(&summary.id)? else {
+            continue;
+        };
+        let rendered = session
+            .messages
+            .iter()
+            .map(|message| message.text())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if let Some(position) = rendered.to_lowercase().find(&needle) {
+            let chars: Vec<char> = rendered.chars().collect();
+            let start = position.saturating_sub(60);
+            let end = (start + 180).min(chars.len());
+            hits.push(crate::session_index::IndexedSession {
+                id: session.id.clone(),
+                user_id: session.user_id.clone(),
+                updated_at: session.updated_at.to_rfc3339(),
+                message_count: session.messages.len(),
+                snippet: chars[start..end].iter().collect(),
+            });
+        }
+        if hits.len() >= limit {
+            break;
+        }
+    }
+    Ok(hits)
 }
 
 async fn list_sessions(

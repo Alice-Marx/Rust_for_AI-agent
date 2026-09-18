@@ -25,6 +25,10 @@ pub struct AgentRequest {
     /// 工具执行的工作目录；缺省为服务端当前目录。
     #[serde(default)]
     pub cwd: Option<String>,
+    /// 本次请求的推理档位覆盖：low / medium / high（off 或 none 表示关闭）。
+    /// 只有模型能力档案声明支持推理时才会真正下发。
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
     pub input: String,
 }
 

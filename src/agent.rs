@@ -20,6 +20,7 @@ use crate::{
         PermissionMode, PermissionPrompt, PermissionRule,
     },
     planning::{HeuristicPlanner, Plan, Planner, StepStatus},
+    provider::{emit, StreamEvent, StreamSink},
     provider::{ChatMessage, ContentBlock, ModelProvider, ModelRequest, Usage},
     sandbox::SandboxExecutor,
     session::{Session, SessionStore},
@@ -53,6 +54,8 @@ pub struct AgentRuntime {
     pub sessions: SessionStore,
     /// 单次 run 内允许的最大工具调用轮数。
     pub max_turns: usize,
+    /// 可选的会话检索索引；设置后每次落盘都会同步更新索引。
+    pub index: Option<std::sync::Arc<crate::session_index::SessionIndex>>,
     /// 上下文窗口显式覆盖；`None` 时使用模型能力档案的取值。
     pub context_window: Option<u64>,
     /// 最大输出 token 显式覆盖；`None` 时使用模型能力档案的取值。
@@ -83,6 +86,7 @@ impl AgentRuntime {
             tools,
             sessions,
             max_turns: 25,
+            index: None,
             context_window: std::env::var("AGENT_CONTEXT_WINDOW")
                 .ok()
                 .and_then(|value| value.parse().ok()),
@@ -91,6 +95,23 @@ impl AgentRuntime {
                 .and_then(|value| value.parse().ok()),
             reasoning_effort: crate::model_profile::configured_reasoning_effort(),
         }
+    }
+
+    /// 挂载会话检索索引。
+    pub fn with_index(mut self, index: std::sync::Arc<crate::session_index::SessionIndex>) -> Self {
+        self.index = Some(index);
+        self
+    }
+
+    /// 落盘会话并同步索引（索引失败只记录日志，不影响会话本身）。
+    fn persist(&self, session: &mut crate::session::Session) -> Result<()> {
+        self.sessions.save(session)?;
+        if let Some(index) = &self.index {
+            if let Err(error) = index.index_session(session) {
+                tracing::warn!(%error, session = %session.id, "更新会话索引失败");
+            }
+        }
+        Ok(())
     }
 
     pub fn with_skills(mut self, skills: SkillCatalog) -> Self {
@@ -148,6 +169,44 @@ impl AgentRuntime {
         request: AgentRequest,
         handler: Arc<dyn PermissionHandler>,
     ) -> Result<AgentResponse> {
+        self.run_with_events(request, handler, None).await
+    }
+
+    /// 同 run_with_handler，但把增量事件推送到 sink。
+    /// HTTP 的 /v1/agent/stream 与桌面端打字机都走这条路径。
+    #[instrument(skip(self, request, handler, sink), fields(session_id = %request.session_id))]
+    pub async fn run_with_events(
+        &self,
+        request: AgentRequest,
+        handler: Arc<dyn PermissionHandler>,
+        sink: Option<StreamSink>,
+    ) -> Result<AgentResponse> {
+        let result = self.run_inner(request, handler, sink.clone()).await;
+        match &result {
+            Ok(response) => emit(
+                sink.as_ref(),
+                StreamEvent::Completed {
+                    output: response.output.clone(),
+                    turns: response.turns,
+                    tool_calls: response.tool_calls,
+                },
+            ),
+            Err(error) => emit(
+                sink.as_ref(),
+                StreamEvent::Failed {
+                    message: error.to_string(),
+                },
+            ),
+        }
+        result
+    }
+
+    async fn run_inner(
+        &self,
+        request: AgentRequest,
+        handler: Arc<dyn PermissionHandler>,
+        sink: Option<StreamSink>,
+    ) -> Result<AgentResponse> {
         let started = Instant::now();
         let execution_id = Uuid::new_v4().to_string();
         let span = info_span!("agent_execution", execution_id = %execution_id, session_id = %request.session_id);
@@ -167,8 +226,13 @@ impl AgentRuntime {
         let profile = self.model_profile_for(&model);
         let context_window = self.context_window.unwrap_or(profile.context_window);
         let max_output_tokens = self.max_output_tokens.unwrap_or(profile.max_output_tokens);
+        // 请求级覆盖优先于环境变量；再由模型能力档案决定是否真正下发。
+        let configured_effort = request
+            .reasoning_effort
+            .as_deref()
+            .or(self.reasoning_effort.as_deref());
         let reasoning_effort =
-            crate::model_profile::reasoning_effort_for(&profile, self.reasoning_effort.as_deref());
+            crate::model_profile::reasoning_effort_for(&profile, configured_effort);
         info!(
             model = %model,
             profile = profile.name,
@@ -316,18 +380,25 @@ impl AgentRuntime {
                 .await?;
             // todos 可能被上一轮 TodoWrite 更新，作为动态段注入系统提示词。
             let run_prompt = attach_todo_section(&system_prompt, &tool_ctx.todos);
+            emit(sink.as_ref(), StreamEvent::TurnStart { turn: turns + 1 });
 
+            // 会话 id 同时作为提示缓存键：Kimi CLI 与 Codex CLI 都用该做法
+            // 让多轮请求共享同一段缓存前缀。
             let response = self
                 .provider
-                .complete(&ModelRequest {
-                    model: model.clone(),
-                    system: run_prompt,
-                    messages: session.messages.clone(),
-                    tools: self.tools.tool_definitions(),
-                    max_tokens: max_output_tokens,
-                    temperature: None,
-                    reasoning_effort: reasoning_effort.clone(),
-                })
+                .complete_stream(
+                    &ModelRequest {
+                        model: model.clone(),
+                        system: run_prompt,
+                        messages: session.messages.clone(),
+                        tools: self.tools.tool_definitions(),
+                        max_tokens: max_output_tokens,
+                        temperature: None,
+                        reasoning_effort: reasoning_effort.clone(),
+                        prompt_cache_key: Some(request.session_id.clone()),
+                    },
+                    sink.as_ref(),
+                )
                 .await?;
             session.usage += response.usage;
             run_usage += response.usage;
@@ -341,13 +412,21 @@ impl AgentRuntime {
                 .collect();
             if tool_uses.is_empty() {
                 final_text = response.text();
-                self.sessions.save(&mut session)?;
+                self.persist(&mut session)?;
                 break;
             }
 
             let mut results = Vec::with_capacity(tool_uses.len());
             for (id, name, input) in tool_uses {
                 tool_calls += 1;
+                emit(
+                    sink.as_ref(),
+                    StreamEvent::ToolCall {
+                        id: id.clone(),
+                        name: name.clone(),
+                        input: input.clone(),
+                    },
+                );
                 let output = self
                     .execute_tool(
                         &name,
@@ -359,6 +438,14 @@ impl AgentRuntime {
                         &cwd,
                     )
                     .await;
+                emit(
+                    sink.as_ref(),
+                    StreamEvent::ToolResult {
+                        id: id.clone(),
+                        content: truncate_for_event(&output.content),
+                        is_error: output.is_error,
+                    },
+                );
                 results.push(ContentBlock::tool_result(
                     id,
                     output.content,
@@ -369,7 +456,7 @@ impl AgentRuntime {
             turns += 1;
             // 每轮落盘（含 TodoWrite 更新过的 todos），崩溃后也能恢复出完整的工具调用轨迹。
             session.todos = tool_ctx.todos.clone();
-            self.sessions.save(&mut session)?;
+            self.persist(&mut session)?;
         }
         info!(turns, tool_calls, "agentic loop finished");
 
@@ -617,6 +704,7 @@ impl AgentRuntime {
                 max_tokens: COMPACT_MAX_TOKENS,
                 temperature: None,
                 reasoning_effort: None,
+                prompt_cache_key: None,
             })
             .await;
 
@@ -635,7 +723,7 @@ impl AgentRuntime {
         };
         messages.extend_from_slice(&session.messages[boundary..]);
         session.messages = messages;
-        self.sessions.save(session)?;
+        self.persist(session)?;
         Ok(())
     }
 
@@ -668,6 +756,21 @@ impl AgentRuntime {
         }
         results
     }
+}
+
+/// 事件里的工具结果截断：SSE 只用于进度展示，完整内容仍落在会话里。
+fn truncate_for_event(content: &str) -> String {
+    const MAX: usize = 2_000;
+    if content.len() <= MAX {
+        return content.to_string();
+    }
+    let mut end = MAX;
+    while !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut truncated = content[..end].to_string();
+    truncated.push_str("...(截断)");
+    truncated
 }
 
 /// 压缩后保留的消息起点：最后一个「干净」user 消息（含 Text 块且无
@@ -872,6 +975,7 @@ mod tests {
             skills: Vec::new(),
             mode,
             cwd: Some(cwd.to_string_lossy().to_string()),
+            reasoning_effort: None,
             input: input.to_string(),
         }
     }
@@ -928,6 +1032,7 @@ mod tests {
                 skills: Vec::new(),
                 mode: None,
                 cwd: Some(directory.path().to_string_lossy().to_string()),
+                reasoning_effort: None,
                 input: "请研究 Rust 的费用预算".to_string(),
             })
             .await

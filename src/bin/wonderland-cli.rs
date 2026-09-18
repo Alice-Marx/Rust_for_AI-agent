@@ -50,6 +50,14 @@ struct Cli {
     #[arg(long, env = "AGENT_MODEL")]
     model: Option<String>,
 
+    /// 关闭流式输出（默认开启：逐字显示回答与工具进度）
+    #[arg(long = "no-stream", default_value_t = false)]
+    no_stream: bool,
+
+    /// 推理档位：low / medium / high（off 关闭）。仅对支持推理的模型生效
+    #[arg(long, env = "AGENT_REASONING_EFFORT")]
+    reasoning: Option<String>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -107,6 +115,14 @@ enum Command {
     Mcp,
     /// 列出当前项目的自定义斜杠命令
     Commands,
+    /// 列出已登录的订阅账号
+    Accounts,
+    /// 检索历史会话（关键词，走 SQLite 索引）
+    Search {
+        query: String,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
 }
 
 #[derive(Clone)]
@@ -137,6 +153,15 @@ struct SessionSummary {
     updated_at: String,
     #[serde(default)]
     user_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct SessionHit {
+    id: String,
+    message_count: usize,
+    updated_at: String,
+    #[serde(default)]
+    snippet: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -176,6 +201,126 @@ impl AgentApi {
             .json()
             .await
             .context("无法解析 Agent 响应")
+    }
+
+    /// 流式运行：逐帧消费 SSE，把增量直接写到终端，最后返回完整响应。
+    async fn run_stream(&self, request: AgentRequest) -> Result<AgentResponse> {
+        use futures_util::StreamExt;
+
+        let response = self
+            .client
+            .post(self.url("/v1/agent/stream"))
+            .json(&request)
+            .send()
+            .await
+            .context("无法连接 Rust Agent 流式接口")?;
+        let status = response.status();
+        if !status.is_success() {
+            let raw = response.text().await.unwrap_or_default();
+            anyhow::bail!("流式请求失败 {status}: {raw}");
+        }
+        let mut stream = response.bytes_stream();
+        let mut decoder = wonderland::provider::SseBuffer::new();
+        let mut final_response: Option<AgentResponse> = None;
+        let mut failure: Option<String> = None;
+        let mut printed_text = false;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.context("流式响应中断")?;
+            for payload in decoder.push_bytes(&chunk) {
+                let trimmed = payload.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let frame: serde_json::Value = serde_json::from_str(trimmed)
+                    .with_context(|| format!("无法解析流式帧：{trimmed}"))?;
+                match frame
+                    .get("frame")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                {
+                    "event" => {
+                        let event = &frame["event"];
+                        let kind = event
+                            .get("type")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default();
+                        match kind {
+                            "text_delta" => {
+                                print!(
+                                    "{}",
+                                    event
+                                        .get("text")
+                                        .and_then(|value| value.as_str())
+                                        .unwrap_or_default()
+                                );
+                                io::stdout().flush()?;
+                                printed_text = true;
+                            }
+                            "reasoning_delta" => {
+                                // 思维链写 stderr，避免污染可复制的回答正文。
+                                eprint!(
+                                    "{}",
+                                    event
+                                        .get("text")
+                                        .and_then(|value| value.as_str())
+                                        .unwrap_or_default()
+                                );
+                            }
+                            "tool_call" => {
+                                eprintln!(
+                                    "[工具] {}",
+                                    event
+                                        .get("name")
+                                        .and_then(|value| value.as_str())
+                                        .unwrap_or("?")
+                                );
+                            }
+                            "tool_result" => {
+                                let error = event
+                                    .get("is_error")
+                                    .and_then(|value| value.as_bool())
+                                    .unwrap_or(false);
+                                let head = event
+                                    .get("content")
+                                    .and_then(|value| value.as_str())
+                                    .unwrap_or_default()
+                                    .lines()
+                                    .next()
+                                    .unwrap_or_default();
+                                eprintln!("[工具结果{}] {head}", if error { " 失败" } else { "" });
+                            }
+                            "failed" => {
+                                failure = event
+                                    .get("message")
+                                    .and_then(|value| value.as_str())
+                                    .map(str::to_string);
+                            }
+                            _ => {}
+                        }
+                    }
+                    "response" => {
+                        final_response = serde_json::from_value(frame["response"].clone()).ok();
+                    }
+                    "error" => {
+                        failure = frame
+                            .get("message")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if printed_text {
+            println!();
+        }
+        if let Some(response) = final_response {
+            return Ok(response);
+        }
+        if let Some(message) = failure {
+            anyhow::bail!("Agent 运行失败：{message}");
+        }
+        anyhow::bail!("流式响应提前结束，没有收到最终结果")
     }
 
     async fn health(&self) -> Result<HealthResponse> {
@@ -284,6 +429,42 @@ impl AgentApi {
             .context("无法解析 MCP 服务器列表")
     }
 
+    async fn search_sessions(
+        &self,
+        query: &str,
+        user_id: &str,
+        limit: usize,
+    ) -> Result<Vec<SessionHit>> {
+        self.client
+            .get(self.url("/v1/sessions/search"))
+            .query(&[
+                ("q", query.to_string()),
+                ("user_id", user_id.to_string()),
+                ("limit", limit.to_string()),
+            ])
+            .send()
+            .await
+            .context("无法连接会话检索接口")?
+            .error_for_status()
+            .context("会话检索失败")?
+            .json()
+            .await
+            .context("无法解析会话检索结果")
+    }
+
+    async fn accounts(&self) -> Result<Vec<wonderland::cliproxy::CliProxyAccount>> {
+        self.client
+            .get(self.url("/v1/providers/cliproxyapi/accounts"))
+            .send()
+            .await
+            .context("无法连接订阅账号接口")?
+            .error_for_status()
+            .context("查询订阅账号失败")?
+            .json()
+            .await
+            .context("无法解析订阅账号列表")
+    }
+
     async fn sessions(&self, user_id: Option<&str>) -> Result<Vec<SessionSummary>> {
         let mut request = self.client.get(self.url("/v1/sessions"));
         if let Some(user_id) = user_id.filter(|value| !value.is_empty()) {
@@ -338,16 +519,21 @@ async fn main() -> Result<()> {
         mode: cli.mode,
         cwd: cli.cwd.clone(),
         model: cli.model.clone(),
+        stream: !cli.no_stream,
+        reasoning_effort: cli.reasoning.clone(),
     };
 
     match cli.command.unwrap_or(Command::Chat { prompt: None }) {
         Command::Chat {
             prompt: Some(prompt),
         } => {
-            print_response(
-                &api.run(settings.request(&default_session, &cli.user_id, prompt, Vec::new()))
-                    .await?,
-            );
+            let request = settings.request(&default_session, &cli.user_id, prompt, Vec::new());
+            let response = if settings.stream {
+                api.run_stream(request).await?
+            } else {
+                api.run(request).await?
+            };
+            print_response(&response);
         }
         Command::Chat { prompt: None } => {
             interactive_chat(
@@ -366,10 +552,13 @@ async fn main() -> Result<()> {
             skills,
         } => {
             let session_id = session_id.as_deref().unwrap_or(&default_session);
-            print_response(
-                &api.run(settings.request(session_id, &cli.user_id, input, skills))
-                    .await?,
-            );
+            let request = settings.request(session_id, &cli.user_id, input, skills);
+            let response = if settings.stream {
+                api.run_stream(request).await?
+            } else {
+                api.run(request).await?
+            };
+            print_response(&response);
         }
         Command::Health => {
             let health = api.health().await?;
@@ -448,6 +637,41 @@ async fn main() -> Result<()> {
             }
         }
         Command::Commands => println!("{}", wonderland::commands::render_command_list(&commands)),
+        Command::Search { query, limit } => {
+            let hits = api.search_sessions(&query, &cli.user_id, limit).await?;
+            if hits.is_empty() {
+                println!("没有匹配「{query}」的会话");
+            }
+            for hit in hits {
+                println!(
+                    "{}  messages={}  updated={}",
+                    hit.id, hit.message_count, hit.updated_at
+                );
+                println!(
+                    "    {}",
+                    hit.snippet.replace(char::from_u32(10).unwrap(), " ")
+                );
+            }
+        }
+        Command::Accounts => {
+            let accounts = api.accounts().await?;
+            if accounts.is_empty() {
+                println!("（没有已登录的订阅账号；用 wonderland-cli login codex 等命令登录）");
+            }
+            for account in accounts {
+                println!(
+                    "{:32} {:12} {}{}",
+                    account.name,
+                    account.provider.unwrap_or_else(|| "?".to_string()),
+                    account.email.unwrap_or_default(),
+                    if account.disabled {
+                        "（已禁用）"
+                    } else {
+                        ""
+                    },
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -600,10 +824,14 @@ async fn run_turn(
 ) -> Result<()> {
     print!("agent> ");
     io::stdout().flush()?;
-    let response = api
-        .run(settings.request(session_id, user_id, input, Vec::new()))
-        .await?;
-    println!("{}", response.output);
+    let request = settings.request(session_id, user_id, input, Vec::new());
+    let response = if settings.stream {
+        api.run_stream(request).await?
+    } else {
+        let response = api.run(request).await?;
+        println!("{}", response.output);
+        response
+    };
     println!();
     if !response.todos.is_empty() {
         println!("todos:");
@@ -664,6 +892,10 @@ struct RunSettings {
     mode: Option<PermissionMode>,
     cwd: Option<String>,
     model: Option<String>,
+    /// 是否使用流式接口（--no-stream 关闭）。
+    stream: bool,
+    /// 推理档位覆盖。
+    reasoning_effort: Option<String>,
 }
 
 impl RunSettings {
@@ -681,6 +913,7 @@ impl RunSettings {
             skills,
             mode: self.mode,
             cwd: self.cwd.clone(),
+            reasoning_effort: self.reasoning_effort.clone(),
             input,
         }
     }

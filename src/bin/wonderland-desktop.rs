@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
 use uuid::Uuid;
 use wonderland::cliproxy::{
-    CliProxyLoginStart, CliProxyLoginStatus, CliProxyModel, CliProxyVerification,
+    CliProxyAccount, CliProxyLoginStart, CliProxyLoginStatus, CliProxyModel, CliProxyVerification,
 };
 use wonderland::model::{AgentRequest, AgentResponse};
 
@@ -48,6 +48,12 @@ struct Task {
     plan: Vec<String>,
     reflection: Option<String>,
     running: bool,
+    /// 正在流式输出的回答正文（完成后并入 messages）。
+    #[serde(default)]
+    stream_text: String,
+    /// 本轮工具执行进度（最新的在最后）。
+    #[serde(default)]
+    tool_log: Vec<String>,
 }
 
 enum UiEvent {
@@ -59,10 +65,29 @@ enum UiEvent {
         task_id: String,
         message: String,
     },
+    /// 助手文本增量。
+    Delta {
+        task_id: String,
+        text: String,
+    },
+    /// 思维链增量（显示在工具进度区）。
+    Reasoning {
+        task_id: String,
+        text: String,
+    },
+    /// 工具执行进度。
+    ToolProgress {
+        task_id: String,
+        label: String,
+    },
     LoginStarted(CliProxyLoginStart),
     LoginStatus(CliProxyLoginStatus),
     ModelsLoaded(Vec<CliProxyModel>),
     ModelVerified(CliProxyVerification),
+    ToolsLoaded(Vec<serde_json::Value>),
+    McpLoaded(Vec<serde_json::Value>),
+    AccountsLoaded(Vec<CliProxyAccount>),
+    HealthLoaded(serde_json::Value),
     ApiFailed(String),
 }
 
@@ -82,6 +107,17 @@ struct DesktopApp {
     api_request_running: bool,
     event_tx: mpsc::Sender<UiEvent>,
     event_rx: mpsc::Receiver<UiEvent>,
+    /// 当前后端 provider 名称与可用 wire 协议。
+    provider_name: String,
+    protocols: Vec<String>,
+    /// 推理档位（发送给后端的请求级覆盖）。
+    reasoning_effort: String,
+    /// 已注册工具、MCP 服务器与订阅账号。
+    tools: Vec<serde_json::Value>,
+    mcp_servers: Vec<serde_json::Value>,
+    accounts: Vec<CliProxyAccount>,
+    /// 是否展开连接与工具面板。
+    show_conn_panel: bool,
 }
 
 impl DesktopApp {
@@ -102,7 +138,9 @@ impl DesktopApp {
             .storage
             .and_then(|storage| eframe::get_value(storage, "user_id"))
             .unwrap_or_else(|| "local-user".to_string());
-        Self {
+        let server_url_for_probe = server_url.clone();
+        let event_tx_for_probe = event_tx.clone();
+        let app = Self {
             server_url,
             user_id,
             tasks,
@@ -118,7 +156,17 @@ impl DesktopApp {
             api_request_running: false,
             event_tx,
             event_rx,
-        }
+            provider_name: "unknown".to_string(),
+            protocols: Vec::new(),
+            reasoning_effort: "medium".to_string(),
+            tools: Vec::new(),
+            mcp_servers: Vec::new(),
+            accounts: Vec::new(),
+            show_conn_panel: false,
+        };
+        // 启动即抓一份后端能力信息（provider / 协议栈 / 工具 / MCP / 账号）。
+        spawn_health_request(event_tx_for_probe, server_url_for_probe);
+        app
     }
 
     fn add_task(&mut self) {
@@ -153,6 +201,10 @@ impl DesktopApp {
         self.input.clear();
         self.status = "Agent 正在规划并执行...".to_string();
 
+        let reasoning_effort = match self.reasoning_effort.as_str() {
+            "off" | "" => None,
+            other => Some(other.to_string()),
+        };
         let request = AgentRequest {
             session_id,
             user_id: Some(self.user_id.clone()),
@@ -160,6 +212,7 @@ impl DesktopApp {
             skills: Vec::new(),
             mode: None,
             cwd: None,
+            reasoning_effort,
             input,
         };
         spawn_agent_request(
@@ -168,6 +221,15 @@ impl DesktopApp {
             task_id,
             request,
         );
+    }
+
+    /// 拉取工具 / MCP / 账号 / 健康信息。
+    fn refresh_connection_panel(&mut self) {
+        spawn_health_request(self.event_tx.clone(), self.server_url.clone());
+        spawn_tools_request(self.event_tx.clone(), self.server_url.clone());
+        spawn_mcp_request(self.event_tx.clone(), self.server_url.clone());
+        spawn_accounts_request(self.event_tx.clone(), self.server_url.clone());
+        self.status = "正在刷新连接与工具信息".to_string();
     }
 
     fn drain_events(&mut self) {
@@ -187,6 +249,8 @@ impl DesktopApp {
                             role: MessageRole::Agent,
                             text: response.output,
                         });
+                        task.stream_text.clear();
+                        task.tool_log.clear();
                         self.status = format!(
                             "完成 · 评分 {:.0} · {} 轮 · {} 次工具调用 · tokens {}/{}",
                             response.evaluation.total_score,
@@ -197,9 +261,55 @@ impl DesktopApp {
                         );
                     }
                 }
+                UiEvent::Delta { task_id, text } => {
+                    if let Some(task) = self.tasks.iter_mut().find(|task| task.id == task_id) {
+                        task.stream_text.push_str(&text);
+                    }
+                }
+                UiEvent::Reasoning { task_id, text } => {
+                    if let Some(task) = self.tasks.iter_mut().find(|task| task.id == task_id) {
+                        let line = text.lines().last().unwrap_or_default().trim();
+                        if !line.is_empty() {
+                            push_tool_note(task, format!("思考：{line}"));
+                        }
+                    }
+                }
+                UiEvent::ToolProgress { task_id, label } => {
+                    if let Some(task) = self.tasks.iter_mut().find(|task| task.id == task_id) {
+                        push_tool_note(task, label);
+                    }
+                }
+                UiEvent::ToolsLoaded(tools) => {
+                    self.tools = tools;
+                }
+                UiEvent::McpLoaded(servers) => {
+                    self.mcp_servers = servers;
+                }
+                UiEvent::AccountsLoaded(accounts) => {
+                    self.accounts = accounts;
+                }
+                UiEvent::HealthLoaded(value) => {
+                    self.provider_name = value
+                        .get("provider")
+                        .and_then(|provider| provider.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    self.protocols = value
+                        .get("protocols")
+                        .and_then(|protocols| protocols.as_array())
+                        .map(|entries| {
+                            entries
+                                .iter()
+                                .filter_map(|entry| entry.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                }
                 UiEvent::Failed { task_id, message } => {
                     if let Some(task) = self.tasks.iter_mut().find(|task| task.id == task_id) {
                         task.running = false;
+                        task.stream_text.clear();
+                        task.tool_log.clear();
                         task.messages.push(ChatMessage {
                             role: MessageRole::Agent,
                             text: format!("请求失败：{message}"),
@@ -330,6 +440,24 @@ impl DesktopApp {
             ui.add(TextEdit::singleline(&mut self.server_url).desired_width(250.0));
             ui.label(RichText::new("用户").color(MUTED));
             ui.add(TextEdit::singleline(&mut self.user_id).desired_width(150.0));
+            ui.label(RichText::new("推理").color(MUTED));
+            egui::ComboBox::from_id_salt("reasoning-effort")
+                .selected_text(&self.reasoning_effort)
+                .width(90.0)
+                .show_ui(ui, |ui| {
+                    for effort in ["off", "low", "medium", "high"] {
+                        ui.selectable_value(&mut self.reasoning_effort, effort.to_string(), effort);
+                    }
+                });
+            if ui
+                .selectable_label(self.show_conn_panel, "连接与工具")
+                .clicked()
+            {
+                self.show_conn_panel = !self.show_conn_panel;
+                if self.show_conn_panel {
+                    self.refresh_connection_panel();
+                }
+            }
         });
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
@@ -506,7 +634,7 @@ impl DesktopApp {
             });
             ui.add_space(10.0);
         }
-        if task.messages.is_empty() {
+        if task.messages.is_empty() && task.stream_text.is_empty() {
             ui.vertical_centered(|ui| {
                 ui.add_space(80.0);
                 ui.heading("今天想完成什么？");
@@ -514,6 +642,37 @@ impl DesktopApp {
                     RichText::new("Agent 会先生成计划，再执行、反思并保存长期记忆。").color(MUTED),
                 );
             });
+        }
+        // 正在流式输出的回答：直接在气泡里逐字增长。
+        if !task.stream_text.is_empty() {
+            ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
+                Frame::new()
+                    .fill(CARD)
+                    .corner_radius(10.0)
+                    .inner_margin(egui::Margin::symmetric(14, 10))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new("Agent")
+                                .color(Color32::from_rgb(110, 165, 255))
+                                .strong(),
+                        );
+                        ui.add_space(4.0);
+                        ui.label(&task.stream_text);
+                    });
+            });
+        }
+        if !task.tool_log.is_empty() {
+            ui.add_space(6.0);
+            Frame::new()
+                .fill(Color32::from_rgb(32, 32, 38))
+                .corner_radius(8.0)
+                .inner_margin(egui::Margin::symmetric(12, 8))
+                .show(ui, |ui| {
+                    ui.label(RichText::new("执行进度").color(MUTED).small());
+                    for line in &task.tool_log {
+                        ui.label(RichText::new(truncate(line, 120)).color(MUTED).small());
+                    }
+                });
         }
     }
 
@@ -552,6 +711,123 @@ impl DesktopApp {
                         .small(),
                 );
             });
+    }
+
+    /// 右侧连接与工具面板：provider/协议栈、工具、MCP、订阅账号。
+    fn render_connection_panel(&mut self, ctx: &egui::Context) {
+        if !self.show_conn_panel {
+            return;
+        }
+        let mut open = self.show_conn_panel;
+        egui::SidePanel::right("connection-panel")
+            .resizable(true)
+            .default_width(320.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.heading("连接与工具");
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("关闭").clicked() {
+                            open = false;
+                        }
+                        if ui.button("刷新").clicked() {
+                            self.refresh_connection_panel();
+                        }
+                    });
+                });
+                ui.add_space(6.0);
+                ui.label(RichText::new(format!("后端 provider：{}", self.provider_name)).color(MUTED));
+                ui.label(
+                    RichText::new(format!(
+                        "可用协议：{}",
+                        if self.protocols.is_empty() {
+                            "（未上报）".to_string()
+                        } else {
+                            self.protocols.join(" / ")
+                        }
+                    ))
+                    .color(MUTED),
+                );
+                ui.label(
+                    RichText::new(
+                        "请求会按模型族自动走 chat.completions / Responses / Anthropic Messages。",
+                    )
+                    .color(MUTED)
+                    .small(),
+                );
+                ui.separator();
+
+                ui.collapsing(format!("工具（{}）", self.tools.len()), |ui| {
+                    ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                        for tool in &self.tools {
+                            let name = tool
+                                .get("name")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or("?");
+                            let source = tool
+                                .get("source")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or("builtin");
+                            let read_only = tool
+                                .get("read_only")
+                                .and_then(|value| value.as_bool())
+                                .unwrap_or(false);
+                            ui.label(
+                                RichText::new(format!(
+                                    "{name}  [{source}{}]",
+                                    if read_only { " · 只读" } else { "" }
+                                ))
+                                .small(),
+                            );
+                        }
+                    });
+                });
+
+                ui.collapsing(format!("MCP 服务器（{}）", self.mcp_servers.len()), |ui| {
+                    if self.mcp_servers.is_empty() {
+                        ui.label(
+                            RichText::new(
+                                "未连接。可在项目 .mcp.json 或 .wonderland/settings.json 的 mcpServers 中配置。",
+                            )
+                            .color(MUTED)
+                            .small(),
+                        );
+                    }
+                    for server in &self.mcp_servers {
+                        let name = server
+                            .get("name")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("?");
+                        let count = server
+                            .get("tools")
+                            .and_then(|value| value.as_array())
+                            .map(|tools| tools.len())
+                            .unwrap_or(0);
+                        ui.label(RichText::new(format!("{name}（{count} 个工具）")).small());
+                    }
+                });
+
+                ui.collapsing(format!("订阅账号（{}）", self.accounts.len()), |ui| {
+                    if self.accounts.is_empty() {
+                        ui.label(
+                            RichText::new("还没有登录订阅账号；先在上方选择服务并点击账号登录。")
+                                .color(MUTED)
+                                .small(),
+                        );
+                    }
+                    for account in &self.accounts {
+                        ui.label(
+                            RichText::new(format!(
+                                "{}  {}{}",
+                                account.name,
+                                account.provider.clone().unwrap_or_default(),
+                                if account.disabled { "（已禁用）" } else { "" }
+                            ))
+                            .small(),
+                        );
+                    }
+                });
+            });
+        self.show_conn_panel = open;
     }
 
     fn render_plan_panel(&self, ctx: &egui::Context) {
@@ -680,12 +956,22 @@ impl eframe::App for DesktopApp {
         if self.view == ViewMode::Planning {
             self.render_plan_panel(ctx);
         }
+        self.render_connection_panel(ctx);
         egui::CentralPanel::default()
             .frame(Frame::new().fill(BG).inner_margin(18.0))
             .show(ctx, |ui| match self.view {
                 ViewMode::Planning => self.render_planning(ui),
                 ViewMode::Parallel => self.render_parallel(ui),
             });
+    }
+}
+
+/// 进度区只保留最近 6 条，避免长任务把面板撑爆。
+fn push_tool_note(task: &mut Task, label: String) {
+    task.tool_log.push(label);
+    let overflow = task.tool_log.len().saturating_sub(6);
+    if overflow > 0 {
+        task.tool_log.drain(..overflow);
     }
 }
 
@@ -699,6 +985,8 @@ impl Task {
             plan: Vec::new(),
             reflection: None,
             running: false,
+            stream_text: String::new(),
+            tool_log: Vec::new(),
         }
     }
 }
@@ -710,29 +998,268 @@ fn spawn_agent_request(
     request: AgentRequest,
 ) {
     thread::spawn(move || {
+        let runtime = match Runtime::new() {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                let _ = event_tx.send(UiEvent::Failed {
+                    task_id,
+                    message: error.to_string(),
+                });
+                return;
+            }
+        };
+        runtime.block_on(async move {
+            use futures_util::StreamExt;
+
+            let url = format!("{}/v1/agent/stream", server_url.trim_end_matches('/'));
+            let response = match Client::new().post(url).json(&request).send().await {
+                Ok(response) => response,
+                Err(error) => {
+                    let _ = event_tx.send(UiEvent::Failed {
+                        task_id,
+                        message: format!("无法连接后端：{error}"),
+                    });
+                    return;
+                }
+            };
+            let status = response.status();
+            if !status.is_success() {
+                let raw = response.text().await.unwrap_or_default();
+                let _ = event_tx.send(UiEvent::Failed {
+                    task_id,
+                    message: format!("HTTP {status}: {raw}"),
+                });
+                return;
+            }
+
+            let mut stream = response.bytes_stream();
+            let mut decoder = wonderland::provider::SseBuffer::new();
+            let mut final_response: Option<AgentResponse> = None;
+            let mut failure: Option<String> = None;
+            while let Some(chunk) = stream.next().await {
+                let Ok(chunk) = chunk else {
+                    break;
+                };
+                for payload in decoder.push_bytes(&chunk) {
+                    let trimmed = payload.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let Ok(frame) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                        continue;
+                    };
+                    match frame
+                        .get("frame")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                    {
+                        "event" => {
+                            let event = &frame["event"];
+                            let kind = event
+                                .get("type")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or_default();
+                            let text = || {
+                                event
+                                    .get("text")
+                                    .and_then(|value| value.as_str())
+                                    .unwrap_or_default()
+                                    .to_string()
+                            };
+                            match kind {
+                                "text_delta" => {
+                                    let _ = event_tx.send(UiEvent::Delta {
+                                        task_id: task_id.clone(),
+                                        text: text(),
+                                    });
+                                }
+                                "reasoning_delta" => {
+                                    let _ = event_tx.send(UiEvent::Reasoning {
+                                        task_id: task_id.clone(),
+                                        text: text(),
+                                    });
+                                }
+                                "tool_call" => {
+                                    let name = event
+                                        .get("name")
+                                        .and_then(|value| value.as_str())
+                                        .unwrap_or("?");
+                                    let _ = event_tx.send(UiEvent::ToolProgress {
+                                        task_id: task_id.clone(),
+                                        label: format!("调用工具 {name}"),
+                                    });
+                                }
+                                "tool_result" => {
+                                    let error = event
+                                        .get("is_error")
+                                        .and_then(|value| value.as_bool())
+                                        .unwrap_or(false);
+                                    let head = event
+                                        .get("content")
+                                        .and_then(|value| value.as_str())
+                                        .unwrap_or_default()
+                                        .lines()
+                                        .next()
+                                        .unwrap_or_default()
+                                        .to_string();
+                                    let _ = event_tx.send(UiEvent::ToolProgress {
+                                        task_id: task_id.clone(),
+                                        label: format!(
+                                            "工具结果{}：{head}",
+                                            if error { "（失败）" } else { "" }
+                                        ),
+                                    });
+                                }
+                                "failed" => {
+                                    failure = event
+                                        .get("message")
+                                        .and_then(|value| value.as_str())
+                                        .map(str::to_string);
+                                }
+                                _ => {}
+                            }
+                        }
+                        "response" => {
+                            final_response = serde_json::from_value(frame["response"].clone()).ok();
+                        }
+                        "error" => {
+                            failure = frame
+                                .get("message")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_string);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            let event = match final_response {
+                Some(response) => UiEvent::Completed {
+                    task_id,
+                    response: Box::new(response),
+                },
+                None => UiEvent::Failed {
+                    task_id,
+                    message: failure.unwrap_or_else(|| "流式响应提前结束".to_string()),
+                },
+            };
+            let _ = event_tx.send(event);
+        });
+    });
+}
+
+/// 读取 /health：provider 名称与可用 wire 协议。
+fn spawn_health_request(event_tx: mpsc::Sender<UiEvent>, server_url: String) {
+    spawn_json_request(
+        event_tx,
+        format!("{}/health", server_url.trim_end_matches('/')),
+        UiEvent::HealthLoaded,
+    );
+}
+
+/// 读取 /v1/tools：内置 + MCP 工具清单。
+fn spawn_tools_request(event_tx: mpsc::Sender<UiEvent>, server_url: String) {
+    spawn_json_array_request(
+        event_tx,
+        format!("{}/v1/tools", server_url.trim_end_matches('/')),
+        UiEvent::ToolsLoaded,
+    );
+}
+
+/// 读取 /v1/mcp/servers。
+fn spawn_mcp_request(event_tx: mpsc::Sender<UiEvent>, server_url: String) {
+    spawn_json_array_request(
+        event_tx,
+        format!("{}/v1/mcp/servers", server_url.trim_end_matches('/')),
+        UiEvent::McpLoaded,
+    );
+}
+
+/// 读取 /v1/providers/cliproxyapi/accounts。
+fn spawn_accounts_request(event_tx: mpsc::Sender<UiEvent>, server_url: String) {
+    thread::spawn(move || {
         let result = Runtime::new()
             .map_err(|error| error.to_string())
             .and_then(|runtime| {
                 runtime.block_on(async move {
                     Client::new()
-                        .post(format!("{}/v1/agent/run", server_url.trim_end_matches('/')))
-                        .json(&request)
+                        .get(format!(
+                            "{}/v1/providers/cliproxyapi/accounts",
+                            server_url.trim_end_matches('/')
+                        ))
                         .send()
                         .await
                         .map_err(|error| error.to_string())?
                         .error_for_status()
                         .map_err(|error| error.to_string())?
-                        .json::<AgentResponse>()
+                        .json::<Vec<CliProxyAccount>>()
                         .await
                         .map_err(|error| error.to_string())
                 })
             });
         let event = match result {
-            Ok(response) => UiEvent::Completed {
-                task_id,
-                response: Box::new(response),
-            },
-            Err(message) => UiEvent::Failed { task_id, message },
+            Ok(accounts) => UiEvent::AccountsLoaded(accounts),
+            Err(message) => UiEvent::ApiFailed(message),
+        };
+        let _ = event_tx.send(event);
+    });
+}
+
+fn spawn_json_request(
+    event_tx: mpsc::Sender<UiEvent>,
+    url: String,
+    wrap: fn(serde_json::Value) -> UiEvent,
+) {
+    thread::spawn(move || {
+        let result = Runtime::new()
+            .map_err(|error| error.to_string())
+            .and_then(|runtime| {
+                runtime.block_on(async move {
+                    Client::new()
+                        .get(url)
+                        .send()
+                        .await
+                        .map_err(|error| error.to_string())?
+                        .error_for_status()
+                        .map_err(|error| error.to_string())?
+                        .json::<serde_json::Value>()
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+            });
+        let event = match result {
+            Ok(value) => wrap(value),
+            Err(message) => UiEvent::ApiFailed(message),
+        };
+        let _ = event_tx.send(event);
+    });
+}
+
+fn spawn_json_array_request(
+    event_tx: mpsc::Sender<UiEvent>,
+    url: String,
+    wrap: fn(Vec<serde_json::Value>) -> UiEvent,
+) {
+    thread::spawn(move || {
+        let result = Runtime::new()
+            .map_err(|error| error.to_string())
+            .and_then(|runtime| {
+                runtime.block_on(async move {
+                    Client::new()
+                        .get(url)
+                        .send()
+                        .await
+                        .map_err(|error| error.to_string())?
+                        .error_for_status()
+                        .map_err(|error| error.to_string())?
+                        .json::<Vec<serde_json::Value>>()
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+            });
+        let event = match result {
+            Ok(values) => wrap(values),
+            Err(message) => UiEvent::ApiFailed(message),
         };
         let _ = event_tx.send(event);
     });

@@ -1,8 +1,22 @@
 use std::ops::AddAssign;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::OnceLock;
+
+/// 订阅模式下托管的 CLIProxyAPI 进程（进程级单例，Drop 即停止）。
+static SUBSCRIPTION_MANAGER: OnceLock<crate::subscription::SubscriptionManager> = OnceLock::new();
+/// 托管 sidecar 的就绪端点，供管理 API（登录、账号、模型）复用。
+static SUBSCRIPTION_ENDPOINT: OnceLock<crate::subscription::SubscriptionEndpoint> = OnceLock::new();
+
+/// 当前进程托管的订阅端点（未启用订阅模式时为 None）。
+pub fn active_subscription_endpoint() -> Option<&'static crate::subscription::SubscriptionEndpoint>
+{
+    SUBSCRIPTION_ENDPOINT.get()
+}
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -172,6 +186,105 @@ pub enum StopReason {
     Other(String),
 }
 
+/// 流式增量事件。
+///
+/// provider 层产生前五类（文本/思维链/工具调用增量）与 Usage / Stop；
+/// agent 层补充 TurnStart / ToolCall / ToolResult / Completed / Failed，
+/// 因此同一个通道既可用于打字机展示，也可用于工具执行进度展示。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StreamEvent {
+    /// 助手文本增量。
+    TextDelta { text: String },
+    /// 思维链增量（Anthropic thinking / DeepSeek reasoning_content）。
+    ReasoningDelta { text: String },
+    /// 工具调用开始（拿到 id 与名字）。
+    ToolUseStart { id: String, name: String },
+    /// 工具调用参数 JSON 片段。
+    ToolUseDelta { id: String, partial_json: String },
+    /// 工具调用参数结束。
+    ToolUseStop { id: String },
+    /// agent 层：工具开始执行（参数已解析）。
+    ToolCall {
+        id: String,
+        name: String,
+        input: Value,
+    },
+    /// agent 层：工具执行结果。
+    ToolResult {
+        id: String,
+        content: String,
+        is_error: bool,
+    },
+    /// agent 层：新一轮模型调用开始。
+    TurnStart { turn: usize },
+    /// token 用量。
+    Usage { usage: Usage },
+    /// 停止原因。
+    Stop { stop_reason: StopReason },
+    /// agent 层：整个 run 结束。
+    Completed {
+        output: String,
+        turns: usize,
+        tool_calls: usize,
+    },
+    /// agent 层：run 失败。
+    Failed { message: String },
+}
+
+/// 事件接收端。发送失败（接收端已关闭）视为正常，不中断模型调用。
+pub type StreamSink = tokio::sync::mpsc::UnboundedSender<StreamEvent>;
+
+/// 向 sink 发送事件，忽略接收端已关闭的情况。
+pub fn emit(sink: Option<&StreamSink>, event: StreamEvent) {
+    if let Some(sink) = sink {
+        let _ = sink.send(event);
+    }
+}
+
+/// SSE 增量解码器：把任意切片拼成完整的 data: 负载。
+///
+/// 只依赖 data: 行；event: / id: / retry: 与注释行被忽略，
+/// 多行 data: 按规范用换行拼接。
+#[derive(Debug, Default)]
+pub struct SseBuffer {
+    buffer: String,
+    data_lines: Vec<String>,
+}
+
+impl SseBuffer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 送入一段字节（按 UTF-8 有损解码），返回本次完整的事件负载。
+    pub fn push_bytes(&mut self, chunk: &[u8]) -> Vec<String> {
+        let text = String::from_utf8_lossy(chunk);
+        self.push(&text)
+    }
+
+    /// 送入一段文本，返回本次完整的事件负载。
+    pub fn push(&mut self, chunk: &str) -> Vec<String> {
+        self.buffer.push_str(chunk);
+        let mut events = Vec::new();
+        while let Some(newline) = self.buffer.find('\n') {
+            let line = self.buffer[..newline].trim_end_matches('\r').to_string();
+            self.buffer.drain(..=newline);
+            if line.is_empty() {
+                if !self.data_lines.is_empty() {
+                    events.push(self.data_lines.join("\n"));
+                    self.data_lines.clear();
+                }
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("data:") {
+                self.data_lines.push(rest.trim_start().to_string());
+            }
+        }
+        events
+    }
+}
+
 /// 一次模型调用请求。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelRequest {
@@ -182,10 +295,14 @@ pub struct ModelRequest {
     pub tools: Vec<ToolDefinition>,
     pub max_tokens: u32,
     pub temperature: Option<f32>,
-    /// 推理档位（low / medium / high）。OpenAI 兼容端点映射为 `reasoning_effort`，
-    /// Anthropic 映射为 `thinking.budget_tokens`；`None` 表示不下发推理参数。
+    /// 推理档位（low / medium / high）。OpenAI 兼容端点映射为 reasoning_effort，
+    /// Anthropic 映射为 thinking.budget_tokens；None 表示不下发推理参数。
     #[serde(default)]
     pub reasoning_effort: Option<String>,
+    /// 提示缓存键（Kimi CLI / Codex 都用会话 id 作为 key）。
+    /// OpenAI 兼容端点映射为 prompt_cache_key，Responses API 同样。
+    #[serde(default)]
+    pub prompt_cache_key: Option<String>,
 }
 
 /// 一次模型调用响应。
@@ -229,7 +346,71 @@ pub trait ModelProvider: Send + Sync {
         None
     }
 
+    /// 该 provider 实际可用的 wire 协议名（单协议 provider 返回自身名字）。
+    fn available_protocols(&self) -> Vec<&'static str> {
+        vec![self.name()]
+    }
+
     async fn complete(&self, request: &ModelRequest) -> Result<ModelResponse>;
+
+    /// 流式调用。默认实现退化为非流式，并把结果一次性展开为增量事件，
+    /// 因此每个 provider 都能被流式前端统一消费。
+    async fn complete_stream(
+        &self,
+        request: &ModelRequest,
+        sink: Option<&StreamSink>,
+    ) -> Result<ModelResponse> {
+        let response = self.complete(request).await?;
+        replay_response_as_events(&response, sink);
+        Ok(response)
+    }
+}
+
+/// 把一次非流式响应展开为增量事件（默认流式实现与离线 provider 共用）。
+pub fn replay_response_as_events(response: &ModelResponse, sink: Option<&StreamSink>) {
+    for block in &response.blocks {
+        match block {
+            ContentBlock::Text { text } => {
+                emit(sink, StreamEvent::TextDelta { text: text.clone() })
+            }
+            ContentBlock::Thinking { thinking, .. } => emit(
+                sink,
+                StreamEvent::ReasoningDelta {
+                    text: thinking.clone(),
+                },
+            ),
+            ContentBlock::ToolUse { id, name, input } => {
+                emit(
+                    sink,
+                    StreamEvent::ToolUseStart {
+                        id: id.clone(),
+                        name: name.clone(),
+                    },
+                );
+                emit(
+                    sink,
+                    StreamEvent::ToolUseDelta {
+                        id: id.clone(),
+                        partial_json: input.to_string(),
+                    },
+                );
+                emit(sink, StreamEvent::ToolUseStop { id: id.clone() });
+            }
+            ContentBlock::ToolResult { .. } => {}
+        }
+    }
+    emit(
+        sink,
+        StreamEvent::Usage {
+            usage: response.usage,
+        },
+    );
+    emit(
+        sink,
+        StreamEvent::Stop {
+            stop_reason: response.stop_reason.clone(),
+        },
+    );
 }
 
 /// Offline provider used by default, so the project can be run and tested
@@ -347,6 +528,65 @@ impl ModelProvider for OpenAiCompatibleModel {
 
         parse_openai_response(&value)
     }
+
+    async fn complete_stream(
+        &self,
+        request: &ModelRequest,
+        sink: Option<&StreamSink>,
+    ) -> Result<ModelResponse> {
+        let resolved = ModelRequest {
+            model: if request.model.is_empty() {
+                self.model.clone()
+            } else {
+                request.model.clone()
+            },
+            temperature: request.temperature.or(Some(0.2)),
+            ..request.clone()
+        };
+        let mut body = build_openai_request(&resolved);
+        if let Some(object) = body.as_object_mut() {
+            object.insert("stream".to_string(), json!(true));
+            // include_usage 让最后一个 chunk 带上 usage（缓存命中统计依赖它）。
+            object.insert(
+                "stream_options".to_string(),
+                json!({ "include_usage": true }),
+            );
+        }
+        let http = self
+            .client
+            .post(format!("{}/chat/completions", self.base_url))
+            .json(&body);
+        let http = match &self.api_key {
+            Some(api_key) => http.bearer_auth(api_key),
+            None => http,
+        };
+        let response = http.send().await.context("model stream request failed")?;
+        let status = response.status();
+        if !status.is_success() {
+            let raw = response.text().await.unwrap_or_default();
+            anyhow::bail!("model returned {status}: {raw}");
+        }
+
+        let mut stream = response.bytes_stream();
+        let mut decoder = SseBuffer::new();
+        let mut accumulator = OpenAiStreamAccumulator::default();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.context("model stream interrupted")?;
+            for payload in decoder.push_bytes(&chunk) {
+                let trimmed = payload.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if trimmed == "[DONE]" {
+                    return Ok(accumulator.finish(sink));
+                }
+                let value: Value = serde_json::from_str(trimmed)
+                    .with_context(|| format!("invalid stream chunk: {trimmed}"))?;
+                accumulator.apply(&value, sink)?;
+            }
+        }
+        Ok(accumulator.finish(sink))
+    }
 }
 
 /// 把中立的 ModelRequest 转成 OpenAI chat.completions 请求体。
@@ -457,6 +697,16 @@ pub fn build_openai_request(request: &ModelRequest) -> Value {
     {
         body.insert("reasoning_effort".to_string(), json!(effort));
     }
+    // Kimi CLI / Kimi Code 用会话级 prompt_cache_key 提升缓存命中率；
+    // 其它兼容端点会忽略未知字段。
+    if let Some(key) = request
+        .prompt_cache_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        body.insert("prompt_cache_key".to_string(), json!(key));
+    }
     if !request.tools.is_empty() {
         body.insert(
             "tools".to_string(),
@@ -557,37 +807,236 @@ pub fn parse_openai_response(value: &Value) -> Result<ModelResponse> {
         other => other,
     };
 
-    // OpenAI 的 prompt_tokens 是总量，input_tokens 需扣除缓存命中部分；
-    // 部分兼容端点不上报 usage，容错为默认值。
-    let usage = match value.get("usage") {
-        Some(usage) => {
-            let prompt_tokens = usage
-                .get("prompt_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or_default();
-            let cached_tokens = usage
-                .get("prompt_tokens_details")
-                .and_then(|details| details.get("cached_tokens"))
-                .and_then(Value::as_u64)
-                .unwrap_or_default();
-            Usage {
-                input_tokens: prompt_tokens.saturating_sub(cached_tokens),
-                output_tokens: usage
-                    .get("completion_tokens")
-                    .and_then(Value::as_u64)
-                    .unwrap_or_default(),
-                cache_read_tokens: cached_tokens,
-                cache_creation_tokens: 0,
-            }
-        }
-        None => Usage::default(),
-    };
+    let usage = value
+        .get("usage")
+        .map(parse_openai_usage)
+        .unwrap_or_default();
 
     Ok(ModelResponse {
         blocks,
         stop_reason,
         usage,
     })
+}
+
+/// 解析 OpenAI 兼容 usage。prompt_tokens 是总量，input_tokens 需扣除缓存命中部分；
+/// 部分兼容端点不上报 prompt_tokens_details，容错为 0。
+pub fn parse_openai_usage(usage: &Value) -> Usage {
+    let prompt_tokens = usage
+        .get("prompt_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let cached_tokens = usage
+        .get("prompt_tokens_details")
+        .and_then(|details| details.get("cached_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    Usage {
+        input_tokens: prompt_tokens.saturating_sub(cached_tokens),
+        output_tokens: usage
+            .get("completion_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        cache_read_tokens: cached_tokens,
+        cache_creation_tokens: 0,
+    }
+}
+
+/// chat.completions 流式增量里的单个工具调用累积状态。
+#[derive(Debug, Default, Clone)]
+struct OpenAiToolCallAccum {
+    id: String,
+    name: String,
+    arguments: String,
+    started: bool,
+}
+
+/// 把 chat.completions 的增量 chunk 还原为中立的 ModelResponse。
+#[derive(Debug, Default)]
+pub struct OpenAiStreamAccumulator {
+    text: String,
+    reasoning: String,
+    tool_calls: Vec<OpenAiToolCallAccum>,
+    stop_reason: Option<StopReason>,
+    usage: Option<Usage>,
+}
+
+impl OpenAiStreamAccumulator {
+    /// 处理一个 SSE data 负载（已解析为 JSON）。
+    pub fn apply(&mut self, chunk: &Value, sink: Option<&StreamSink>) -> Result<()> {
+        if let Some(error) = chunk.get("error").filter(|value| !value.is_null()) {
+            let message = error
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| error.to_string());
+            anyhow::bail!("model stream error: {message}");
+        }
+        if let Some(usage) = chunk.get("usage").filter(|value| !value.is_null()) {
+            let usage = parse_openai_usage(usage);
+            self.usage = Some(usage);
+            emit(sink, StreamEvent::Usage { usage });
+        }
+        let Some(choice) = chunk
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|choices| choices.first())
+        else {
+            return Ok(());
+        };
+        let delta = choice.get("delta").cloned().unwrap_or(Value::Null);
+        for key in ["reasoning_content", "reasoning"] {
+            if let Some(reasoning) = delta
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+            {
+                self.reasoning.push_str(reasoning);
+                emit(
+                    sink,
+                    StreamEvent::ReasoningDelta {
+                        text: reasoning.to_string(),
+                    },
+                );
+                break;
+            }
+        }
+        if let Some(text) = delta
+            .get("content")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+        {
+            self.text.push_str(text);
+            emit(
+                sink,
+                StreamEvent::TextDelta {
+                    text: text.to_string(),
+                },
+            );
+        }
+        if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
+            for call in calls {
+                let index = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                while self.tool_calls.len() <= index {
+                    self.tool_calls.push(OpenAiToolCallAccum::default());
+                }
+                let slot = &mut self.tool_calls[index];
+                if let Some(id) = call.get("id").and_then(Value::as_str) {
+                    slot.id = id.to_string();
+                }
+                if let Some(name) = call
+                    .get("function")
+                    .and_then(|function| function.get("name"))
+                    .and_then(Value::as_str)
+                {
+                    slot.name.push_str(name);
+                }
+                if !slot.started && !slot.id.is_empty() && !slot.name.is_empty() {
+                    slot.started = true;
+                    emit(
+                        sink,
+                        StreamEvent::ToolUseStart {
+                            id: slot.id.clone(),
+                            name: slot.name.clone(),
+                        },
+                    );
+                }
+                if let Some(arguments) = call
+                    .get("function")
+                    .and_then(|function| function.get("arguments"))
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                {
+                    slot.arguments.push_str(arguments);
+                    if slot.started {
+                        emit(
+                            sink,
+                            StreamEvent::ToolUseDelta {
+                                id: slot.id.clone(),
+                                partial_json: arguments.to_string(),
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        if let Some(finish) = choice.get("finish_reason").and_then(Value::as_str) {
+            self.stop_reason = Some(match finish {
+                "length" => StopReason::MaxTokens,
+                "tool_calls" => StopReason::ToolUse,
+                "stop" => StopReason::EndTurn,
+                other => StopReason::Other(other.to_string()),
+            });
+        }
+        Ok(())
+    }
+
+    /// 收尾：产出中立的 ModelResponse，并补齐 tool_use 结束事件。
+    pub fn finish(self, sink: Option<&StreamSink>) -> ModelResponse {
+        let mut blocks = Vec::new();
+        if !self.reasoning.trim().is_empty() {
+            blocks.push(ContentBlock::thinking(self.reasoning.trim(), None));
+        }
+        if !self.text.trim().is_empty() {
+            blocks.push(ContentBlock::text(self.text.trim_end()));
+        }
+        let mut has_tool_use = false;
+        for call in &self.tool_calls {
+            if call.id.is_empty() && call.name.is_empty() {
+                continue;
+            }
+            has_tool_use = true;
+            if !call.started {
+                emit(
+                    sink,
+                    StreamEvent::ToolUseStart {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                    },
+                );
+                if !call.arguments.is_empty() {
+                    emit(
+                        sink,
+                        StreamEvent::ToolUseDelta {
+                            id: call.id.clone(),
+                            partial_json: call.arguments.clone(),
+                        },
+                    );
+                }
+            }
+            emit(
+                sink,
+                StreamEvent::ToolUseStop {
+                    id: call.id.clone(),
+                },
+            );
+            let input = serde_json::from_str(&call.arguments)
+                .unwrap_or_else(|_| json!({ "_invalid_arguments": call.arguments.clone() }));
+            blocks.push(ContentBlock::tool_use(
+                call.id.clone(),
+                call.name.clone(),
+                input,
+            ));
+        }
+        let stop_reason = match self.stop_reason {
+            Some(StopReason::EndTurn) if has_tool_use => StopReason::ToolUse,
+            Some(reason) => reason,
+            None if has_tool_use => StopReason::ToolUse,
+            None => StopReason::EndTurn,
+        };
+        let usage = self.usage.unwrap_or_default();
+        emit(
+            sink,
+            StreamEvent::Stop {
+                stop_reason: stop_reason.clone(),
+            },
+        );
+        ModelResponse {
+            blocks,
+            stop_reason,
+            usage,
+        }
+    }
 }
 
 pub fn provider_from_env() -> Result<Arc<dyn ModelProvider>> {
@@ -647,17 +1096,53 @@ pub fn provider_from_env() -> Result<Arc<dyn ModelProvider>> {
                 .context(
                     "OPENAI_API_KEY (or AGENT_API_KEY) is required when AGENT_PROVIDER=openai",
                 )?;
-            Ok(Arc::new(OpenAiCompatibleModel::new(
-                std::env::var("AGENT_BASE_URL")
-                    .ok()
-                    .or_else(|| std::env::var("OPENAI_BASE_URL").ok())
-                    .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
-                api_key,
-                std::env::var("AGENT_MODEL")
-                    .ok()
-                    .or_else(|| std::env::var("OPENAI_MODEL").ok())
-                    .unwrap_or_else(|| "gpt-4o-mini".to_string()),
-            )))
+            let base_url = std::env::var("AGENT_BASE_URL")
+                .ok()
+                .or_else(|| std::env::var("OPENAI_BASE_URL").ok())
+                .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+            let model = std::env::var("AGENT_MODEL")
+                .ok()
+                .or_else(|| std::env::var("OPENAI_MODEL").ok())
+                .unwrap_or_else(|| "gpt-4o-mini".to_string());
+            let chat = Arc::new(OpenAiCompatibleModel::new(
+                base_url.clone(),
+                api_key.clone(),
+                model.clone(),
+            ));
+            // 显式指定 AGENT_WIRE 时按用户意图装配完整三条路径；
+            // 否则只在官方端点补 Responses，避免把不支持的网关打挂。
+            if configured_wire().is_some() {
+                let responses = Arc::new(crate::responses::ResponsesModel::new(
+                    base_url.clone(),
+                    Some(api_key.clone()),
+                    model.clone(),
+                    "openai-responses",
+                ));
+                let anthropic = Arc::new(crate::anthropic::AnthropicModel::new(
+                    base_url, api_key, model,
+                ));
+                return Ok(Arc::new(
+                    crate::router::ProtocolRouter::new(chat)
+                        .with_responses(responses)
+                        .with_anthropic(anthropic)
+                        .with_forced(configured_wire()),
+                ));
+            }
+            if openai_supports_responses(&base_url) {
+                let responses = Arc::new(crate::responses::ResponsesModel::new(
+                    base_url,
+                    Some(api_key),
+                    model,
+                    "openai-responses",
+                ));
+                Ok(Arc::new(
+                    crate::router::ProtocolRouter::new(chat)
+                        .with_responses(responses)
+                        .with_forced(configured_wire()),
+                ))
+            } else {
+                Ok(chat)
+            }
         }
         "offline" | "rule-based" => Ok(Arc::new(RuleBasedModel)),
         other => {
@@ -671,6 +1156,81 @@ pub fn provider_from_env() -> Result<Arc<dyn ModelProvider>> {
             )
         }
     }
+}
+
+/// 异步 provider 构造：订阅模式下会拉起并托管 CLIProxyAPI sidecar。
+///
+/// 三种模式的协议栈不同，这是效率对齐的核心：
+/// - 订阅（CLIProxyAPI）：chat + responses + anthropic 三条路径都可用，按模型族路由；
+/// - openai：官方端点时同时启用 chat 与 responses（GPT-5 走 Responses，等价 Codex）；
+/// - 其它兼容厂商：只有 chat.completions。
+pub async fn provider_from_env_async() -> Result<Arc<dyn ModelProvider>> {
+    let configured = std::env::var("AGENT_PROVIDER")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let subscription_mode = configured == "subscription" || configured == "cliproxyapi";
+    if subscription_mode {
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+            .unwrap_or_else(|| PathBuf::from("."));
+        let (manager, _) = crate::subscription::from_env(&exe_dir)
+            .context("订阅模式需要 CLIProxyAPI sidecar，但未找到可执行文件")?;
+        let endpoint = manager.ensure_running().await?;
+        // 进程存活期内必须持有 manager，否则 sidecar 句柄会被丢弃。
+        let _ = SUBSCRIPTION_MANAGER.set(manager);
+        let _ = SUBSCRIPTION_ENDPOINT.set(endpoint.clone());
+        return Ok(subscription_provider(&endpoint));
+    }
+    provider_from_env()
+}
+
+/// 订阅端点上的协议栈。
+fn subscription_provider(
+    endpoint: &crate::subscription::SubscriptionEndpoint,
+) -> Arc<dyn ModelProvider> {
+    let default_model = std::env::var("AGENT_MODEL")
+        .ok()
+        .or_else(|| std::env::var("CLIPROXYAPI_MODEL").ok())
+        .unwrap_or_else(|| "gpt-5.4".to_string());
+    let chat = Arc::new(OpenAiCompatibleModel::new_with_optional_key(
+        endpoint.base_url.clone(),
+        Some(endpoint.api_key.clone()),
+        default_model.clone(),
+        "subscription-chat",
+    ));
+    let responses = Arc::new(crate::responses::ResponsesModel::new(
+        endpoint.base_url.clone(),
+        Some(endpoint.api_key.clone()),
+        default_model.clone(),
+        "subscription-responses",
+    ));
+    let anthropic = Arc::new(crate::anthropic::AnthropicModel::new(
+        endpoint.base_url.clone(),
+        endpoint.api_key.clone(),
+        default_model,
+    ));
+    Arc::new(
+        crate::router::ProtocolRouter::new(chat)
+            .with_responses(responses)
+            .with_anthropic(anthropic)
+            .with_forced(configured_wire()),
+    )
+}
+
+/// AGENT_WIRE 的显式覆盖。
+pub fn configured_wire() -> Option<crate::model_profile::WireProtocol> {
+    std::env::var("AGENT_WIRE")
+        .ok()
+        .and_then(|value| crate::model_profile::WireProtocol::parse(&value))
+}
+
+/// 只在官方 OpenAI 端点或显式配置时才启用 Responses 路径，
+/// 避免把不支持 /responses 的兼容网关打挂。
+fn openai_supports_responses(base_url: &str) -> bool {
+    configured_wire() == Some(crate::model_profile::WireProtocol::Responses)
+        || base_url.contains("api.openai.com")
 }
 
 fn non_empty_env(name: &str) -> bool {
@@ -693,6 +1253,7 @@ mod tests {
             max_tokens: 4096,
             temperature: None,
             reasoning_effort: None,
+            prompt_cache_key: None,
         }
     }
 
@@ -1072,6 +1633,7 @@ mod tests {
             max_tokens: 1024,
             temperature: None,
             reasoning_effort: None,
+            prompt_cache_key: None,
         };
         let response = model.complete(&request).await.unwrap();
         assert_eq!(model.name(), "offline");

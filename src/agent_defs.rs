@@ -211,6 +211,7 @@ impl AgentWorker for FileAgent {
                     max_tokens: 4_096,
                     temperature: None,
                     reasoning_effort: None,
+                    prompt_cache_key: None,
                 })
                 .await?;
             let tool_uses: Vec<(String, String, serde_json::Value)> = response

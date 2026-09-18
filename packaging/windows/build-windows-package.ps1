@@ -133,6 +133,8 @@ $legacyArtifacts = @(
     (Join-Path $distRoot "Wonderland-Setup-0.2.1-x64.exe"),
     (Join-Path $distRoot "Wonderland-Setup-0.3.0-x64.exe"),
     (Join-Path $distRoot "wonderland-cli-0.3.0.tgz")
+    (Join-Path $distRoot "Wonderland-Setup-0.4.0-x64.exe"),
+    (Join-Path $distRoot "wonderland-cli-0.4.0.tgz")
 )
 foreach ($legacyArtifact in $legacyArtifacts) {
     if (Test-Path -LiteralPath $legacyArtifact) {

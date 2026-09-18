@@ -54,6 +54,54 @@ pub struct CliProxyLoginStatus {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CliProxyAccount {
+    pub name: String,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub disabled: bool,
+}
+
+/// 解析 auth-files 响应。不同版本字段名有差异，这里做兼容。纯函数。
+pub fn parse_accounts(value: &serde_json::Value) -> Vec<CliProxyAccount> {
+    let entries = value
+        .get("files")
+        .or_else(|| value.get("data"))
+        .or_else(|| value.get("auth_files"))
+        .and_then(|entries| entries.as_array())
+        .cloned()
+        .unwrap_or_default();
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let name = entry
+                .get("name")
+                .or_else(|| entry.get("id"))
+                .and_then(|name| name.as_str())?
+                .to_string();
+            Some(CliProxyAccount {
+                name,
+                provider: entry
+                    .get("provider")
+                    .or_else(|| entry.get("type"))
+                    .and_then(|provider| provider.as_str())
+                    .map(str::to_string),
+                email: entry
+                    .get("email")
+                    .and_then(|email| email.as_str())
+                    .map(str::to_string),
+                disabled: entry
+                    .get("disabled")
+                    .and_then(|disabled| disabled.as_bool())
+                    .unwrap_or(false),
+            })
+        })
+        .collect()
+}
+
 #[derive(Debug, Deserialize)]
 struct ModelsResponse {
     #[serde(default)]
@@ -160,6 +208,52 @@ impl CliProxyApiClient {
             .context("invalid CLIProxyAPI OAuth start response")
     }
 
+    /// 已登录的订阅账号（auth-files）。
+    pub async fn list_accounts(&self) -> Result<Vec<CliProxyAccount>> {
+        self.ensure_management_key()?;
+        let value = self
+            .management_get("auth-files")
+            .send()
+            .await
+            .context("CLIProxyAPI auth-files request failed")?
+            .error_for_status()
+            .context("CLIProxyAPI auth-files endpoint returned an error")?
+            .json::<serde_json::Value>()
+            .await
+            .context("invalid CLIProxyAPI auth-files response")?;
+        Ok(parse_accounts(&value))
+    }
+
+    /// 删除一个账号凭据文件。
+    pub async fn delete_account(&self, name: &str) -> Result<bool> {
+        self.ensure_management_key()?;
+        let name = require_non_empty(name, "account name")?;
+        let response = self
+            .management_request(
+                self.client
+                    .delete(format!("{}/auth-files", self.management_url)),
+            )
+            .query(&[("name", name)])
+            .send()
+            .await
+            .context("CLIProxyAPI delete account request failed")?;
+        Ok(response.status().is_success())
+    }
+
+    /// 触发凭据刷新（token 过期时使用）。
+    pub async fn refresh_accounts(&self) -> Result<bool> {
+        self.ensure_management_key()?;
+        let response = self
+            .management_request(
+                self.client
+                    .post(format!("{}/auth-files/refresh", self.management_url)),
+            )
+            .send()
+            .await
+            .context("CLIProxyAPI refresh accounts request failed")?;
+        Ok(response.status().is_success())
+    }
+
     pub async fn login_status(&self, state: &str) -> Result<CliProxyLoginStatus> {
         self.ensure_management_key()?;
         let state = require_non_empty(state, "OAuth state")?;
@@ -235,17 +329,54 @@ impl CliProxyApiClient {
 }
 
 fn login_path(provider: &str) -> Result<&'static str> {
-    match provider.trim().to_ascii_lowercase().as_str() {
-        "anthropic" | "claude" => Ok("anthropic-auth-url"),
-        "codex" => Ok("codex-auth-url"),
-        "antigravity" => Ok("antigravity-auth-url"),
-        "kimi" => Ok("kimi-auth-url"),
-        "xai" | "grok" => Ok("xai-auth-url"),
-        "devin" => Ok("devin-auth-url"),
-        "meta" => Ok("meta-auth-url"),
-        _ => bail!(
-            "unsupported CLIProxyAPI login provider; use codex, claude, antigravity, kimi, xai, devin, or meta"
-        ),
+    let normalized = crate::subscription::normalize_provider(provider)
+        .with_context(|| format!("不支持的订阅提供商：{provider}"))?;
+    crate::subscription::auth_url_path(normalized)
+        .with_context(|| format!("没有 {normalized} 的登录端点"))
+}
+
+#[cfg(test)]
+mod account_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parses_account_list_shapes() {
+        let value = json!({
+            "files": [
+                {"name": "codex-a.json", "provider": "codex", "email": "a@example.com"},
+                {"id": "kimi-b.json", "type": "kimi", "disabled": true},
+                {"description": "no name"}
+            ]
+        });
+        let accounts = parse_accounts(&value);
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(accounts[0].name, "codex-a.json");
+        assert_eq!(accounts[0].email.as_deref(), Some("a@example.com"));
+        assert_eq!(accounts[1].provider.as_deref(), Some("kimi"));
+        assert!(accounts[1].disabled);
+        assert!(parse_accounts(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn login_path_accepts_every_provider_alias() {
+        for alias in [
+            "codex",
+            "openai",
+            "claude",
+            "anthropic",
+            "kimi",
+            "antigravity",
+            "grok",
+            "devin",
+            "meta",
+        ] {
+            assert!(
+                login_path(alias).is_ok(),
+                "alias {alias} should be supported"
+            );
+        }
+        assert!(login_path("unknown").is_err());
     }
 }
 

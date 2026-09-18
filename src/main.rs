@@ -9,9 +9,10 @@ use wonderland::{
     expenses::ExpenseStore,
     memory::MemoryStore,
     observability::init_tracing,
-    provider::provider_from_env,
+    provider::provider_from_env_async,
     sandbox::{SandboxExecutor, SandboxPolicy},
     session::SessionStore,
+    session_index::SessionIndex,
     skills::{default_skill_directories, SkillCatalog},
     tools::ToolRegistry,
 };
@@ -26,13 +27,42 @@ async fn main() -> Result<()> {
     let memory = MemoryStore::open(data_dir.join("memory.json")).await?;
     let evaluations = EvaluationStore::open(data_dir.join("evaluations.json")).await?;
     let skills = SkillCatalog::open(default_skill_directories(&data_dir)).await?;
-    let provider = provider_from_env()?;
-    let cliproxy = CliProxyApiClient::from_env().map(Arc::new);
+    let provider = provider_from_env_async().await?;
+    // 管理客户端：优先环境变量；订阅模式下自动指向刚拉起的 sidecar，
+    // 因此只登录订阅账号即可使用，无需手工配置 CLIPROXYAPI_*。
+    let cliproxy = CliProxyApiClient::from_env()
+        .or_else(|| {
+            wonderland::provider::active_subscription_endpoint().map(|endpoint| {
+                CliProxyApiClient::new(
+                    endpoint.base_url.clone(),
+                    Some(endpoint.api_key.clone()),
+                    endpoint.management_url.clone(),
+                    Some(endpoint.management_key.clone()),
+                )
+            })
+        })
+        .map(Arc::new);
     let sandbox = SandboxExecutor::new(SandboxPolicy {
         enabled: env_bool("AGENT_ENABLE_SANDBOX", false),
         timeout_ms: env_u64("AGENT_SANDBOX_TIMEOUT_MS", 2_000),
         ..SandboxPolicy::default()
     });
+
+    // 会话检索索引：派生数据，启动时按目录重建一次，之后随每轮落盘增量更新。
+    let sessions = SessionStore::new(data_dir.join("sessions"));
+    let index = match SessionIndex::open(data_dir.join("sessions-index.sqlite")) {
+        Ok(index) => {
+            match index.rebuild(&sessions) {
+                Ok(count) => tracing::info!(sessions = count, "session index rebuilt"),
+                Err(error) => tracing::warn!(%error, "session index rebuild failed"),
+            }
+            Some(Arc::new(index))
+        }
+        Err(error) => {
+            tracing::warn!(%error, "session index unavailable; falling back to linear scan");
+            None
+        }
+    };
 
     let runtime = {
         let mut runtime = AgentRuntime::new(
@@ -41,9 +71,12 @@ async fn main() -> Result<()> {
             evaluations,
             sandbox,
             ToolRegistry::builtin(),
-            SessionStore::new(data_dir.join("sessions")),
+            sessions,
         )
         .with_skills(skills);
+        if let Some(index) = index.clone() {
+            runtime = runtime.with_index(index);
+        }
         runtime.register_default_agents().await;
         // Task 工具需要 directory 才能委派子代理。
         let mut tools = ToolRegistry::builtin_with_directory(runtime.directory.clone());

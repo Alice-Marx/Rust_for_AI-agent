@@ -23,6 +23,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
 use tokio::sync::{oneshot, Mutex};
 
+use crate::provider::SseBuffer;
 use crate::tools::{Tool, ToolContext, ToolOutput};
 
 /// 与参考实现一致：MCP 工具在模型侧的名字前缀。
@@ -51,12 +52,62 @@ pub struct McpServerConfig {
     /// 显式关闭某个服务器，便于临时停用而不删配置。
     #[serde(default)]
     pub enabled: Option<bool>,
+    /// 传输类型：stdio（缺省）或 http（Streamable HTTP / SSE）。
+    #[serde(default, rename = "type")]
+    pub transport: Option<String>,
+    /// http 传输的端点地址。
+    #[serde(default)]
+    pub url: Option<String>,
+    /// http 传输的附加请求头（例如 Authorization）。
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
 }
 
 impl McpServerConfig {
     fn is_enabled(&self) -> bool {
-        self.enabled.unwrap_or(true) && !self.command.trim().is_empty()
+        if !self.enabled.unwrap_or(true) {
+            return false;
+        }
+        match self.transport_kind() {
+            McpTransportKind::Http => self
+                .url
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|url| !url.is_empty()),
+            McpTransportKind::Stdio => !self.command.trim().is_empty(),
+        }
     }
+
+    pub fn transport_kind(&self) -> McpTransportKind {
+        match self
+            .transport
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("http") | Some("sse") | Some("streamable-http") | Some("streamable_http") => {
+                McpTransportKind::Http
+            }
+            _ if self.command.trim().is_empty()
+                && self
+                    .url
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|url| !url.is_empty()) =>
+            {
+                McpTransportKind::Http
+            }
+            _ => McpTransportKind::Stdio,
+        }
+    }
+}
+
+/// 传输类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpTransportKind {
+    Stdio,
+    Http,
 }
 
 /// 从项目目录加载 `mcpServers` 配置，后加载的文件覆盖同名服务器。
@@ -249,17 +300,232 @@ fn request_timeout() -> Duration {
 
 type PendingMap = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
 
-/// 一个已握手的 MCP 服务器连接。
+/// 会话抽象：stdio 与 HTTP 两种传输共享同一套工具适配。
+#[async_trait]
+pub trait McpSession: Send + Sync {
+    fn name(&self) -> &str;
+
+    /// initialize 返回的能力声明。
+    fn capabilities(&self) -> Value;
+
+    async fn request(&self, method: &str, params: Value) -> Result<Value>;
+
+    /// 发送通知（没有 id，不等待响应）。
+    async fn notify(&self, method: &str, params: Value) -> Result<()>;
+
+    /// tools/list，自动跟随 nextCursor 分页。
+    async fn list_tools(&self) -> Result<Vec<McpToolInfo>> {
+        let mut tools = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let params = match &cursor {
+                Some(cursor) => json!({ "cursor": cursor }),
+                None => json!({}),
+            };
+            let result = self.request("tools/list", params).await?;
+            let (page, next) = parse_tools_list(&result);
+            tools.extend(page);
+            match next {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        Ok(tools)
+    }
+
+    /// tools/call。
+    async fn call_tool(&self, tool: &str, arguments: Value) -> Result<(String, bool)> {
+        let result = self
+            .request(
+                "tools/call",
+                json!({ "name": tool, "arguments": arguments }),
+            )
+            .await?;
+        Ok(render_call_result(&result))
+    }
+}
+
+/// Streamable HTTP（含 SSE 响应）MCP 客户端。
+pub struct McpHttpClient {
+    client: reqwest::Client,
+    name: String,
+    url: String,
+    headers: HashMap<String, String>,
+    session_id: Mutex<Option<String>>,
+    next_id: AtomicI64,
+    timeout: Duration,
+    capabilities: std::sync::OnceLock<Value>,
+}
+
+impl McpHttpClient {
+    pub async fn connect(name: &str, config: &McpServerConfig) -> Result<Arc<Self>> {
+        let url = config
+            .url
+            .clone()
+            .context("http 传输的 mcp 服务器缺少 url")?;
+        let client = Arc::new(Self {
+            client: reqwest::Client::new(),
+            name: name.to_string(),
+            url,
+            headers: config.headers.clone(),
+            session_id: Mutex::new(None),
+            next_id: AtomicI64::new(1),
+            timeout: request_timeout(),
+            capabilities: std::sync::OnceLock::new(),
+        });
+        let handshake = client
+            .request(
+                "initialize",
+                json!({
+                    "protocolVersion": MCP_PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": "wonderland",
+                        "version": env!("CARGO_PKG_VERSION"),
+                    },
+                }),
+            )
+            .await
+            .with_context(|| format!("mcp http server {name} failed to initialize"))?;
+        let _ = client.capabilities.set(
+            handshake
+                .get("capabilities")
+                .cloned()
+                .unwrap_or(Value::Null),
+        );
+        client
+            .notify("notifications/initialized", json!({}))
+            .await?;
+        Ok(client)
+    }
+
+    fn build_request(&self, body: Value) -> reqwest::RequestBuilder {
+        let mut builder = self
+            .client
+            .post(&self.url)
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream");
+        for (name, value) in &self.headers {
+            builder = builder.header(name, value);
+        }
+        builder.json(&body)
+    }
+
+    async fn notify(&self, method: &str, params: Value) -> Result<()> {
+        let response = self
+            .build_request(json!({"jsonrpc": "2.0", "method": method, "params": params}))
+            .send()
+            .await
+            .context("mcp http notification failed")?;
+        self.remember_session(&response).await;
+        Ok(())
+    }
+
+    async fn remember_session(&self, response: &reqwest::Response) {
+        if let Some(session) = response
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+        {
+            *self.session_id.lock().await = Some(session.to_string());
+        }
+    }
+}
+
+#[async_trait]
+impl McpSession for McpHttpClient {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn notify(&self, method: &str, params: Value) -> Result<()> {
+        McpHttpClient::notify(self, method, params).await
+    }
+
+    fn capabilities(&self) -> Value {
+        self.capabilities.get().cloned().unwrap_or(Value::Null)
+    }
+
+    async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let mut builder = self.build_request(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        }));
+        if let Some(session) = self.session_id.lock().await.clone() {
+            builder = builder.header("mcp-session-id", session);
+        }
+        let response = tokio::time::timeout(self.timeout, builder.send())
+            .await
+            .map_err(|_| anyhow::anyhow!("mcp {method} timed out"))?
+            .context("mcp http request failed")?;
+        self.remember_session(&response).await;
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let body = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            bail!("mcp http {method} returned {status}: {body}");
+        }
+        let payload = if content_type.contains("text/event-stream") {
+            find_sse_response(&body, id)
+                .with_context(|| format!("mcp http {method} 的 SSE 响应里没有 id={id} 的结果"))?
+        } else {
+            serde_json::from_str::<Value>(&body)
+                .with_context(|| format!("mcp http {method} 返回了非法 JSON"))?
+        };
+        if let Some(error) = payload.get("error").filter(|value| !value.is_null()) {
+            bail!("mcp {method} failed: {error}");
+        }
+        Ok(payload.get("result").cloned().unwrap_or(Value::Null))
+    }
+}
+
+/// 从 SSE 文本里取出 id 匹配的 JSON-RPC 响应。纯函数。
+pub fn find_sse_response(body: &str, id: i64) -> Option<Value> {
+    let mut decoder = SseBuffer::new();
+    for payload in decoder.push(body) {
+        let trimmed = payload.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        let matches = value
+            .get("id")
+            .and_then(|value| {
+                value
+                    .as_i64()
+                    .or_else(|| value.as_str().and_then(|text| text.parse::<i64>().ok()))
+            })
+            .map(|value| value == id)
+            .unwrap_or(false);
+        if matches {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// 一个已握手的 MCP 服务器连接（stdio 传输）。
 pub struct McpClient {
     name: String,
     stdin: Mutex<ChildStdin>,
     pending: PendingMap,
     next_id: AtomicI64,
     timeout: Duration,
+    capabilities: std::sync::OnceLock<Value>,
 }
 
 impl McpClient {
-    /// 启动服务器进程并完成 `initialize` 握手。
+    /// 启动服务器进程并完成 initialize 握手。
     pub async fn connect(name: &str, config: &McpServerConfig, cwd: &Path) -> Result<Arc<Self>> {
         let mut command = Command::new(&config.command);
         command.args(&config.args);
@@ -277,7 +543,7 @@ impl McpClient {
 
         let mut child = command
             .spawn()
-            .with_context(|| format!("failed to start mcp server `{name}` ({})", config.command))?;
+            .with_context(|| format!("failed to start mcp server {name} ({})", config.command))?;
         let stdin = child.stdin.take().context("mcp server stdin unavailable")?;
         let stdout = child
             .stdout
@@ -307,7 +573,7 @@ impl McpClient {
                     })
                     .unwrap_or(i64::MIN);
                 if id == i64::MIN {
-                    // 通知（如 logging），忽略。
+                    // 通知（例如 logging），忽略。
                     continue;
                 }
                 let sender = reader_pending.lock().await.remove(&id);
@@ -339,9 +605,10 @@ impl McpClient {
             pending,
             next_id: AtomicI64::new(1),
             timeout: request_timeout(),
+            capabilities: std::sync::OnceLock::new(),
         });
 
-        client
+        let handshake = client
             .request(
                 "initialize",
                 json!({
@@ -354,15 +621,40 @@ impl McpClient {
                 }),
             )
             .await
-            .with_context(|| format!("mcp server `{name}` failed to initialize"))?;
+            .with_context(|| format!("mcp server {name} failed to initialize"))?;
+        let _ = client.capabilities.set(
+            handshake
+                .get("capabilities")
+                .cloned()
+                .unwrap_or(Value::Null),
+        );
         client
             .notify("notifications/initialized", json!({}))
             .await?;
         Ok(client)
     }
+}
 
-    pub fn name(&self) -> &str {
+#[async_trait]
+impl McpSession for McpClient {
+    fn name(&self) -> &str {
         &self.name
+    }
+
+    async fn notify(&self, method: &str, params: Value) -> Result<()> {
+        let payload = json!({"jsonrpc": "2.0", "method": method, "params": params});
+        let mut stdin = self.stdin.lock().await;
+        stdin
+            .write_all(serde_json::to_string(&payload)?.as_bytes())
+            .await?;
+        // 换行符用字节写入，避免转义层级出错。
+        stdin.write_all(&[10u8]).await?;
+        stdin.flush().await?;
+        Ok(())
+    }
+
+    fn capabilities(&self) -> Value {
+        self.capabilities.get().cloned().unwrap_or(Value::Null)
     }
 
     async fn request(&self, method: &str, params: Value) -> Result<Value> {
@@ -382,7 +674,8 @@ impl McpClient {
                 .write_all(serde_json::to_string(&payload)?.as_bytes())
                 .await
                 .context("failed to write to mcp server")?;
-            stdin.write_all(b"\n").await?;
+            stdin.write_all(b"").await?;
+            stdin.write_all(&[10u8]).await?;
             stdin.flush().await?;
         }
 
@@ -399,53 +692,11 @@ impl McpClient {
             }
         }
     }
-
-    async fn notify(&self, method: &str, params: Value) -> Result<()> {
-        let payload = json!({"jsonrpc": "2.0", "method": method, "params": params});
-        let mut stdin = self.stdin.lock().await;
-        stdin
-            .write_all(serde_json::to_string(&payload)?.as_bytes())
-            .await?;
-        stdin.write_all(b"\n").await?;
-        stdin.flush().await?;
-        Ok(())
-    }
-
-    /// `tools/list`，自动跟随 `nextCursor` 分页。
-    pub async fn list_tools(&self) -> Result<Vec<McpToolInfo>> {
-        let mut tools = Vec::new();
-        let mut cursor: Option<String> = None;
-        loop {
-            let params = match &cursor {
-                Some(cursor) => json!({ "cursor": cursor }),
-                None => json!({}),
-            };
-            let result = self.request("tools/list", params).await?;
-            let (page, next) = parse_tools_list(&result);
-            tools.extend(page);
-            match next {
-                Some(next) => cursor = Some(next),
-                None => break,
-            }
-        }
-        Ok(tools)
-    }
-
-    /// `tools/call`。
-    pub async fn call_tool(&self, tool: &str, arguments: Value) -> Result<(String, bool)> {
-        let result = self
-            .request(
-                "tools/call",
-                json!({ "name": tool, "arguments": arguments }),
-            )
-            .await?;
-        Ok(render_call_result(&result))
-    }
 }
 
 /// 把 MCP 工具适配成内置工具同款接口。
 pub struct McpTool {
-    client: Arc<McpClient>,
+    session: Arc<dyn McpSession>,
     exposed_name: String,
     server_tool: String,
     description: String,
@@ -454,27 +705,27 @@ pub struct McpTool {
 }
 
 impl McpTool {
-    pub fn new(client: Arc<McpClient>, info: &McpToolInfo) -> Self {
+    pub fn new(session: Arc<dyn McpSession>, info: &McpToolInfo) -> Self {
         Self {
-            exposed_name: exposed_tool_name(client.name(), &info.name),
+            exposed_name: exposed_tool_name(session.name(), &info.name),
             server_tool: info.name.clone(),
             description: if info.description.trim().is_empty() {
-                format!("MCP 工具 {}（由服务器 {} 提供）", info.name, client.name())
+                format!("MCP 工具 {}（由服务器 {} 提供）", info.name, session.name())
             } else {
                 format!(
                     "{} [MCP 服务器 {} 提供]",
                     info.description.trim(),
-                    client.name()
+                    session.name()
                 )
             },
             schema: info.input_schema.clone(),
             read_only: info.read_only,
-            client,
+            session,
         }
     }
 
     pub fn server(&self) -> &str {
-        self.client.name()
+        self.session.name()
     }
 
     pub fn server_tool(&self) -> &str {
@@ -501,7 +752,7 @@ impl Tool for McpTool {
     }
 
     async fn call(&self, input: Value, _ctx: &mut ToolContext) -> Result<ToolOutput> {
-        let (content, is_error) = self.client.call_tool(&self.server_tool, input).await?;
+        let (content, is_error) = self.session.call_tool(&self.server_tool, input).await?;
         Ok(if is_error {
             ToolOutput::err(content)
         } else {
@@ -524,23 +775,245 @@ pub struct McpLoadOutcome {
 pub async fn load_tools(cwd: &Path) -> McpLoadOutcome {
     let mut outcome = McpLoadOutcome::default();
     for (name, config) in load_server_configs(cwd) {
-        match McpClient::connect(&name, &config, cwd).await {
-            Ok(client) => match client.list_tools().await {
-                Ok(tools) => {
-                    outcome.servers.push((name.clone(), tools.len()));
-                    for info in &tools {
-                        let mut tool = McpTool::new(client.clone(), info);
-                        // 服务器级只读声明：该进程提供的全部工具按只读处理。
-                        tool.read_only |= config.read_only;
-                        outcome.tools.push(Arc::new(tool));
-                    }
+        let session: Result<Arc<dyn McpSession>> = match config.transport_kind() {
+            McpTransportKind::Http => McpHttpClient::connect(&name, &config)
+                .await
+                .map(|client| client as Arc<dyn McpSession>),
+            McpTransportKind::Stdio => McpClient::connect(&name, &config, cwd)
+                .await
+                .map(|client| client as Arc<dyn McpSession>),
+        };
+        let session = match session {
+            Ok(session) => session,
+            Err(error) => {
+                outcome.errors.push((name, error.to_string()));
+                continue;
+            }
+        };
+        match session.list_tools().await {
+            Ok(tools) => {
+                outcome.servers.push((name.clone(), tools.len()));
+                for info in &tools {
+                    let mut tool = McpTool::new(session.clone(), info);
+                    // 服务器级只读声明：该服务器提供的全部工具按只读处理。
+                    tool.read_only |= config.read_only;
+                    outcome.tools.push(Arc::new(tool));
                 }
-                Err(error) => outcome.errors.push((name, error.to_string())),
-            },
+                for tool in auxiliary_tools(session.clone()) {
+                    outcome.tools.push(tool);
+                }
+            }
             Err(error) => outcome.errors.push((name, error.to_string())),
         }
     }
     outcome
+}
+
+/// 当服务器声明 resources / prompts 能力时，补上对应的读取工具。
+fn auxiliary_tools(session: Arc<dyn McpSession>) -> Vec<Arc<dyn Tool>> {
+    let capabilities = session.capabilities();
+    let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
+    for (capability, kinds) in [
+        (
+            "resources",
+            vec![McpAuxKind::ListResources, McpAuxKind::ReadResource],
+        ),
+        (
+            "prompts",
+            vec![McpAuxKind::ListPrompts, McpAuxKind::GetPrompt],
+        ),
+    ] {
+        if capabilities.get(capability).is_none() {
+            continue;
+        }
+        for kind in kinds {
+            tools.push(Arc::new(McpAuxTool::new(session.clone(), kind)));
+        }
+    }
+    tools
+}
+
+/// resources / prompts 这类"读取型"MCP 能力的工具包装。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpAuxKind {
+    ListResources,
+    ReadResource,
+    ListPrompts,
+    GetPrompt,
+}
+
+pub struct McpAuxTool {
+    session: Arc<dyn McpSession>,
+    kind: McpAuxKind,
+    exposed_name: String,
+}
+
+impl McpAuxTool {
+    pub fn new(session: Arc<dyn McpSession>, kind: McpAuxKind) -> Self {
+        let exposed_name = exposed_tool_name(session.name(), kind.tool_suffix());
+        Self {
+            session,
+            kind,
+            exposed_name,
+        }
+    }
+}
+
+impl McpAuxKind {
+    fn tool_suffix(self) -> &'static str {
+        match self {
+            Self::ListResources => "list_resources",
+            Self::ReadResource => "read_resource",
+            Self::ListPrompts => "list_prompts",
+            Self::GetPrompt => "get_prompt",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::ListResources => "列出该 MCP 服务器暴露的资源（URI 与名称）",
+            Self::ReadResource => "按 URI 读取该 MCP 服务器的资源内容",
+            Self::ListPrompts => "列出该 MCP 服务器提供的提示词模板",
+            Self::GetPrompt => "按名称渲染该 MCP 服务器的提示词模板",
+        }
+    }
+
+    fn method(self) -> &'static str {
+        match self {
+            Self::ListResources => "resources/list",
+            Self::ReadResource => "resources/read",
+            Self::ListPrompts => "prompts/list",
+            Self::GetPrompt => "prompts/get",
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for McpAuxTool {
+    fn name(&self) -> &str {
+        &self.exposed_name
+    }
+
+    fn description(&self) -> &str {
+        self.kind.description()
+    }
+
+    fn input_schema(&self) -> Value {
+        match self.kind {
+            McpAuxKind::ReadResource => json!({
+                "type": "object",
+                "properties": { "uri": { "type": "string" } },
+                "required": ["uri"],
+            }),
+            McpAuxKind::GetPrompt => json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "arguments": { "type": "object" },
+                },
+                "required": ["name"],
+            }),
+            _ => json!({ "type": "object", "properties": {} }),
+        }
+    }
+
+    fn is_read_only(&self, _input: &Value) -> bool {
+        true
+    }
+
+    async fn call(&self, input: Value, _ctx: &mut ToolContext) -> Result<ToolOutput> {
+        let params = match self.kind {
+            McpAuxKind::ReadResource => json!({
+                "uri": input.get("uri").and_then(|value| value.as_str()).unwrap_or_default(),
+            }),
+            McpAuxKind::GetPrompt => json!({
+                "name": input.get("name").and_then(|value| value.as_str()).unwrap_or_default(),
+                "arguments": input.get("arguments").cloned().unwrap_or_else(|| json!({})),
+            }),
+            _ => json!({}),
+        };
+        let result = self.session.request(self.kind.method(), params).await?;
+        Ok(ToolOutput::ok(render_aux_result(&result)))
+    }
+}
+
+/// 把 resources / prompts 的结果渲染成可读文本。纯函数。
+pub fn render_aux_result(result: &Value) -> String {
+    if let Some(resources) = result.get("resources").and_then(Value::as_array) {
+        if resources.is_empty() {
+            return "（没有可用资源）".to_string();
+        }
+        return resources
+            .iter()
+            .map(|resource| {
+                format!(
+                    "{}  {}",
+                    resource
+                        .get("uri")
+                        .and_then(Value::as_str)
+                        .unwrap_or("(no uri)"),
+                    resource
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .or_else(|| resource.get("description").and_then(Value::as_str))
+                        .unwrap_or("")
+                )
+                .trim_end()
+                .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    if let Some(contents) = result.get("contents").and_then(Value::as_array) {
+        return contents
+            .iter()
+            .filter_map(|entry| entry.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    if let Some(prompts) = result.get("prompts").and_then(Value::as_array) {
+        if prompts.is_empty() {
+            return "（没有可用提示词模板）".to_string();
+        }
+        return prompts
+            .iter()
+            .map(|prompt| {
+                format!(
+                    "{}  {}",
+                    prompt
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("(no name)"),
+                    prompt
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                )
+                .trim_end()
+                .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    if let Some(messages) = result.get("messages").and_then(Value::as_array) {
+        return messages
+            .iter()
+            .map(|message| {
+                let role = message
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .unwrap_or("user");
+                let text = message
+                    .get("content")
+                    .and_then(|content| content.get("text"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                format!("[{role}] {text}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    result.to_string()
 }
 
 #[cfg(test)]
@@ -631,13 +1104,80 @@ mod tests {
     }
 
     #[test]
-    fn tool_server_is_recovered_from_exposed_name() {
-        assert_eq!(tool_server("mcp__github__search"), Some("github"));
-        assert_eq!(tool_server("mcp__my_server__read_file"), Some("my_server"));
-        assert_eq!(tool_server("mcp__broken"), None);
-        assert_eq!(tool_server("Bash"), None);
-        assert_eq!(tool_source("Bash"), "builtin");
-        assert_eq!(tool_source("mcp__github__search"), "github");
+    fn sse_payloads_are_matched_by_request_id() {
+        let sep = char::from_u32(10).unwrap();
+        let first = json!({"jsonrpc": "2.0", "id": 1, "result": {"ok": true}}).to_string();
+        let second = json!({"jsonrpc": "2.0", "id": 2, "result": {"other": 1}}).to_string();
+        let body = format!("event: message{sep}data: {first}{sep}{sep}data: {second}{sep}{sep}");
+        let found = find_sse_response(&body, 2).unwrap();
+        assert_eq!(found["result"]["other"], 1);
+        assert!(find_sse_response(&body, 9).is_none());
+        assert!(find_sse_response("", 1).is_none());
+    }
+
+    #[test]
+    fn auxiliary_results_render_for_every_capability() {
+        let resources = json!({"resources": [
+            {"uri": "file:///a.txt", "name": "a"},
+            {"uri": "file:///b.txt"}
+        ]});
+        let rendered = render_aux_result(&resources);
+        assert!(rendered.contains("file:///a.txt"));
+        assert!(rendered.contains("file:///b.txt"));
+        assert!(render_aux_result(&json!({"resources": []})).contains("没有可用资源"));
+
+        let contents = json!({"contents": [{"text": "first"}, {"text": "second"}]});
+        assert_eq!(
+            render_aux_result(&contents),
+            "first
+second"
+        );
+
+        let prompts = json!({"prompts": [{"name": "review", "description": "审查"}]});
+        assert!(render_aux_result(&prompts).contains("review"));
+
+        let messages = json!({"messages": [{"role": "user", "content": {"text": "hi"}}]});
+        assert!(render_aux_result(&messages).contains("[user] hi"));
+
+        assert!(render_aux_result(&json!({"weird": 1})).contains("weird"));
+    }
+
+    #[test]
+    fn http_servers_are_detected_from_config() {
+        let http = McpServerConfig {
+            command: String::new(),
+            args: Vec::new(),
+            env: HashMap::new(),
+            cwd: None,
+            read_only: false,
+            enabled: None,
+            transport: Some("http".to_string()),
+            url: Some("http://127.0.0.1:9000/mcp".to_string()),
+            headers: HashMap::new(),
+        };
+        assert_eq!(http.transport_kind(), McpTransportKind::Http);
+        assert!(http.is_enabled());
+
+        let implicit = McpServerConfig {
+            transport: None,
+            ..http.clone()
+        };
+        assert_eq!(implicit.transport_kind(), McpTransportKind::Http);
+
+        let broken = McpServerConfig {
+            url: None,
+            ..http.clone()
+        };
+        assert!(!broken.is_enabled());
+
+        let stdio = McpServerConfig {
+            command: "npx".to_string(),
+            transport: None,
+            url: None,
+            ..broken
+        };
+        assert_eq!(stdio.transport_kind(), McpTransportKind::Stdio);
+        assert!(stdio.is_enabled());
     }
 
     #[test]
@@ -800,6 +1340,9 @@ for line in sys.stdin:
                 cwd: None,
                 read_only: false,
                 enabled: None,
+                transport: None,
+                url: None,
+                headers: HashMap::new(),
             },
             root,
         )

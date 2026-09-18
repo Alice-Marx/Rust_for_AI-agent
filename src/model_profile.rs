@@ -9,6 +9,43 @@
 //! - Anthropic 的提示缓存需要在请求里显式打 `cache_control` 断点，OpenAI 兼容
 //!   端点则自动缓存，请求里不需要额外字段。
 
+/// 模型对话使用的 wire 协议。
+///
+/// 与 Kimi Code 的 model catalog 同思路：同一次会话按模型族选择端点，
+/// 而不是所有模型都走 chat.completions。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireProtocol {
+    /// OpenAI chat.completions（DeepSeek / Kimi / Qwen / GLM / 本地模型）。
+    ChatCompletions,
+    /// OpenAI Responses API（GPT-5 / Codex / o 系列）。
+    Responses,
+    /// Anthropic Messages API（Claude 系列）。
+    AnthropicMessages,
+}
+
+impl WireProtocol {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "chat_completions",
+            Self::Responses => "responses",
+            Self::AnthropicMessages => "anthropic_messages",
+        }
+    }
+
+    /// 解析 AGENT_WIRE 配置值。
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "chat" | "chat_completions" | "chat-completions" => Some(Self::ChatCompletions),
+            "responses" | "response" => Some(Self::Responses),
+            "anthropic" | "messages" | "anthropic_messages" => Some(Self::AnthropicMessages),
+            _ => None,
+        }
+    }
+}
+
+use serde::{Deserialize, Serialize};
+
 /// 推理参数风格。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReasoningStyle {
@@ -48,6 +85,8 @@ pub struct ModelProfile {
     pub reasoning: ReasoningStyle,
     pub cache: CacheStyle,
     pub edit_preference: EditPreference,
+    /// 该模型族最合适的 wire 协议。
+    pub protocol: WireProtocol,
 }
 
 const DEFAULT_PROFILE: ModelProfile = ModelProfile {
@@ -57,6 +96,7 @@ const DEFAULT_PROFILE: ModelProfile = ModelProfile {
     reasoning: ReasoningStyle::None,
     cache: CacheStyle::Automatic,
     edit_preference: EditPreference::StringReplace,
+    protocol: WireProtocol::ChatCompletions,
 };
 
 const CLAUDE_PROFILE: ModelProfile = ModelProfile {
@@ -66,6 +106,7 @@ const CLAUDE_PROFILE: ModelProfile = ModelProfile {
     reasoning: ReasoningStyle::ThinkingBudget,
     cache: CacheStyle::Explicit,
     edit_preference: EditPreference::StringReplace,
+    protocol: WireProtocol::AnthropicMessages,
 };
 
 const OPENAI_REASONING_PROFILE: ModelProfile = ModelProfile {
@@ -75,6 +116,7 @@ const OPENAI_REASONING_PROFILE: ModelProfile = ModelProfile {
     reasoning: ReasoningStyle::Effort,
     cache: CacheStyle::Automatic,
     edit_preference: EditPreference::Patch,
+    protocol: WireProtocol::Responses,
 };
 
 const OPENAI_CHAT_PROFILE: ModelProfile = ModelProfile {
@@ -84,6 +126,7 @@ const OPENAI_CHAT_PROFILE: ModelProfile = ModelProfile {
     reasoning: ReasoningStyle::None,
     cache: CacheStyle::Automatic,
     edit_preference: EditPreference::StringReplace,
+    protocol: WireProtocol::ChatCompletions,
 };
 
 const QWEN_PROFILE: ModelProfile = ModelProfile {
@@ -93,6 +136,7 @@ const QWEN_PROFILE: ModelProfile = ModelProfile {
     reasoning: ReasoningStyle::None,
     cache: CacheStyle::Automatic,
     edit_preference: EditPreference::StringReplace,
+    protocol: WireProtocol::ChatCompletions,
 };
 
 /// 内置档案表：按顺序做「模型 id 小写包含」匹配，先命中先返回，
@@ -295,6 +339,16 @@ pub fn reasoning_effort_for(profile: &ModelProfile, configured: Option<&str>) ->
     }
 }
 
+/// 按模型 id 选择 wire 协议（AGENT_WIRE 可强制覆盖）。
+pub fn protocol_for(model: &str) -> WireProtocol {
+    if let Ok(forced) = std::env::var("AGENT_WIRE") {
+        if let Some(protocol) = WireProtocol::parse(&forced) {
+            return protocol;
+        }
+    }
+    ModelProfile::resolve(model).protocol
+}
+
 /// `AGENT_REASONING_EFFORT`：low / medium / high。`none` / `off` 表示关闭。
 pub fn configured_reasoning_effort() -> Option<String> {
     let value = std::env::var("AGENT_REASONING_EFFORT").ok()?;
@@ -353,6 +407,44 @@ mod tests {
             ModelProfile::resolve("claude-opus-4-1").cache,
             CacheStyle::Explicit
         );
+    }
+
+    #[test]
+    fn protocol_follows_model_family() {
+        assert_eq!(
+            ModelProfile::resolve("claude-sonnet-4-5").protocol,
+            WireProtocol::AnthropicMessages
+        );
+        assert_eq!(
+            ModelProfile::resolve("gpt-5.4-codex").protocol,
+            WireProtocol::Responses
+        );
+        assert_eq!(
+            ModelProfile::resolve("deepseek-chat").protocol,
+            WireProtocol::ChatCompletions
+        );
+        assert_eq!(
+            ModelProfile::resolve("kimi-k2-0905-preview").protocol,
+            WireProtocol::ChatCompletions
+        );
+    }
+
+    #[test]
+    fn wire_protocol_parses_aliases() {
+        assert_eq!(
+            WireProtocol::parse("chat"),
+            Some(WireProtocol::ChatCompletions)
+        );
+        assert_eq!(
+            WireProtocol::parse(" Responses "),
+            Some(WireProtocol::Responses)
+        );
+        assert_eq!(
+            WireProtocol::parse("messages"),
+            Some(WireProtocol::AnthropicMessages)
+        );
+        assert_eq!(WireProtocol::parse("nope"), None);
+        assert_eq!(WireProtocol::Responses.as_str(), "responses");
     }
 
     #[test]
