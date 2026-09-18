@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::provider::{ChatMessage, ContentBlock};
 use crate::session::{Session, SessionStore};
@@ -77,6 +77,21 @@ impl SessionIndex {
              );
              CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);",
         )?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        // Trigrams keep literal substring semantics, including CJK, without scanning every message.
+        let fts_exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='messages_fts')",
+            [],
+            |row| row.get(0),
+        )?;
+        connection.execute_batch("CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(content, content='messages', content_rowid='rowid', tokenize='trigram');
+            CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN INSERT INTO messages_fts(rowid,content) VALUES(new.rowid,new.content); END;
+            CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN INSERT INTO messages_fts(messages_fts,rowid,content) VALUES('delete',old.rowid,old.content); END;
+            ")?;
+        if !fts_exists {
+            connection
+                .execute_batch("INSERT INTO messages_fts(messages_fts) VALUES('rebuild');")?;
+        }
         Ok(())
     }
 
@@ -144,7 +159,29 @@ impl SessionIndex {
         if needle.is_empty() {
             return Ok(Vec::new());
         }
-        let limit = limit.max(1) as i64;
+        let limit = limit.clamp(1, 200) as i64;
+        if needle.chars().count() >= 3 && !needle.contains('\0') {
+            let literal = format!("\"{}\"", needle.replace('"', "\"\""));
+            let connection = self.lock();
+            let mut statement = connection.prepare(
+                "SELECT s.id,s.user_id,s.updated_at,s.message_count,m.content
+                 FROM messages_fts f JOIN messages m ON m.rowid=f.rowid JOIN sessions s ON s.id=m.session_id
+                 WHERE messages_fts MATCH ?1 AND (?2 IS NULL OR s.user_id=?2)
+                 GROUP BY s.id ORDER BY s.updated_at DESC LIMIT ?3")?;
+            let rows = statement.query_map(params![literal, user_id, limit], |row| {
+                let content: String = row.get(4)?;
+                Ok(IndexedSession {
+                    id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    updated_at: row.get(2)?,
+                    message_count: row.get::<_, i64>(3)?.max(0) as usize,
+                    snippet: build_snippet(Some(&content), None, &needle),
+                })
+            })?;
+            return rows
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(Into::into);
+        }
         let pattern = format!("%{}%", escape_like(&needle));
         let connection = self.lock();
 
@@ -193,6 +230,7 @@ impl SessionIndex {
             }
         };
         let mut indexed = 0usize;
+        let mut live = std::collections::HashSet::new();
         for entry in entries.filter_map(Result::ok) {
             let path = entry.path();
             if path.extension().and_then(|value| value.to_str()) != Some("json") {
@@ -203,6 +241,20 @@ impl SessionIndex {
             };
             match serde_json::from_str::<Session>(&raw) {
                 Ok(session) => {
+                    live.insert(session.id.clone());
+                    let unchanged = self
+                        .lock()
+                        .query_row(
+                            "SELECT updated_at FROM sessions WHERE id=?1",
+                            [&session.id],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .optional()?
+                        .is_some_and(|at| at == session.updated_at.to_rfc3339());
+                    if unchanged {
+                        indexed += 1;
+                        continue;
+                    }
                     if let Err(error) = self.index_session(&session) {
                         tracing::warn!(path = %path.display(), %error, "索引会话失败");
                     } else {
@@ -213,6 +265,17 @@ impl SessionIndex {
                     tracing::warn!(path = %path.display(), %error, "跳过损坏的会话文件");
                 }
             }
+        }
+        let stale: Vec<String> = {
+            let connection = self.lock();
+            let mut statement = connection.prepare("SELECT id FROM sessions")?;
+            let ids = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            ids.into_iter().filter(|id| !live.contains(id)).collect()
+        };
+        for id in stale {
+            self.remove(&id)?;
         }
         Ok(indexed)
     }
@@ -251,7 +314,7 @@ fn render_message(message: &ChatMessage) -> String {
                 format!("[tool_result] {content}")
             }),
             // 思维链不进索引：它是过程噪声，不是可检索事实。
-            ContentBlock::Thinking { .. } => None,
+            ContentBlock::Thinking { .. } | ContentBlock::ProviderReasoning { .. } => None,
         })
         .filter(|chunk| !chunk.trim().is_empty())
         .collect::<Vec<_>>()
@@ -316,6 +379,32 @@ mod tests {
     use super::*;
     use crate::provider::{ChatMessage, ContentBlock, Role, Usage};
     use chrono::Utc;
+
+    #[test]
+    fn cjk_search_and_rebuild_prunes_deleted_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().join("sessions"));
+        let mut value = session(
+            "cjk",
+            "alice",
+            vec![ChatMessage::user("正在检查中文检索与模型适配")],
+        );
+        store.save(&mut value).unwrap();
+        let index = SessionIndex::open(dir.path().join("index.sqlite")).unwrap();
+        index.rebuild(&store).unwrap();
+        assert_eq!(
+            index.search("中文检索", Some("alice"), 10).unwrap().len(),
+            1
+        );
+        assert_eq!(index.search("适配", Some("alice"), 10).unwrap().len(), 1);
+        assert!(index
+            .search("中文检索", Some("bob"), 10)
+            .unwrap()
+            .is_empty());
+        std::fs::remove_file(store.dir().join("cjk.json")).unwrap();
+        index.rebuild(&store).unwrap();
+        assert_eq!(index.stats().unwrap(), (0, 0));
+    }
 
     fn session(id: &str, user: &str, messages: Vec<ChatMessage>) -> Session {
         let now = Utc::now();

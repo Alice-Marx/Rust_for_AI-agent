@@ -1,13 +1,17 @@
 {
-  "name": "wonderland-cli",
-  "version": "0.5.0",
+  "name": "rust-ai-wonderland-cli",
+  "version": "0.6.0",
   "description": "Wonderland terminal client",
   "license": "MIT",
   "bin": {
-    "wonderland": "bin/wonderland.js"
+    "wonderland": "bin/wonderland.js",
+    "wonderland-cli": "bin/wonderland.js"
   },
+  "repository": { "type": "git", "url": "git+https://github.com/Alice-Marx/Rust_for_AI-agent.git" },
+  "scripts": { "test": "node --test test/*.test.js" },
   "files": [
     "bin/wonderland.js",
+    "bin/stream.js",
     "README.md"
   ],
   "engines": {

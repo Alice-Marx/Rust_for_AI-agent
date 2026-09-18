@@ -2,9 +2,8 @@
 //!
 //! 同一个后端（本地 CLIProxyAPI 订阅代理、OpenAI、自建网关）可以同时提供
 //! chat.completions、Responses 与 Anthropic Messages 三条路径。官方客户端各自
-//! 只用其中一条，本模块按模型族把请求送到对应的那条，从而在同一个 Agent 里
-//! 复现 Codex（Responses）、Claude Code（Messages）、Kimi CLI（chat +
-//! prompt_cache_key）的行为。
+//! 使用不同协议，本模块按模型族选择 Responses、Messages 或 Chat Completions。
+//! 协议选择并不保证与对应官方客户端的完整行为或效率相同。
 
 use std::sync::Arc;
 
@@ -67,7 +66,11 @@ impl ProtocolRouter {
     pub fn preferred_protocol(&self, model: &str) -> WireProtocol {
         match self.forced {
             Some(forced) => forced,
-            None if model.trim().is_empty() => WireProtocol::ChatCompletions,
+            None if model.trim().is_empty() => self
+                .default_model
+                .as_deref()
+                .map(protocol_for)
+                .unwrap_or(WireProtocol::ChatCompletions),
             None => protocol_for(model),
         }
     }
@@ -94,6 +97,10 @@ impl ModelProvider for ProtocolRouter {
 
     fn available_protocols(&self) -> Vec<&'static str> {
         self.available_protocols_owned()
+    }
+
+    async fn list_models(&self) -> Result<Vec<crate::cliproxy::CliProxyModel>> {
+        self.chat.list_models().await
     }
 
     async fn complete(&self, request: &ModelRequest) -> Result<ModelResponse> {

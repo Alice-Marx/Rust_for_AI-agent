@@ -120,6 +120,32 @@ fn default_status() -> String {
 }
 
 impl CliProxyApiClient {
+    /// Full upstream Management API access, preserving binary/JSON/YAML bodies.
+    pub async fn management_api(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        query: Option<&str>,
+        content_type: Option<&str>,
+        body: Vec<u8>,
+    ) -> Result<reqwest::Response> {
+        self.ensure_management_key()?;
+        anyhow::ensure!(
+            !path.is_empty()
+                && !path.split('/').any(|p| p == ".." || p == ".")
+                && !path.contains(['?', '#', '\\', '%']),
+            "invalid management path"
+        );
+        let mut url = url::Url::parse(&format!("{}/{}", self.management_url, path))?;
+        url.set_query(query);
+        let mut request = self
+            .management_request(self.client.request(method, url))
+            .body(body);
+        if let Some(content_type) = content_type {
+            request = request.header("content-type", content_type);
+        }
+        Ok(request.send().await?)
+    }
     pub fn new(
         base_url: impl Into<String>,
         api_key: Option<String>,
@@ -248,6 +274,7 @@ impl CliProxyApiClient {
                 self.client
                     .post(format!("{}/auth-files/refresh", self.management_url)),
             )
+            .query(&[("all", "true")])
             .send()
             .await
             .context("CLIProxyAPI refresh accounts request failed")?;

@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const readline = require("node:readline/promises");
 const { stdin, stdout } = require("node:process");
+const { consumeStream } = require("./stream");
 
 const defaultServer = process.env.AGENT_SERVER_URL || "http://127.0.0.1:8080";
 const defaultUser = process.env.AGENT_USER_ID || "local-user";
@@ -23,6 +24,11 @@ Usage:
   wonderland-cli [options] tools
   wonderland-cli [options] mcp
   wonderland-cli [options] commands
+  wonderland-cli [options] search <text>
+  wonderland-cli [options] accounts
+  wonderland-cli [options] profile
+  wonderland-cli [options] mcp-login <name> [--wait]
+  wonderland-cli [options] mcp-reload
 
 Options:
   --server <url>       Rust Agent URL (default: ${defaultServer})
@@ -32,6 +38,9 @@ Options:
   --cwd <dir>          工作目录（权限规则与自定义命令都从这里加载）
   --model <model>      覆盖本次请求的模型
   --mode <mode>        Permission mode: default / plan / acceptEdits / bypassPermissions / dontAsk
+  --reasoning <level>  模型支持的推理档位（profile 查看能力）
+  --no-stream         等待完整响应
+  -V, --version       显示版本
   -h, --help           Show that help
 
 聊天内置命令：/help /exit /health /models /skills /sessions /session /cost /tools /mcp /commands
@@ -51,6 +60,8 @@ function parseArgs(argv) {
     mode: process.env.AGENT_PERMISSION_MODE || null,
     cwd: process.env.AGENT_CWD || process.cwd(),
     resume: false,
+    stream: true,
+    reasoning: process.env.AGENT_REASONING_EFFORT || null,
   };
   const valueFlags = {
     "--server": "server",
@@ -59,11 +70,17 @@ function parseArgs(argv) {
     "--cwd": "cwd",
     "--model": "model",
     "--mode": "mode",
+    "--reasoning": "reasoning",
   };
   let index = 0;
   while (index < argv.length) {
     const value = argv[index];
-    if (valueFlags[value]) options[valueFlags[value]] = argv[++index];
+    if (valueFlags[value]) {
+      if (!argv[index + 1] || argv[index + 1].startsWith("--")) throw new Error(`${value} requires a value`);
+      options[valueFlags[value]] = argv[++index];
+    }
+    else if (value === "--no-stream") options.stream = false;
+    else if (value === "--version" || value === "-V") options.version = true;
     else if (value === "--wait") options.wait = true;
     else if (value === "--continue") options.resume = true;
     else if (value === "-h" || value === "--help") options.help = true;
@@ -87,7 +104,7 @@ async function request(options, pathname, init = {}) {
   try {
     response = await fetch(endpoint(options.server, pathname), {
       ...init,
-      headers: { "content-type": "application/json", ...(init.headers || {}) },
+      headers: { "content-type": "application/json", ...(process.env.WONDERLAND_SERVER_TOKEN ? {Authorization: `Bearer ${process.env.WONDERLAND_SERVER_TOKEN}`} : {}), ...(init.headers || {}) },
     });
   } catch (error) {
     throw new Error(`无法连接 Rust Agent 服务：${error.message}`);
@@ -238,6 +255,26 @@ async function runAgent(options, input) {
   if (options.mode) body.mode = options.mode;
   if (options.cwd) body.cwd = options.cwd;
   if (options.model) body.model = options.model;
+  if (options.reasoning) body.reasoning_effort = options.reasoning;
+  if (options.stream) {
+    const response = await fetch(endpoint(options.server, "/v1/agent/stream"), {
+      method: "POST", headers: { "Content-Type": "application/json", "Accept": "text/event-stream", "x-wonderland-interactive":stdin.isTTY?"true":"false", ...(process.env.WONDERLAND_SERVER_TOKEN?{Authorization:`Bearer ${process.env.WONDERLAND_SERVER_TOKEN}`}:{}) }, body: JSON.stringify(body),
+    });
+    let printed = false;
+    const result = await consumeStream(response, async event => {
+      if (event.type === "permission_request") {
+        process.stderr.write(`\n${event.tool}\n${JSON.stringify(event.input,null,2)}\n`);
+        const rl=options.promptInterface || readline.createInterface({input:stdin,output:process.stderr});
+        let answer="";
+        try { answer=await rl.question("允许这一次？[y/N] "); } finally { if (!options.promptInterface) rl.close(); }
+        await request(options,`/v1/permissions/${encodeURIComponent(event.id)}`,{method:"POST",body:JSON.stringify({allow:/^y(es)?$/i.test(answer.trim())})});
+      }
+      if (event.type === "text_delta") { stdout.write(event.text); printed = true; }
+      if (event.type === "tool_call") process.stderr.write(`\n[tool: ${event.name}]\n`);
+    });
+    if (printed) { stdout.write("\n"); result._streamed = true; }
+    return result;
+  }
   return request(options, "/v1/agent/run", {
     method: "POST",
     body: JSON.stringify(body),
@@ -265,7 +302,7 @@ function printUsage(usage = {}) {
 }
 
 function printResponse(response) {
-  console.log(response.output);
+  if (!response._streamed) console.log(response.output);
   console.log(renderTodos(response.todos));
   console.log(
     `[session=${response.session_id} execution=${response.execution_id} score=${Number(
@@ -320,6 +357,7 @@ async function chat(options, prompt, commands) {
     return;
   }
   const rl = readline.createInterface({ input: stdin, output: stdout });
+  options.promptInterface=rl;
   console.log(`Wonderland npm CLI | session=${options.sessionId} | cwd=${options.cwd}`);
   console.log("输入消息开始对话，输入 /help 查看命令，输入 /exit 退出。");
   if (commands.length) {
@@ -343,7 +381,7 @@ async function chat(options, prompt, commands) {
         continue;
       }
       if (input === "/models") {
-        const models = await request(options, "/v1/providers/cliproxyapi/models");
+        const models = await request(options, "/v1/models");
         console.log(models.map((model) => `- ${model.id}`).join("\n"));
         continue;
       }
@@ -393,6 +431,7 @@ async function chat(options, prompt, commands) {
       printResponse(await runAgent(options, input));
     }
   } finally {
+    delete options.promptInterface;
     rl.close();
   }
 }
@@ -419,6 +458,7 @@ async function login(options, provider) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
+  if (options.version) { console.log(require("../package.json").version); return; }
   if (options.help) {
     usage();
     return;
@@ -443,7 +483,7 @@ async function main() {
       break;
     case "models":
       console.log(
-        JSON.stringify(await request(options, "/v1/providers/cliproxyapi/models"), null, 2),
+        JSON.stringify(await request(options, "/v1/models"), null, 2),
       );
       break;
     case "verify":
@@ -471,6 +511,33 @@ async function main() {
     case "mcp":
       await printMcpServers(options);
       break;
+    case "accounts":
+      console.log(JSON.stringify(await request(options, "/v1/providers/cliproxyapi/accounts"), null, 2));
+      break;
+    case "search":
+      if (!options.args.length) throw new Error("search 需要关键词");
+      console.log(JSON.stringify(await request(options, `/v1/sessions/search?q=${encodeURIComponent(options.args.join(" "))}&user_id=${encodeURIComponent(options.userId)}`), null, 2));
+      break;
+    case "profile":
+      console.log(JSON.stringify(await request(options, `/v1/models/profile?model=${encodeURIComponent(options.model || "")}`), null, 2));
+      break;
+    case "mcp-reload":
+      console.log(JSON.stringify(await request(options, "/v1/mcp/reload", { method: "POST", body: JSON.stringify({cwd:options.cwd}) }), null, 2));
+      break;
+    case "mcp-login": {
+      if (!options.args[0]) throw new Error("mcp-login 需要服务器名");
+      const started = await request(options, `/v1/mcp/${encodeURIComponent(options.args[0])}/login`, {method:"POST",body:JSON.stringify({cwd:options.cwd})});
+      console.log(started.url);
+      if (options.wait) {
+        for (let attempt = 0; attempt < 150; attempt++) {
+          await new Promise(resolve => setTimeout(resolve,2000));
+          const status = await request(options, `/v1/mcp/login/status?state=${encodeURIComponent(started.state)}`);
+          if (status.status === "error") throw new Error(status.error);
+          if (status.status === "ok") { console.log(await request(options,"/v1/mcp/reload",{method:"POST",body:JSON.stringify({cwd:options.cwd})})); break; }
+        }
+      }
+      break;
+    }
     case "commands":
       console.log(renderCommandList(commands));
       break;

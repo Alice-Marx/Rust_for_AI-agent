@@ -1,28 +1,24 @@
-//! 代码执行沙箱。
-//!
-//! 定位：**纵深防御**，不是完美隔离边界。已实现的能力：
-//! - 语言白名单、输入与输出大小上限、超时并确保子进程被杀；
-//! - 独立工作目录 + 清空环境变量（只注入最小 PATH）；
-//! - Windows：把子进程放进 Job Object，设置「句柄关闭即杀」「内存上限」
-//!   「进程数上限」，因此超时或父进程退出不会留下孤儿进程；
-//! - Linux/macOS：如果存在 bwrap 或 sandbox-exec，就用它做文件系统与网络隔离。
-//!
-//! 未实现的部分必须清楚知道：没有 AppContainer 或受限令牌，因此子进程仍以当前
-//! 用户身份运行；allow_network=false 在 Windows 上只是策略声明，操作系统层面
-//! 并没有真正断网。生产部署请把本进程放进容器或虚拟机。
+//! OS-enforced execution: Windows AppContainer, Linux bubblewrap, macOS seatbelt.
+//! Missing isolation fails closed. Only disposable run directories are writable.
 
 use std::path::{Path, PathBuf};
+#[cfg(not(windows))]
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+#[cfg(not(windows))]
+use anyhow::Context;
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
+#[cfg(not(windows))]
 use tokio::process::Command;
+#[cfg(not(windows))]
 use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::model::SandboxRequest;
 
 /// 进程能拿到的最小环境变量。
+#[cfg(not(windows))]
 const MINIMAL_ENV: [(&str, &str); 2] = [
     ("PYTHONIOENCODING", "utf-8"),
     ("PYTHONDONTWRITEBYTECODE", "1"),
@@ -40,7 +36,7 @@ pub struct SandboxPolicy {
     /// 同一 Job 内的最大进程数（防止 fork 炸弹）。
     #[serde(default)]
     pub max_processes: Option<u32>,
-    /// 是否允许网络访问。Windows 上目前只是声明，不做系统级断网。
+    /// 是否允许网络访问。Windows AppContainer 固定禁网，开启会返回错误。
     #[serde(default)]
     pub allow_network: bool,
     /// 工作目录根；缺省使用系统临时目录下的独立子目录。
@@ -54,7 +50,7 @@ impl Default for SandboxPolicy {
             enabled: false,
             timeout_ms: 2_000,
             max_output_bytes: 64 * 1024,
-            allowed_languages: vec!["python".to_string()],
+            allowed_languages: vec!["python".to_string(), "node".to_string()],
             memory_limit_mb: None,
             max_processes: None,
             allow_network: false,
@@ -107,7 +103,7 @@ impl SandboxExecutor {
 
     pub async fn execute(&self, request: SandboxRequest) -> Result<SandboxResult> {
         if !self.policy.enabled {
-            bail!("code execution is disabled; set AGENT_ENABLE_SANDBOX=true only in an isolated environment")
+            bail!("code execution is disabled; set AGENT_ENABLE_SANDBOX=true to enable OS-isolated execution")
         }
         let language = request.language.trim().to_lowercase();
         if !self
@@ -133,73 +129,92 @@ impl SandboxExecutor {
         let script = directory.join(script_name(&language));
         tokio::fs::write(&script, request.code.as_bytes()).await?;
 
-        let mut limits: Vec<String> = Vec::new();
-        if self.policy.allow_network {
-            limits.push("network-allowed-by-policy".to_string());
-        } else {
-            limits.push("network-denied-by-policy".to_string());
-        }
-        let mut command = build_command(&language, &script, &mut limits);
-        command.current_dir(&directory);
-        command.env_clear();
-        command.env("PATH", std::env::var("PATH").unwrap_or_default());
-        for (name, value) in MINIMAL_ENV {
-            command.env(name, value);
-        }
-        command.kill_on_drop(true);
-        // 不设 piped 时 wait_with_output 拿不到任何输出（会继承父进程的 stdio）。
-        command.stdout(std::process::Stdio::piped());
-        command.stderr(std::process::Stdio::piped());
-        command.stdin(std::process::Stdio::null());
-        limits.push(format!("cwd-isolated={}", directory.display()));
-        limits.push("env-cleared".to_string());
-
-        let duration = Duration::from_millis(request.timeout_ms.unwrap_or(self.policy.timeout_ms));
-        limits.push(format!("timeout={}ms", duration.as_millis()));
-
-        let isolation = apply_platform_confinement(&mut command, &self.policy, &mut limits);
-
-        let child = command.spawn().context("sandbox process failed to start")?;
-
         #[cfg(windows)]
-        let job = match win_job::assign(&child, &self.policy, &mut limits) {
-            Ok(job) => job,
-            Err(error) => {
-                tracing::warn!(%error, "无法为沙箱进程创建 Job Object，进程上限保证降级");
-                None
+        {
+            let run_dir = directory.clone();
+            let policy = self.policy.clone();
+            let timeout_ms = request
+                .timeout_ms
+                .unwrap_or(policy.timeout_ms)
+                .min(policy.timeout_ms)
+                .max(1);
+            let result = tokio::task::spawn_blocking(move || {
+                crate::sandbox_windows::execute(&language, &script, &run_dir, &policy, timeout_ms)
+            })
+            .await?;
+            let _ = tokio::fs::remove_dir_all(&directory).await;
+            return result;
+        }
+
+        #[cfg(not(windows))]
+        {
+            let mut limits: Vec<String> = Vec::new();
+            if self.policy.allow_network {
+                limits.push("network-allowed-by-policy".to_string());
+            } else {
+                limits.push("network-denied-by-policy".to_string());
             }
-        };
-
-        let output = timeout(duration, child.wait_with_output()).await;
-        #[cfg(windows)]
-        drop(job);
-
-        let result = match output {
-            Ok(Ok(output)) => SandboxResult {
-                stdout: truncate(&output.stdout, self.policy.max_output_bytes, &mut limits),
-                stderr: truncate(&output.stderr, self.policy.max_output_bytes, &mut limits),
-                exit_code: output.status.code(),
-                timed_out: false,
-                limits,
-                isolation,
-            },
-            Ok(Err(error)) => {
-                let _ = tokio::fs::remove_dir_all(&directory).await;
-                return Err(error).context("sandbox process failed");
+            let mut command = build_command(&language, &script, &mut limits);
+            command.current_dir(&directory);
+            command.env_clear();
+            command.env("PATH", std::env::var("PATH").unwrap_or_default());
+            for (name, value) in MINIMAL_ENV {
+                command.env(name, value);
             }
-            Err(_) => SandboxResult {
-                stdout: String::new(),
-                // kill_on_drop 与 Job Object 的 kill-on-close 共同保证进程被杀。
-                stderr: format!("sandbox timed out after {} ms", duration.as_millis()),
-                exit_code: None,
-                timed_out: true,
-                limits,
-                isolation,
-            },
-        };
+            command.kill_on_drop(true);
+            // 不设 piped 时 wait_with_output 拿不到任何输出（会继承父进程的 stdio）。
+            command.stdout(std::process::Stdio::piped());
+            command.stderr(std::process::Stdio::piped());
+            command.stdin(std::process::Stdio::null());
+            limits.push(format!("cwd-isolated={}", directory.display()));
+            limits.push("env-cleared".to_string());
 
-        let _ = tokio::fs::remove_dir_all(&directory).await;
-        Ok(result)
+            let duration = Duration::from_millis(
+                request
+                    .timeout_ms
+                    .unwrap_or(self.policy.timeout_ms)
+                    .min(self.policy.timeout_ms)
+                    .max(1),
+            );
+            limits.push(format!("timeout={}ms", duration.as_millis()));
+
+            let isolation = apply_platform_confinement(&mut command, &self.policy, &mut limits)?;
+
+            let child = command.spawn().context("sandbox process failed to start")?;
+
+            let output = timeout(
+                duration,
+                bounded_output(child, self.policy.max_output_bytes),
+            )
+            .await;
+
+            let result = match output {
+                Ok(Ok(output)) => SandboxResult {
+                    stdout: truncate(&output.stdout, self.policy.max_output_bytes, &mut limits),
+                    stderr: truncate(&output.stderr, self.policy.max_output_bytes, &mut limits),
+                    exit_code: output.status.code(),
+                    timed_out: false,
+                    limits,
+                    isolation,
+                },
+                Ok(Err(error)) => {
+                    let _ = tokio::fs::remove_dir_all(&directory).await;
+                    return Err(error).context("sandbox process failed");
+                }
+                Err(_) => SandboxResult {
+                    stdout: String::new(),
+                    // kill_on_drop 与 Job Object 的 kill-on-close 共同保证进程被杀。
+                    stderr: format!("sandbox timed out after {} ms", duration.as_millis()),
+                    exit_code: None,
+                    timed_out: true,
+                    limits,
+                    isolation,
+                },
+            };
+
+            let _ = tokio::fs::remove_dir_all(&directory).await;
+            Ok(result)
+        }
     }
 }
 
@@ -212,6 +227,7 @@ fn script_name(language: &str) -> &'static str {
     }
 }
 
+#[cfg(not(windows))]
 fn build_command(language: &str, script: &Path, limits: &mut Vec<String>) -> Command {
     match language {
         "python" => {
@@ -238,7 +254,7 @@ fn build_command(language: &str, script: &Path, limits: &mut Vec<String>) -> Com
 
 fn platform_isolation() -> &'static str {
     if cfg!(windows) {
-        "windows-job-object"
+        "windows-appcontainer"
     } else if which("bwrap").is_some() {
         "linux-bubblewrap"
     } else if cfg!(target_os = "macos") && Path::new("/usr/bin/sandbox-exec").exists() {
@@ -255,167 +271,127 @@ fn which(program: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-#[cfg(windows)]
-fn apply_platform_confinement(
-    _command: &mut Command,
-    policy: &SandboxPolicy,
-    limits: &mut Vec<String>,
-) -> String {
-    if !policy.allow_network {
-        // Windows 上无法在不引入防火墙或 WFP 的前提下真正断网，这里如实标注。
-        limits.push("network-not-enforced-on-windows".to_string());
-    }
-    "windows-job-object".to_string()
-}
-
-/// 非 Windows 平台的文件系统与网络隔离（可用时）。
 #[cfg(not(windows))]
 fn apply_platform_confinement(
     command: &mut Command,
     policy: &SandboxPolicy,
     limits: &mut Vec<String>,
-) -> String {
-    if let Some(bwrap) = which("bwrap") {
-        let program = command.as_std().get_program().to_os_string();
-        let args: Vec<_> = command
-            .as_std()
-            .get_args()
-            .map(|arg| arg.to_os_string())
-            .collect();
+) -> Result<String> {
+    let original = command.as_std();
+    let program = which(&original.get_program().to_string_lossy())
+        .context("sandbox interpreter unavailable")?;
+    let args: Vec<_> = original.get_args().map(|s| s.to_os_string()).collect();
+    let cwd = original
+        .get_current_dir()
+        .context("sandbox cwd missing")?
+        .canonicalize()?;
+    let env: Vec<_> = original
+        .get_envs()
+        .filter_map(|(k, v)| v.map(|v| (k.to_os_string(), v.to_os_string())))
+        .collect();
+    let (mut wrapped, isolation) = if let Some(bwrap) = which("bwrap") {
         let mut wrapped = Command::new(bwrap);
+        wrapped.args([
+            "--unshare-all",
+            "--die-with-parent",
+            "--new-session",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--tmpfs",
+            "/tmp",
+        ]);
+        for root in [
+            "/usr",
+            "/bin",
+            "/lib",
+            "/lib64",
+            "/etc/ld.so.cache",
+            "/etc/alternatives",
+        ] {
+            if Path::new(root).exists() {
+                wrapped.args(["--ro-bind", root, root]);
+            }
+        }
         wrapped
-            .args(["--unshare-all", "--die-with-parent", "--new-session"])
-            .args(["--ro-bind", "/", "/"])
-            .args(["--tmpfs", "/tmp"])
+            .arg("--bind")
+            .arg(&cwd)
+            .arg(&cwd)
             .arg("--chdir")
-            .arg(".");
-        if !policy.allow_network {
-            // unshare-all 已经断开网络命名空间；保持默认即可。
-            limits.push("bwrap:no-network".to_string());
+            .arg(&cwd);
+        if policy.allow_network {
+            wrapped.arg("--share-net");
+        } else {
+            limits.push("bwrap:no-network".into());
         }
-        wrapped.arg(program);
-        for arg in args {
-            wrapped.arg(arg);
-        }
-        *command = wrapped;
-        limits.push("bwrap:unshare-all".to_string());
-        limits.push("bwrap:read-only-root".to_string());
-        return "linux-bubblewrap".to_string();
-    }
-    if cfg!(target_os = "macos") && Path::new("/usr/bin/sandbox-exec").exists() {
-        let profile = r#"(version 1)(deny default)(allow process*)(allow file-read*)(allow sysctl-read)(allow file-write* (subpath "/private/tmp"))(deny network*)"#;
-        let program = command.as_std().get_program().to_os_string();
-        let args: Vec<_> = command
-            .as_std()
-            .get_args()
-            .map(|arg| arg.to_os_string())
-            .collect();
+        wrapped.arg(&program).args(&args);
+        (wrapped, "linux-bubblewrap")
+    } else if cfg!(target_os = "macos") && Path::new("/usr/bin/sandbox-exec").is_file() {
+        let escaped = cwd
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let profile = format!("(version 1)(deny default)(allow process*)(allow sysctl-read)(allow mach-lookup)(allow file-read* (subpath \"/System\") (subpath \"/usr\") (subpath \"/Library\") (subpath \"/opt/homebrew\") (literal \"/dev/null\") (subpath \"{escaped}\"))(allow file-write* (subpath \"{escaped}\")){}",if policy.allow_network {"(allow network*)"} else {"(deny network*)"});
         let mut wrapped = Command::new("/usr/bin/sandbox-exec");
-        wrapped.arg("-p").arg(profile).arg(program);
-        for arg in args {
-            wrapped.arg(arg);
-        }
-        *command = wrapped;
-        limits.push("sandbox-exec:deny-network".to_string());
-        return "macos-sandbox-exec".to_string();
-    }
-    limits.push("no-os-isolation-available".to_string());
-    "none".to_string()
+        wrapped.arg("-p").arg(profile).arg(&program).args(&args);
+        (wrapped, "macos-sandbox-exec")
+    } else {
+        bail!("OS sandbox unavailable; install bubblewrap on Linux. Execution refused");
+    };
+    wrapped
+        .current_dir(&cwd)
+        .env_clear()
+        .envs(env)
+        .kill_on_drop(true)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    *command = wrapped;
+    limits.push("filesystem-restricted".into());
+    Ok(isolation.into())
 }
 
+#[cfg(not(windows))]
+async fn bounded_output(
+    mut child: tokio::process::Child,
+    max: usize,
+) -> std::io::Result<std::process::Output> {
+    use tokio::io::AsyncReadExt;
+    async fn read(
+        mut reader: impl tokio::io::AsyncRead + Unpin,
+        max: usize,
+    ) -> std::io::Result<Vec<u8>> {
+        let mut result = Vec::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            let count = reader.read(&mut chunk).await?;
+            if count == 0 {
+                break;
+            }
+            let keep = count.min(max.saturating_add(1).saturating_sub(result.len()));
+            result.extend_from_slice(&chunk[..keep]);
+        }
+        Ok(result)
+    }
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let (status, stdout, stderr) =
+        tokio::try_join!(child.wait(), read(stdout, max), read(stderr, max))?;
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+#[cfg(not(windows))]
 fn truncate(bytes: &[u8], max_bytes: usize, limits: &mut Vec<String>) -> String {
     if bytes.len() > max_bytes {
         limits.push(format!("output-truncated={max_bytes}B"));
     }
     let end = bytes.len().min(max_bytes);
     String::from_utf8_lossy(&bytes[..end]).to_string()
-}
-
-#[cfg(windows)]
-mod win_job {
-    //! Windows Job Object：句柄关闭即杀 + 内存与进程数上限。
-
-    use std::mem::size_of;
-
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-    use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_JOB_MEMORY,
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
-    };
-
-    use super::SandboxPolicy;
-
-    /// 持有 Job Object 句柄；Drop 时关闭，触发 kill-on-close。
-    pub struct JobHandle(HANDLE);
-
-    // SAFETY: 内核句柄本身只是一个可跨线程传递的整数标识；这里只保证
-    // 句柄随结构体移动，并在唯一所有者 Drop 时关闭一次。
-    unsafe impl Send for JobHandle {}
-
-    impl Drop for JobHandle {
-        fn drop(&mut self) {
-            // SAFETY: 句柄由 CreateJobObjectW 返回，且只在这里关闭一次。
-            unsafe {
-                CloseHandle(self.0);
-            }
-        }
-    }
-
-    pub fn assign(
-        child: &tokio::process::Child,
-        policy: &SandboxPolicy,
-        limits: &mut Vec<String>,
-    ) -> anyhow::Result<Option<JobHandle>> {
-        let Some(raw) = child.raw_handle() else {
-            anyhow::bail!("子进程句柄不可用");
-        };
-        // SAFETY: 空安全属性与空名字创建匿名 Job。
-        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
-        if job.is_null() {
-            anyhow::bail!("CreateJobObjectW 失败");
-        }
-        let handle = JobHandle(job);
-
-        let mut information: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
-        information.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        limits.push("kill-on-close".to_string());
-        if let Some(megabytes) = policy.memory_limit_mb {
-            let bytes = (megabytes as usize).saturating_mul(1024 * 1024);
-            information.ProcessMemoryLimit = bytes;
-            information.JobMemoryLimit = bytes;
-            information.BasicLimitInformation.LimitFlags |=
-                JOB_OBJECT_LIMIT_PROCESS_MEMORY | JOB_OBJECT_LIMIT_JOB_MEMORY;
-            limits.push(format!("job-object:memory={megabytes}MB"));
-        }
-        if let Some(processes) = policy.max_processes {
-            information.BasicLimitInformation.ActiveProcessLimit = processes;
-            information.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
-            limits.push(format!("job-object:max-processes={processes}"));
-        }
-
-        // SAFETY: information 是栈上有效结构，长度按具体类型给出。
-        let configured = unsafe {
-            SetInformationJobObject(
-                job,
-                JobObjectExtendedLimitInformation,
-                &information as *const _ as *const core::ffi::c_void,
-                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            )
-        };
-        if configured == 0 {
-            anyhow::bail!("SetInformationJobObject 失败");
-        }
-
-        // SAFETY: raw 是 tokio 持有的有效进程句柄，仅在此调用期间借用。
-        let assigned = unsafe { AssignProcessToJobObject(job, raw as HANDLE) };
-        if assigned == 0 {
-            anyhow::bail!("AssignProcessToJobObject 失败（当前进程可能已在其它 Job 中）");
-        }
-        limits.push("process-assigned-to-job".to_string());
-        Ok(Some(handle))
-    }
 }
 
 #[cfg(test)]
@@ -473,8 +449,7 @@ mod tests {
         {
             Ok(result) => result,
             Err(error) => {
-                eprintln!("python 不可用，跳过：{error}");
-                return;
+                panic!("sandbox execution failed: {error:#}");
             }
         };
         assert!(result.stdout.contains("sandbox-ok"), "{result:?}");
@@ -490,7 +465,7 @@ mod tests {
             .iter()
             .any(|limit| limit.starts_with("cwd-isolated=")));
         if cfg!(windows) {
-            assert_eq!(result.isolation, "windows-job-object");
+            assert_eq!(result.isolation, "windows-appcontainer");
             assert!(result.limits.iter().any(|limit| limit == "kill-on-close"));
         }
     }
@@ -510,8 +485,7 @@ mod tests {
         let result = match sandbox.execute(request).await {
             Ok(result) => result,
             Err(error) => {
-                eprintln!("python 不可用，跳过：{error}");
-                return;
+                panic!("sandbox execution failed: {error:#}");
             }
         };
         assert!(result.timed_out);
@@ -533,8 +507,7 @@ mod tests {
         {
             Ok(result) => result,
             Err(error) => {
-                eprintln!("python 不可用，跳过：{error}");
-                return;
+                panic!("sandbox execution failed: {error:#}");
             }
         };
         // 目标代码本身允许写入 1024 字节，因此输出上限就是 1024。
@@ -559,8 +532,7 @@ mod tests {
         {
             Ok(result) => result,
             Err(error) => {
-                eprintln!("python 不可用，跳过：{error}");
-                return;
+                panic!("sandbox execution failed: {error:#}");
             }
         };
         assert!(result.stdout.trim().starts_with("run-"), "{result:?}");

@@ -1,3 +1,5 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use std::{
     sync::{mpsc, Arc},
     thread,
@@ -6,7 +8,7 @@ use std::{
 use eframe::egui::{
     self, Align, Color32, Frame, Layout, RichText, ScrollArea, Stroke, TextEdit, Ui, Vec2, Visuals,
 };
-use reqwest::Client;
+
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
 use uuid::Uuid;
@@ -14,12 +16,18 @@ use wonderland::cliproxy::{
     CliProxyAccount, CliProxyLoginStart, CliProxyLoginStatus, CliProxyModel, CliProxyVerification,
 };
 use wonderland::model::{AgentRequest, AgentResponse};
+#[path = "desktop/ui.rs"]
+mod desktop_ui;
+#[path = "desktop/icons.rs"]
+mod icons;
 
-const BG: Color32 = Color32::from_rgb(20, 20, 23);
-const PANEL: Color32 = Color32::from_rgb(28, 28, 32);
-const CARD: Color32 = Color32::from_rgb(38, 38, 43);
-const ACCENT: Color32 = Color32::from_rgb(25, 195, 125);
-const MUTED: Color32 = Color32::from_rgb(160, 160, 170);
+const BG: Color32 = Color32::from_rgb(16, 19, 24);
+const PANEL: Color32 = Color32::from_rgb(21, 25, 32);
+const CARD: Color32 = Color32::from_rgb(29, 35, 44);
+const ACCENT: Color32 = Color32::from_rgb(166, 235, 207);
+const MUTED: Color32 = Color32::from_rgb(149, 160, 176);
+const BORDER: Color32 = Color32::from_rgb(44, 53, 65);
+const TEXT: Color32 = Color32::from_rgb(231, 237, 244);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ViewMode {
@@ -33,13 +41,13 @@ enum MessageRole {
     Agent,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct ChatMessage {
     role: MessageRole,
     text: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Task {
     id: String,
     session_id: String,
@@ -54,6 +62,10 @@ struct Task {
     /// 本轮工具执行进度（最新的在最后）。
     #[serde(default)]
     tool_log: Vec<String>,
+    #[serde(default)]
+    reasoning: String,
+    #[serde(default)]
+    usage: wonderland::provider::Usage,
 }
 
 enum UiEvent {
@@ -88,10 +100,18 @@ enum UiEvent {
     McpLoaded(Vec<serde_json::Value>),
     AccountsLoaded(Vec<CliProxyAccount>),
     HealthLoaded(serde_json::Value),
+    McpLogin(serde_json::Value),
+    SearchLoaded(Vec<serde_json::Value>),
+    ConnectionLoaded(serde_json::Value),
+    SessionLoaded(wonderland::session::Session),
+    Approval(serde_json::Value),
     ApiFailed(String),
 }
 
 struct DesktopApp {
+    #[cfg(feature = "ui-snapshots")]
+    snapshot_frames: usize,
+    cancellations: std::collections::HashMap<String, tokio::sync::oneshot::Sender<()>>,
     server_url: String,
     user_id: String,
     tasks: Vec<Task>,
@@ -118,21 +138,84 @@ struct DesktopApp {
     accounts: Vec<CliProxyAccount>,
     /// 是否展开连接与工具面板。
     show_conn_panel: bool,
+    working_dir: String,
+    mcp_login: Option<serde_json::Value>,
+    search_query: String,
+    search_hits: Vec<serde_json::Value>,
+    connection: wonderland::connection::ConnectionSettings,
+    has_api_key: bool,
+    permission_mode: wonderland::permissions::PermissionMode,
+    approvals: Vec<serde_json::Value>,
 }
 
 impl DesktopApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         cc.egui_ctx.set_fonts(chinese_font_definitions());
+        cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
         cc.egui_ctx.set_visuals(Visuals::dark());
+        let mut style = (*cc.egui_ctx.style()).clone();
+        style.visuals = Visuals::dark();
+        style.visuals.override_text_color = Some(TEXT);
+        style.spacing.item_spacing = Vec2::new(10.0, 9.0);
+        style.spacing.button_padding = Vec2::new(12.0, 7.0);
+        style.visuals.panel_fill = PANEL;
+        style.visuals.window_fill = PANEL;
+        style.visuals.extreme_bg_color = BG;
+        style.spacing.interact_size.y = 32.0;
+        style.visuals.selection.bg_fill = Color32::from_rgb(43, 69, 63);
+        style.visuals.selection.stroke = Stroke::new(1.0_f32, ACCENT);
+        style.visuals.window_stroke = Stroke::new(1.0_f32, BORDER);
+        style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, BORDER);
+        for widget in [
+            &mut style.visuals.widgets.inactive,
+            &mut style.visuals.widgets.hovered,
+            &mut style.visuals.widgets.active,
+            &mut style.visuals.widgets.open,
+        ] {
+            widget.corner_radius = egui::CornerRadius::same(8);
+            widget.bg_stroke = Stroke::new(1.0_f32, BORDER);
+            widget.fg_stroke = Stroke::new(1.5_f32, TEXT);
+        }
+        style.visuals.widgets.inactive.bg_fill = CARD;
+        style.visuals.widgets.inactive.weak_bg_fill = CARD;
+        style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(40, 50, 61);
+        style.visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(40, 50, 61);
+        style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, ACCENT.gamma_multiply(0.7));
+        style.visuals.widgets.active.bg_fill = Color32::from_rgb(40, 66, 59);
+        style.visuals.widgets.active.weak_bg_fill = Color32::from_rgb(40, 66, 59);
+        style.visuals.widgets.open.bg_fill = CARD;
+        style.visuals.widgets.open.weak_bg_fill = CARD;
+        style.visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
+        style
+            .text_styles
+            .insert(egui::TextStyle::Body, egui::FontId::proportional(15.0));
+        style
+            .text_styles
+            .insert(egui::TextStyle::Button, egui::FontId::proportional(14.0));
+        style
+            .text_styles
+            .insert(egui::TextStyle::Small, egui::FontId::proportional(12.0));
+        cc.egui_ctx.set_style(style);
         let (event_tx, event_rx) = mpsc::channel();
-        let tasks = cc
+        let snapshot =
+            cfg!(feature = "ui-snapshots") && std::env::var_os("WONDERLAND_SNAPSHOT").is_some();
+        let mut tasks = cc
             .storage
             .and_then(|storage| eframe::get_value(storage, "tasks"))
             .filter(|tasks: &Vec<Task>| !tasks.is_empty())
             .unwrap_or_else(|| vec![Task::new("新任务")]);
-        let server_url = cc
-            .storage
-            .and_then(|storage| eframe::get_value(storage, "server_url"))
+        if snapshot {
+            tasks = vec![Task::new("新任务")];
+        }
+        for task in &mut tasks {
+            task.running = false;
+        }
+        let server_url = std::env::var("AGENT_SERVER_URL")
+            .ok()
+            .or_else(|| {
+                cc.storage
+                    .and_then(|storage| eframe::get_value(storage, "server_url"))
+            })
             .unwrap_or_else(|| "http://127.0.0.1:8080".to_string());
         let user_id = cc
             .storage
@@ -140,7 +223,10 @@ impl DesktopApp {
             .unwrap_or_else(|| "local-user".to_string());
         let server_url_for_probe = server_url.clone();
         let event_tx_for_probe = event_tx.clone();
-        let app = Self {
+        let mut app = Self {
+            #[cfg(feature = "ui-snapshots")]
+            snapshot_frames: 0,
+            cancellations: Default::default(),
             server_url,
             user_id,
             tasks,
@@ -158,12 +244,39 @@ impl DesktopApp {
             event_rx,
             provider_name: "unknown".to_string(),
             protocols: Vec::new(),
-            reasoning_effort: "medium".to_string(),
+            reasoning_effort: "auto".to_string(),
             tools: Vec::new(),
             mcp_servers: Vec::new(),
             accounts: Vec::new(),
-            show_conn_panel: false,
+            show_conn_panel: snapshot && std::env::var_os("WONDERLAND_SNAPSHOT_SETTINGS").is_some(),
+            working_dir: std::env::var("AGENT_CWD").unwrap_or_else(|_| {
+                std::env::current_dir()
+                    .unwrap_or_default()
+                    .display()
+                    .to_string()
+            }),
+            mcp_login: None,
+            search_query: String::new(),
+            search_hits: Vec::new(),
+            connection: wonderland::connection::ConnectionSettings {
+                provider: "subscription".into(),
+                ..Default::default()
+            },
+            has_api_key: false,
+            permission_mode: wonderland::permissions::PermissionMode::Default,
+            approvals: Vec::new(),
         };
+        if let Some(storage) = cc.storage.filter(|_| !snapshot) {
+            app.selected_model = eframe::get_value(storage, "selected_model").unwrap_or_default();
+            app.reasoning_effort =
+                eframe::get_value(storage, "reasoning_effort").unwrap_or_else(|| "auto".into());
+            app.working_dir = eframe::get_value(storage, "working_dir").unwrap_or(app.working_dir);
+        }
+        spawn_json_request(
+            app.event_tx.clone(),
+            format!("{}/v1/connection", app.server_url.trim_end_matches('/')),
+            UiEvent::ConnectionLoaded,
+        );
         // 启动即抓一份后端能力信息（provider / 协议栈 / 工具 / MCP / 账号）。
         spawn_health_request(event_tx_for_probe, server_url_for_probe);
         app
@@ -198,11 +311,14 @@ impl DesktopApp {
             text: input.clone(),
         });
         task.running = true;
+        task.stream_text.clear();
+        task.reasoning.clear();
+        task.tool_log.clear();
         self.input.clear();
         self.status = "Agent 正在规划并执行...".to_string();
 
         let reasoning_effort = match self.reasoning_effort.as_str() {
-            "off" | "" => None,
+            "" | "auto" => None,
             other => Some(other.to_string()),
         };
         let request = AgentRequest {
@@ -210,16 +326,19 @@ impl DesktopApp {
             user_id: Some(self.user_id.clone()),
             model: (!self.selected_model.trim().is_empty()).then(|| self.selected_model.clone()),
             skills: Vec::new(),
-            mode: None,
-            cwd: None,
+            mode: Some(self.permission_mode),
+            cwd: Some(self.working_dir.clone()),
             reasoning_effort,
             input,
         };
-        spawn_agent_request(
-            self.event_tx.clone(),
-            self.server_url.clone(),
-            task_id,
-            request,
+        self.cancellations.insert(
+            task_id.clone(),
+            spawn_agent_request(
+                self.event_tx.clone(),
+                self.server_url.clone(),
+                task_id,
+                request,
+            ),
         );
     }
 
@@ -236,8 +355,11 @@ impl DesktopApp {
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
                 UiEvent::Completed { task_id, response } => {
+                    self.cancellations.remove(&task_id);
+                    self.approvals.retain(|p| p["task_id"] != task_id);
                     if let Some(task) = self.tasks.iter_mut().find(|task| task.id == task_id) {
                         task.running = false;
+                        task.usage = response.usage;
                         task.plan = response
                             .plan
                             .steps
@@ -250,7 +372,6 @@ impl DesktopApp {
                             text: response.output,
                         });
                         task.stream_text.clear();
-                        task.tool_log.clear();
                         self.status = format!(
                             "完成 · 评分 {:.0} · {} 轮 · {} 次工具调用 · tokens {}/{}",
                             response.evaluation.total_score,
@@ -268,10 +389,7 @@ impl DesktopApp {
                 }
                 UiEvent::Reasoning { task_id, text } => {
                     if let Some(task) = self.tasks.iter_mut().find(|task| task.id == task_id) {
-                        let line = text.lines().last().unwrap_or_default().trim();
-                        if !line.is_empty() {
-                            push_tool_note(task, format!("思考：{line}"));
-                        }
+                        task.reasoning.push_str(&text);
                     }
                 }
                 UiEvent::ToolProgress { task_id, label } => {
@@ -285,10 +403,82 @@ impl DesktopApp {
                 UiEvent::McpLoaded(servers) => {
                     self.mcp_servers = servers;
                 }
+                UiEvent::McpLogin(value) => {
+                    if value["status"] == "ok" {
+                        self.status = "MCP 登录成功，请点击重新连接加载工具".into();
+                    }
+                    self.mcp_login = Some(value);
+                }
+                UiEvent::SearchLoaded(hits) => {
+                    self.search_hits = hits;
+                }
+                UiEvent::Approval(value) => {
+                    self.approvals.push(value);
+                }
+                UiEvent::ConnectionLoaded(value) => {
+                    self.api_request_running = false;
+                    self.connection.provider =
+                        value["provider"].as_str().unwrap_or("offline").into();
+                    self.connection.base_url =
+                        value["base_url"].as_str().unwrap_or_default().into();
+                    self.connection.model = value["model"].as_str().unwrap_or_default().into();
+                    self.connection.wire = serde_json::from_value(value["wire"].clone()).ok();
+                    self.has_api_key = value["has_api_key"].as_bool().unwrap_or(false);
+                    self.connection.api_key.clear();
+                    if !self.connection.model.is_empty() {
+                        self.selected_model = self.connection.model.clone();
+                    }
+                    self.models.clear();
+                    if !self.selected_model.is_empty() {
+                        self.models.push(CliProxyModel {
+                            id: self.selected_model.clone(),
+                            object: "model".into(),
+                            owned_by: Some(self.connection.provider.clone()),
+                        });
+                    }
+                    self.load_models();
+                    self.status = "连接配置已就绪".into();
+                }
+                UiEvent::SessionLoaded(session) => {
+                    if let Some(index) = self.tasks.iter().position(|t| t.session_id == session.id)
+                    {
+                        self.active_task = index;
+                    } else {
+                        let mut task = Task::new("历史会话");
+                        task.session_id = session.id;
+                        task.usage = session.usage;
+                        task.messages = session
+                            .messages
+                            .iter()
+                            .filter_map(|m| {
+                                let text = m.text();
+                                if text.is_empty() {
+                                    return None;
+                                }
+                                Some(ChatMessage {
+                                    role: if m.role == wonderland::provider::Role::User {
+                                        MessageRole::User
+                                    } else {
+                                        MessageRole::Agent
+                                    },
+                                    text,
+                                })
+                            })
+                            .collect();
+                        if let Some(first) = task.messages.first() {
+                            task.title = truncate(&first.text, 24);
+                        }
+                        self.tasks.push(task);
+                        self.active_task = self.tasks.len() - 1;
+                    }
+                }
                 UiEvent::AccountsLoaded(accounts) => {
                     self.accounts = accounts;
                 }
                 UiEvent::HealthLoaded(value) => {
+                    if self.selected_model.is_empty() {
+                        self.selected_model = value["model"].as_str().unwrap_or_default().into();
+                    }
                     self.provider_name = value
                         .get("provider")
                         .and_then(|provider| provider.as_str())
@@ -306,10 +496,16 @@ impl DesktopApp {
                         .unwrap_or_default();
                 }
                 UiEvent::Failed { task_id, message } => {
+                    self.cancellations.remove(&task_id);
+                    self.approvals.retain(|p| p["task_id"] != task_id);
                     if let Some(task) = self.tasks.iter_mut().find(|task| task.id == task_id) {
                         task.running = false;
-                        task.stream_text.clear();
-                        task.tool_log.clear();
+                        if !task.stream_text.is_empty() {
+                            task.messages.push(ChatMessage {
+                                role: MessageRole::Agent,
+                                text: std::mem::take(&mut task.stream_text),
+                            });
+                        }
                         task.messages.push(ChatMessage {
                             role: MessageRole::Agent,
                             text: format!("请求失败：{message}"),
@@ -335,7 +531,15 @@ impl DesktopApp {
                 }
                 UiEvent::ModelsLoaded(models) => {
                     self.api_request_running = false;
-                    if self.selected_model.is_empty() {
+                    let subscription = matches!(
+                        self.connection.provider.as_str(),
+                        "subscription" | "cliproxyapi"
+                    );
+                    if self.selected_model.is_empty()
+                        || (subscription
+                            && !models.is_empty()
+                            && !models.iter().any(|m| m.id == self.selected_model))
+                    {
                         self.selected_model = models
                             .first()
                             .map(|model| model.id.clone())
@@ -396,7 +600,7 @@ impl DesktopApp {
             return;
         }
         self.api_request_running = true;
-        self.status = "正在读取订阅模型...".to_string();
+        self.status = "正在读取当前连接的模型目录...".to_string();
         spawn_models_request(self.event_tx.clone(), self.server_url.clone());
     }
 
@@ -413,307 +617,153 @@ impl DesktopApp {
         );
     }
 
-    fn render_header(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
-            ui.heading(RichText::new("Wonderland").strong());
-            ui.label(RichText::new("桌面工作台").color(MUTED));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(RichText::new(&self.status).color(MUTED));
-                ui.separator();
-                if ui
-                    .selectable_label(self.view == ViewMode::Parallel, "多任务并排")
-                    .clicked()
-                {
-                    self.view = ViewMode::Parallel;
-                }
-                if ui
-                    .selectable_label(self.view == ViewMode::Planning, "聊天式规划")
-                    .clicked()
-                {
-                    self.view = ViewMode::Planning;
-                }
-            });
-        });
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("服务").color(MUTED));
-            ui.add(TextEdit::singleline(&mut self.server_url).desired_width(250.0));
-            ui.label(RichText::new("用户").color(MUTED));
-            ui.add(TextEdit::singleline(&mut self.user_id).desired_width(150.0));
-            ui.label(RichText::new("推理").color(MUTED));
-            egui::ComboBox::from_id_salt("reasoning-effort")
-                .selected_text(&self.reasoning_effort)
-                .width(90.0)
-                .show_ui(ui, |ui| {
-                    for effort in ["off", "low", "medium", "high"] {
-                        ui.selectable_value(&mut self.reasoning_effort, effort.to_string(), effort);
-                    }
-                });
-            if ui
-                .selectable_label(self.show_conn_panel, "连接与工具")
-                .clicked()
-            {
-                self.show_conn_panel = !self.show_conn_panel;
-                if self.show_conn_panel {
-                    self.refresh_connection_panel();
-                }
-            }
-        });
-        ui.add_space(6.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("API 登录").color(MUTED));
-            egui::ComboBox::from_id_salt("login-provider")
-                .selected_text(&self.login_provider)
-                .show_ui(ui, |ui| {
-                    for provider in [
-                        "codex",
-                        "claude",
-                        "antigravity",
-                        "kimi",
-                        "xai",
-                        "devin",
-                        "meta",
-                    ] {
-                        ui.selectable_value(
-                            &mut self.login_provider,
-                            provider.to_string(),
-                            provider,
-                        );
-                    }
-                });
-            if ui
-                .add_enabled(!self.api_request_running, egui::Button::new("账号登录"))
-                .clicked()
-            {
-                self.start_login();
-            }
-            if ui
-                .add_enabled(
-                    !self.api_request_running && self.login_state.is_some(),
-                    egui::Button::new("检查登录"),
-                )
-                .clicked()
-            {
-                self.check_login();
-            }
-            if ui
-                .add_enabled(!self.api_request_running, egui::Button::new("刷新模型"))
-                .clicked()
-            {
-                self.load_models();
-            }
-            ui.label(RichText::new("模型").color(MUTED));
-            if self.models.is_empty() {
-                ui.add(TextEdit::singleline(&mut self.selected_model).desired_width(150.0));
-            } else {
-                egui::ComboBox::from_id_salt("model-picker")
-                    .selected_text(if self.selected_model.is_empty() {
-                        "选择模型"
-                    } else {
-                        &self.selected_model
-                    })
-                    .show_ui(ui, |ui| {
-                        for model in &self.models {
-                            ui.selectable_value(
-                                &mut self.selected_model,
-                                model.id.clone(),
-                                &model.id,
-                            );
-                        }
-                    });
-            }
-            if ui
-                .add_enabled(
-                    !self.api_request_running && !self.selected_model.trim().is_empty(),
-                    egui::Button::new("验证模型"),
-                )
-                .clicked()
-            {
-                self.verify_model();
-            }
-        });
-        if let Some(url) = &self.login_url {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("OAuth").color(MUTED));
-                ui.hyperlink_to("打开浏览器授权", url);
-                if let Some(state) = &self.login_state {
-                    ui.label(RichText::new(format!("state: {}", truncate(state, 18))).color(MUTED));
-                }
-            });
-        }
-    }
-
     fn render_task_list(&mut self, ui: &mut Ui) {
-        ui.heading("任务");
+        use icons::{glyph, Icon};
+        let available = ui.available_height();
         if ui
             .add_sized(
-                [ui.available_width(), 32.0],
-                egui::Button::new("＋ 新建任务"),
+                [ui.available_width(), 40.0],
+                egui::Button::new(RichText::new("＋  新建任务").strong().color(BG))
+                    .fill(ACCENT)
+                    .corner_radius(10),
             )
             .clicked()
         {
             self.add_task();
         }
-        ui.add_space(10.0);
-        ScrollArea::vertical().show(ui, |ui| {
-            for (index, task) in self.tasks.iter().enumerate() {
-                let active = index == self.active_task;
-                let preview = task
-                    .messages
-                    .last()
-                    .map(|message| message.text.lines().next().unwrap_or("").to_string())
-                    .unwrap_or_else(|| "开始一个新的 Agent 任务".to_string());
-                let response = ui.add_sized(
-                    [ui.available_width(), 58.0],
-                    egui::Button::new(
-                        egui::RichText::new(format!("{}\n{}", task.title, truncate(&preview, 34)))
-                            .size(13.0),
-                    )
-                    .fill(if active { CARD } else { PANEL })
-                    .stroke(if active {
-                        Stroke::new(1.0_f32, ACCENT)
-                    } else {
-                        Stroke::NONE
-                    }),
+        ui.add_space(24.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("最近任务").size(11.0).color(MUTED));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(
+                    RichText::new(self.tasks.len().to_string())
+                        .small()
+                        .color(MUTED),
                 );
-                if response.clicked() {
-                    self.active_task = index;
-                }
-                ui.add_space(5.0);
-            }
+            });
         });
-    }
-
-    fn render_planning(&mut self, ui: &mut Ui) {
-        let Some(task) = self.tasks.get(self.active_task) else {
-            return;
-        };
-        ui.heading(&task.title);
-        ui.label(
-            RichText::new(format!("session: {}", task.session_id))
-                .color(MUTED)
-                .small(),
-        );
-        ui.add_space(8.0);
+        ui.add_space(6.0);
         ScrollArea::vertical()
-            .id_salt("planning-messages")
             .auto_shrink([false, false])
+            .max_height((available - 350.0).max(120.0))
+            .min_scrolled_height((available - 350.0).max(120.0))
             .show(ui, |ui| {
-                self.render_messages(ui, self.active_task);
-            });
-        self.render_input(ui);
-    }
-
-    fn render_messages(&self, ui: &mut Ui, task_index: usize) {
-        let Some(task) = self.tasks.get(task_index) else {
-            return;
-        };
-        for message in &task.messages {
-            let (label, color, alignment) = match message.role {
-                MessageRole::User => ("你", ACCENT, Layout::right_to_left(Align::Min)),
-                MessageRole::Agent => (
-                    "Agent",
-                    Color32::from_rgb(110, 165, 255),
-                    Layout::left_to_right(Align::Min),
-                ),
-            };
-            ui.with_layout(alignment, |ui| {
-                Frame::new()
-                    .fill(if message.role == MessageRole::User {
-                        Color32::from_rgb(35, 64, 57)
-                    } else {
-                        CARD
-                    })
-                    .corner_radius(10.0)
-                    .inner_margin(egui::Margin::symmetric(14, 10))
-                    .show(ui, |ui| {
-                        ui.label(RichText::new(label).color(color).strong());
-                        ui.add_space(4.0);
-                        ui.label(&message.text);
-                    });
-            });
-            ui.add_space(10.0);
-        }
-        if task.messages.is_empty() && task.stream_text.is_empty() {
-            ui.vertical_centered(|ui| {
-                ui.add_space(80.0);
-                ui.heading("今天想完成什么？");
-                ui.label(
-                    RichText::new("Agent 会先生成计划，再执行、反思并保存长期记忆。").color(MUTED),
-                );
-            });
-        }
-        // 正在流式输出的回答：直接在气泡里逐字增长。
-        if !task.stream_text.is_empty() {
-            ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
-                Frame::new()
-                    .fill(CARD)
-                    .corner_radius(10.0)
-                    .inner_margin(egui::Margin::symmetric(14, 10))
-                    .show(ui, |ui| {
-                        ui.label(
-                            RichText::new("Agent")
-                                .color(Color32::from_rgb(110, 165, 255))
-                                .strong(),
-                        );
-                        ui.add_space(4.0);
-                        ui.label(&task.stream_text);
-                    });
-            });
-        }
-        if !task.tool_log.is_empty() {
-            ui.add_space(6.0);
-            Frame::new()
-                .fill(Color32::from_rgb(32, 32, 38))
-                .corner_radius(8.0)
-                .inner_margin(egui::Margin::symmetric(12, 8))
-                .show(ui, |ui| {
-                    ui.label(RichText::new("执行进度").color(MUTED).small());
-                    for line in &task.tool_log {
-                        ui.label(RichText::new(truncate(line, 120)).color(MUTED).small());
-                    }
-                });
-        }
-    }
-
-    fn render_input(&mut self, ui: &mut Ui) {
-        ui.add_space(10.0);
-        Frame::new()
-            .fill(CARD)
-            .corner_radius(12.0)
-            .inner_margin(10.0)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let task_running = self
-                        .tasks
-                        .get(self.active_task)
-                        .map(|task| task.running)
-                        .unwrap_or(false);
-                    let edit = ui.add_enabled(
-                        !task_running,
-                        TextEdit::multiline(&mut self.input)
-                            .hint_text("输入任务、问题或指令...")
-                            .desired_rows(3)
-                            .desired_width(ui.available_width() - 90.0),
+                for (index, task) in self.tasks.iter().enumerate() {
+                    let active = index == self.active_task;
+                    let (rect, response) = ui.allocate_exact_size(
+                        Vec2::new(ui.available_width(), 72.0),
+                        egui::Sense::click(),
                     );
-                    if ui
-                        .add_enabled(!task_running, egui::Button::new("发送"))
-                        .clicked()
-                        || (edit.lost_focus()
-                            && ui.input(|input| input.key_pressed(egui::Key::Enter)))
-                    {
-                        self.send_active();
+                    let painter = ui.painter();
+                    painter.rect_filled(
+                        rect,
+                        10,
+                        if active {
+                            CARD
+                        } else if response.hovered() {
+                            Color32::from_rgb(25, 30, 38)
+                        } else {
+                            Color32::TRANSPARENT
+                        },
+                    );
+                    if active {
+                        painter.rect_filled(
+                            egui::Rect::from_min_size(
+                                rect.min + Vec2::new(0., 18.),
+                                Vec2::new(3., 36.),
+                            ),
+                            2,
+                            ACCENT,
+                        );
                     }
+                    icons::draw(
+                        ui,
+                        egui::Rect::from_min_size(rect.min + Vec2::new(14., 16.), Vec2::splat(16.)),
+                        Icon::Chat,
+                        if active { ACCENT } else { MUTED },
+                    );
+                    painter.text(
+                        rect.min + Vec2::new(40., 24.),
+                        egui::Align2::LEFT_CENTER,
+                        truncate(&task.title, 13),
+                        egui::FontId::proportional(13.0),
+                        TEXT,
+                    );
+                    let preview = if task.running {
+                        "正在执行…"
+                    } else {
+                        task.messages
+                            .last()
+                            .map(|m| m.text.lines().next().unwrap_or(""))
+                            .unwrap_or("等待你的第一个想法")
+                    };
+                    painter.text(
+                        rect.min + Vec2::new(40., 49.),
+                        egui::Align2::LEFT_CENTER,
+                        truncate(preview, 15),
+                        egui::FontId::proportional(11.0),
+                        MUTED,
+                    );
+                    response.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::SelectableLabel,
+                            true,
+                            &task.title,
+                        )
+                    });
+                    if response.clicked() {
+                        self.active_task = index;
+                        self.view = ViewMode::Planning;
+                    }
+                    ui.add_space(3.0);
+                }
+            });
+        ui.add_space(16.0);
+        ui.separator();
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            glyph(ui, Icon::Folder, 16.0, MUTED);
+            ui.label(RichText::new("当前工作区").small().color(MUTED));
+        });
+        let folder = std::path::Path::new(&self.working_dir)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&self.working_dir);
+        ui.label(RichText::new(truncate(folder, 22)).size(12.0))
+            .on_hover_text(&self.working_dir);
+        ui.add_space(14.0);
+        Frame::new()
+            .fill(BG)
+            .corner_radius(10)
+            .inner_margin(12.0)
+            .show(ui, |ui| {
+                ui.set_min_width((ui.available_width() - 24.0).max(80.0));
+                ui.horizontal(|ui| {
+                    glyph(ui, Icon::Link, 16.0, ACCENT);
+                    ui.label(
+                        RichText::new(if self.provider_name == "unknown" {
+                            "正在连接"
+                        } else if self.provider_name == "offline" {
+                            "离线演示"
+                        } else {
+                            "模型已连接"
+                        })
+                        .size(12.0)
+                        .color(ACCENT),
+                    );
                 });
                 ui.label(
-                    RichText::new("Enter 发送 · 任务会自动写入长期记忆")
-                        .color(MUTED)
-                        .small(),
+                    RichText::new(if self.selected_model.is_empty() {
+                        "在设置中连接你的模型"
+                    } else {
+                        &self.selected_model
+                    })
+                    .small()
+                    .color(MUTED),
                 );
             });
     }
 
-    /// 右侧连接与工具面板：provider/协议栈、工具、MCP、订阅账号。
     fn render_connection_panel(&mut self, ctx: &egui::Context) {
         if !self.show_conn_panel {
             return;
@@ -721,10 +771,13 @@ impl DesktopApp {
         let mut open = self.show_conn_panel;
         egui::SidePanel::right("connection-panel")
             .resizable(true)
-            .default_width(320.0)
+            .default_width(370.0)
+            .min_width(330.0)
+            .frame(Frame::new().fill(PANEL).inner_margin(20.0))
             .show(ctx, |ui| {
+                ScrollArea::vertical().show(ui,|ui|{
                 ui.horizontal(|ui| {
-                    ui.heading("连接与工具");
+                    ui.heading("工作区设置");
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui.button("关闭").clicked() {
                             open = false;
@@ -735,7 +788,10 @@ impl DesktopApp {
                     });
                 });
                 ui.add_space(6.0);
-                ui.label(RichText::new(format!("后端 provider：{}", self.provider_name)).color(MUTED));
+                self.render_provider_settings(ui);
+                ui.separator();
+                ui.collapsing("连接诊断", |ui| {
+                ui.label(RichText::new(format!("服务：{}", self.provider_name)).color(MUTED));
                 ui.label(
                     RichText::new(format!(
                         "可用协议：{}",
@@ -754,7 +810,35 @@ impl DesktopApp {
                     .color(MUTED)
                     .small(),
                 );
+                });
                 ui.separator();
+                let profile = wonderland::model_profile::ModelProfile::resolve(&self.selected_model);
+                ui.collapsing("模型能力档案", |ui| {
+                    ui.label(format!("模型：{}", self.selected_model));
+                    ui.label(format!("档案：{}", profile.name));
+                    ui.label(format!("上下文：{} tokens", profile.context_window));
+                    ui.label(format!("输出上限：{} tokens", profile.max_output_tokens));
+                    ui.label(format!("协议：{}", profile.protocol.as_str()));
+                    ui.label(format!("缓存：{:?} · 推理：{:?}", profile.cache, profile.reasoning));
+                });
+                ui.collapsing("检索历史会话", |ui| {
+                    ui.text_edit_singleline(&mut self.search_query);
+                    if ui.button("搜索").clicked() {
+                        let mut url = reqwest::Url::parse(&format!("{}/v1/sessions/search",self.server_url.trim_end_matches('/'))).ok();
+                        if let Some(url) = url.as_mut() {
+                            url.query_pairs_mut().append_pair("q", &self.search_query).append_pair("user_id", &self.user_id);
+                            spawn_json_array_request(self.event_tx.clone(),url.to_string(),UiEvent::SearchLoaded);
+                        }
+                    }
+                    ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+                        for hit in &self.search_hits {
+                            let id=hit["id"].as_str().unwrap_or_default();
+                            if ui.link(id).clicked(){spawn_session_request(self.event_tx.clone(),self.server_url.clone(),id.to_string());}
+                            ui.label(RichText::new(hit["snippet"].as_str().unwrap_or_default()).small());
+                            ui.separator();
+                        }
+                    });
+                });
 
                 ui.collapsing(format!("工具（{}）", self.tools.len()), |ui| {
                     ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
@@ -783,6 +867,16 @@ impl DesktopApp {
                 });
 
                 ui.collapsing(format!("MCP 服务器（{}）", self.mcp_servers.len()), |ui| {
+                    if ui.button("重新连接 / 加载配置").clicked() {
+                        spawn_mcp_post(self.event_tx.clone(), self.server_url.clone(), "/v1/mcp/reload".into(), self.working_dir.clone(), false);
+                    }
+                    if let Some(login) = &self.mcp_login {
+                        if let Some(url) = login["url"].as_str() { ui.hyperlink_to("打开 MCP 授权页面", url); }
+                        if let Some(state) = login["state"].as_str() {
+                            if ui.button("检查 MCP 登录").clicked() { spawn_json_request(self.event_tx.clone(),format!("{}/v1/mcp/login/status?state={}",self.server_url.trim_end_matches('/'),state),UiEvent::McpLogin); }
+                        }
+                        if let Some(error) = login["error"].as_str() { ui.colored_label(egui::Color32::LIGHT_RED,error); }
+                    }
                     if self.mcp_servers.is_empty() {
                         ui.label(
                             RichText::new(
@@ -803,6 +897,11 @@ impl DesktopApp {
                             .map(|tools| tools.len())
                             .unwrap_or(0);
                         ui.label(RichText::new(format!("{name}（{count} 个工具）")).small());
+                        if let Some(error) = server["error"].as_str() { ui.colored_label(egui::Color32::LIGHT_RED,error); }
+                        if ui.small_button(format!("OAuth 登录 {name}")).clicked() {
+                            let encoded: String = url::form_urlencoded::byte_serialize(name.as_bytes()).collect();
+                            spawn_mcp_post(self.event_tx.clone(),self.server_url.clone(),format!("/v1/mcp/{encoded}/login"),self.working_dir.clone(),true);
+                        }
                     }
                 });
 
@@ -826,42 +925,9 @@ impl DesktopApp {
                         );
                     }
                 });
+                });
             });
         self.show_conn_panel = open;
-    }
-
-    fn render_plan_panel(&self, ctx: &egui::Context) {
-        let Some(task) = self.tasks.get(self.active_task) else {
-            return;
-        };
-        egui::SidePanel::right("plan-panel")
-            .default_width(260.0)
-            .resizable(true)
-            .show(ctx, |ui| {
-                ui.heading("执行计划");
-                ui.add_space(8.0);
-                if task.plan.is_empty() {
-                    ui.label(RichText::new("发送任务后，这里会显示 Agent 的计划。").color(MUTED));
-                } else {
-                    for (index, step) in task.plan.iter().enumerate() {
-                        Frame::new()
-                            .fill(PANEL)
-                            .corner_radius(8.0)
-                            .inner_margin(8.0)
-                            .show(ui, |ui| {
-                                ui.label(
-                                    RichText::new(format!("{}  {}", index + 1, step)).color(ACCENT),
-                                );
-                            });
-                        ui.add_space(6.0);
-                    }
-                }
-                if let Some(reflection) = &task.reflection {
-                    ui.separator();
-                    ui.label(RichText::new("反思").strong());
-                    ui.label(RichText::new(reflection).color(MUTED));
-                }
-            });
     }
 
     fn render_parallel(&mut self, ui: &mut Ui) {
@@ -928,37 +994,50 @@ impl DesktopApp {
 
 impl eframe::App for DesktopApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        for task in &mut self.tasks {
+        #[cfg(feature = "ui-snapshots")]
+        if std::env::var_os("WONDERLAND_SNAPSHOT").is_some() {
+            return;
+        }
+        let mut tasks = self.tasks.clone();
+        for task in &mut tasks {
             task.running = false;
         }
-        eframe::set_value(storage, "tasks", &self.tasks);
+        eframe::set_value(storage, "tasks", &tasks);
         eframe::set_value(storage, "server_url", &self.server_url);
         eframe::set_value(storage, "user_id", &self.user_id);
+        eframe::set_value(storage, "selected_model", &self.selected_model);
+        eframe::set_value(storage, "reasoning_effort", &self.reasoning_effort);
+        eframe::set_value(storage, "working_dir", &self.working_dir);
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events();
+        #[cfg(feature = "ui-snapshots")]
+        self.render_snapshot(ctx);
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
 
         egui::TopBottomPanel::top("top-bar")
             .frame(
                 Frame::new()
                     .fill(BG)
-                    .inner_margin(egui::Margin::symmetric(18, 14)),
+                    .inner_margin(egui::Margin::symmetric(24, 12)),
             )
             .show(ctx, |ui| self.render_header(ui));
-        egui::SidePanel::left("task-list")
-            .default_width(245.0)
-            .resizable(true)
-            .frame(Frame::new().fill(PANEL).inner_margin(14.0))
-            .show(ctx, |ui| self.render_task_list(ui));
-
-        if self.view == ViewMode::Planning {
-            self.render_plan_panel(ctx);
+        // Give the conversation room when settings are open on a small screen.
+        if !self.show_conn_panel || ctx.screen_rect().width() >= 1180.0 {
+            egui::SidePanel::left("task-list")
+                .default_width(236.0)
+                .min_width(210.0)
+                .max_width(320.0)
+                .resizable(true)
+                .frame(Frame::new().fill(PANEL).inner_margin(16.0))
+                .show(ctx, |ui| self.render_task_list(ui));
         }
+
         self.render_connection_panel(ctx);
+        self.render_approval(ctx);
         egui::CentralPanel::default()
-            .frame(Frame::new().fill(BG).inner_margin(18.0))
+            .frame(Frame::new().fill(BG).inner_margin(24.0))
             .show(ctx, |ui| match self.view {
                 ViewMode::Planning => self.render_planning(ui),
                 ViewMode::Parallel => self.render_parallel(ui),
@@ -987,6 +1066,8 @@ impl Task {
             running: false,
             stream_text: String::new(),
             tool_log: Vec::new(),
+            reasoning: String::new(),
+            usage: Default::default(),
         }
     }
 }
@@ -996,7 +1077,8 @@ fn spawn_agent_request(
     server_url: String,
     task_id: String,
     request: AgentRequest,
-) {
+) -> tokio::sync::oneshot::Sender<()> {
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
     thread::spawn(move || {
         let runtime = match Runtime::new() {
             Ok(runtime) => runtime,
@@ -1008,11 +1090,14 @@ fn spawn_agent_request(
                 return;
             }
         };
+        let cancel_events = event_tx.clone();
+        let cancel_id = task_id.clone();
         runtime.block_on(async move {
+            let run=async move {
             use futures_util::StreamExt;
 
             let url = format!("{}/v1/agent/stream", server_url.trim_end_matches('/'));
-            let response = match Client::new().post(url).json(&request).send().await {
+            let response = match wonderland::connection::service_client().post(url).header("x-wonderland-interactive","true").json(&request).send().await {
                 Ok(response) => response,
                 Err(error) => {
                     let _ = event_tx.send(UiEvent::Failed {
@@ -1067,6 +1152,7 @@ fn spawn_agent_request(
                                     .to_string()
                             };
                             match kind {
+                                "permission_request" => {let mut prompt=event.clone();prompt["task_id"]=serde_json::json!(task_id);let _=event_tx.send(UiEvent::Approval(prompt));}
                                 "text_delta" => {
                                     let _ = event_tx.send(UiEvent::Delta {
                                         task_id: task_id.clone(),
@@ -1144,8 +1230,14 @@ fn spawn_agent_request(
                 },
             };
             let _ = event_tx.send(event);
+            };
+            tokio::select! {
+                _=run=>{},
+                _=cancel_rx=>{let _=cancel_events.send(UiEvent::Failed{task_id:cancel_id,message:"已取消当前任务".into()});}
+            }
         });
     });
+    cancel_tx
 }
 
 /// 读取 /health：provider 名称与可用 wire 协议。
@@ -1167,6 +1259,67 @@ fn spawn_tools_request(event_tx: mpsc::Sender<UiEvent>, server_url: String) {
 }
 
 /// 读取 /v1/mcp/servers。
+fn spawn_session_request(tx: mpsc::Sender<UiEvent>, server: String, id: String) {
+    thread::spawn(move || {
+        if let Ok(runtime) = Runtime::new() {
+            let result = runtime.block_on(async {
+                wonderland::connection::service_client()
+                    .get(format!(
+                        "{}/v1/sessions/{}",
+                        server.trim_end_matches('/'),
+                        url::form_urlencoded::byte_serialize(id.as_bytes()).collect::<String>()
+                    ))
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json::<wonderland::session::Session>()
+                    .await
+            });
+            let _ = tx.send(match result {
+                Ok(session) => UiEvent::SessionLoaded(session),
+                Err(e) => UiEvent::ApiFailed(e.to_string()),
+            });
+        }
+    });
+}
+
+fn spawn_mcp_post(
+    event_tx: mpsc::Sender<UiEvent>,
+    server_url: String,
+    path: String,
+    cwd: String,
+    login: bool,
+) {
+    thread::spawn(move || {
+        let result = Runtime::new()
+            .map_err(|e| e.to_string())
+            .and_then(|runtime| {
+                runtime.block_on(async {
+                    let response = wonderland::connection::service_client()
+                        .post(format!("{}{path}", server_url.trim_end_matches('/')))
+                        .json(&serde_json::json!({"cwd":cwd}))
+                        .send()
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let value: serde_json::Value =
+                        response.json().await.map_err(|e| e.to_string())?;
+                    if let Some(error) = value["error"].as_str() {
+                        return Err(error.to_string());
+                    }
+                    Ok(value)
+                })
+            });
+        let event = match result {
+            Ok(value) if login => UiEvent::McpLogin(value),
+            Ok(value) => {
+                UiEvent::McpLoaded(value["servers"].as_array().cloned().unwrap_or_default())
+            }
+            Err(error) => UiEvent::ApiFailed(error),
+        };
+        let _ = event_tx.send(event);
+    });
+}
+
 fn spawn_mcp_request(event_tx: mpsc::Sender<UiEvent>, server_url: String) {
     spawn_json_array_request(
         event_tx,
@@ -1182,7 +1335,7 @@ fn spawn_accounts_request(event_tx: mpsc::Sender<UiEvent>, server_url: String) {
             .map_err(|error| error.to_string())
             .and_then(|runtime| {
                 runtime.block_on(async move {
-                    Client::new()
+                    wonderland::connection::service_client()
                         .get(format!(
                             "{}/v1/providers/cliproxyapi/accounts",
                             server_url.trim_end_matches('/')
@@ -1215,7 +1368,7 @@ fn spawn_json_request(
             .map_err(|error| error.to_string())
             .and_then(|runtime| {
                 runtime.block_on(async move {
-                    Client::new()
+                    wonderland::connection::service_client()
                         .get(url)
                         .send()
                         .await
@@ -1245,7 +1398,7 @@ fn spawn_json_array_request(
             .map_err(|error| error.to_string())
             .and_then(|runtime| {
                 runtime.block_on(async move {
-                    Client::new()
+                    wonderland::connection::service_client()
                         .get(url)
                         .send()
                         .await
@@ -1271,7 +1424,7 @@ fn spawn_login_request(event_tx: mpsc::Sender<UiEvent>, server_url: String, prov
             .map_err(|error| error.to_string())
             .and_then(|runtime| {
                 runtime.block_on(async move {
-                    Client::new()
+                    wonderland::connection::service_client()
                         .post(format!(
                             "{}/v1/providers/cliproxyapi/login",
                             server_url.trim_end_matches('/')
@@ -1300,7 +1453,7 @@ fn spawn_login_status_request(event_tx: mpsc::Sender<UiEvent>, server_url: Strin
             .map_err(|error| error.to_string())
             .and_then(|runtime| {
                 runtime.block_on(async move {
-                    Client::new()
+                    wonderland::connection::service_client()
                         .get(format!(
                             "{}/v1/providers/cliproxyapi/login/status",
                             server_url.trim_end_matches('/')
@@ -1329,11 +1482,8 @@ fn spawn_models_request(event_tx: mpsc::Sender<UiEvent>, server_url: String) {
             .map_err(|error| error.to_string())
             .and_then(|runtime| {
                 runtime.block_on(async move {
-                    Client::new()
-                        .get(format!(
-                            "{}/v1/providers/cliproxyapi/models",
-                            server_url.trim_end_matches('/')
-                        ))
+                    wonderland::connection::service_client()
+                        .get(format!("{}/v1/models", server_url.trim_end_matches('/')))
                         .send()
                         .await
                         .map_err(|error| error.to_string())?
@@ -1357,7 +1507,7 @@ fn spawn_verify_request(event_tx: mpsc::Sender<UiEvent>, server_url: String, mod
             .map_err(|error| error.to_string())
             .and_then(|runtime| {
                 runtime.block_on(async move {
-                    Client::new()
+                    wonderland::connection::service_client()
                         .post(format!(
                             "{}/v1/providers/cliproxyapi/verify",
                             server_url.trim_end_matches('/')
@@ -1399,19 +1549,19 @@ fn chinese_font_definitions() -> egui::FontDefinitions {
     fonts.font_data.insert(
         "noto-sans-sc".to_owned(),
         Arc::new(egui::FontData::from_static(include_bytes!(
-            "../../assets/fonts/NotoSansSC-VF.ttf"
+            "../../assets/fonts/NotoSansSC-Regular.ttf"
         ))),
     );
     fonts
         .families
         .get_mut(&egui::FontFamily::Proportional)
         .expect("egui must provide the proportional font family")
-        .insert(0, "noto-sans-sc".to_owned());
+        .push("noto-sans-sc".to_owned());
     fonts
         .families
         .get_mut(&egui::FontFamily::Monospace)
         .expect("egui must provide the monospace font family")
-        .insert(0, "noto-sans-sc".to_owned());
+        .push("noto-sans-sc".to_owned());
     fonts
 }
 
@@ -1420,12 +1570,12 @@ fn friendly_api_error(message: &str) -> String {
     if normalized.contains("/v1/providers/cliproxyapi")
         && normalized.contains("503 service unavailable")
     {
-        return "CLIProxyAPI 尚未就绪。请关闭后重新打开 Wonderland 桌面版；若仍失败，请查看 %LOCALAPPDATA%\\WonderlandData\\launcher.log。".to_string();
+        return "CLIProxyAPI 尚未就绪。请关闭后重新打开 Wonderland 桌面版；若仍失败，请查看 %LOCALAPPDATA%\\WonderlandData\\wonderland.err.log。".to_string();
     }
     if normalized.contains("/v1/providers/cliproxyapi")
         && normalized.contains("500 internal server error")
     {
-        return "CLIProxyAPI 启动或本机连接失败。请查看 %LOCALAPPDATA%\\WonderlandData\\launcher.log。".to_string();
+        return "CLIProxyAPI 启动或本机连接失败。请查看 %LOCALAPPDATA%\\WonderlandData\\wonderland.err.log。".to_string();
     }
     if normalized.contains("connection refused") || normalized.contains("error sending request") {
         return "无法连接 Wonderland 后端。请关闭后重新打开桌面版。".to_string();
@@ -1434,14 +1584,23 @@ fn friendly_api_error(message: &str) -> String {
 }
 
 fn main() -> eframe::Result {
+    let initial_size = Vec2::new(1280.0, 820.0);
+    #[cfg(feature = "ui-snapshots")]
+    let initial_size = if std::env::var_os("WONDERLAND_SNAPSHOT_COMPACT").is_some() {
+        Vec2::new(940.0, 620.0)
+    } else {
+        initial_size
+    };
     let icon = egui::IconData {
         rgba: include_bytes!("../../assets/icons/icon.rgba").to_vec(),
         width: 256,
         height: 256,
     };
     let options = eframe::NativeOptions {
+        persist_window: !(cfg!(feature = "ui-snapshots")
+            && std::env::var_os("WONDERLAND_SNAPSHOT").is_some()),
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size(Vec2::new(1280.0, 820.0))
+            .with_inner_size(initial_size)
             .with_min_inner_size(Vec2::new(940.0, 620.0))
             .with_icon(Arc::new(icon)),
         ..Default::default()

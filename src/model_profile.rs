@@ -55,6 +55,8 @@ pub enum ReasoningStyle {
     Effort,
     /// Anthropic 的 `thinking: {type: "enabled", budget_tokens}`。
     ThinkingBudget,
+    /// DeepSeek / Kimi 的 thinking.type 开关。
+    ThinkingToggle,
 }
 
 /// 提示缓存策略。
@@ -178,6 +180,7 @@ pub const BUILTIN_PROFILES: &[(&str, ModelProfile)] = &[
         "deepseek-reasoner",
         ModelProfile {
             name: "deepseek-reasoner",
+            reasoning: ReasoningStyle::ThinkingToggle,
             context_window: 131_072,
             max_output_tokens: 65_536,
             ..DEFAULT_PROFILE
@@ -187,6 +190,7 @@ pub const BUILTIN_PROFILES: &[(&str, ModelProfile)] = &[
         "deepseek",
         ModelProfile {
             name: "deepseek-chat",
+            reasoning: ReasoningStyle::ThinkingToggle,
             context_window: 131_072,
             ..DEFAULT_PROFILE
         },
@@ -195,6 +199,7 @@ pub const BUILTIN_PROFILES: &[(&str, ModelProfile)] = &[
         "kimi",
         ModelProfile {
             name: "kimi",
+            reasoning: ReasoningStyle::ThinkingToggle,
             context_window: 262_144,
             max_output_tokens: 16_384,
             ..DEFAULT_PROFILE
@@ -204,6 +209,7 @@ pub const BUILTIN_PROFILES: &[(&str, ModelProfile)] = &[
         "moonshot",
         ModelProfile {
             name: "kimi",
+            reasoning: ReasoningStyle::ThinkingToggle,
             context_window: 262_144,
             max_output_tokens: 16_384,
             ..DEFAULT_PROFILE
@@ -259,6 +265,19 @@ impl ModelProfile {
             tracing::warn!(profile = %force, "unknown model profile override, falling back to model id");
         }
         let needle = model.trim().to_ascii_lowercase();
+        if needle.contains("kimi-k3") || needle.contains("kimi-k2.8") {
+            return ModelProfile {
+                name: "kimi",
+                context_window: if needle.contains("256k") {
+                    262_144
+                } else {
+                    1_048_576
+                },
+                max_output_tokens: 65_536,
+                reasoning: ReasoningStyle::ThinkingToggle,
+                ..DEFAULT_PROFILE
+            };
+        }
         if !needle.is_empty() {
             if let Some((_, profile)) = BUILTIN_PROFILES
                 .iter()
@@ -267,6 +286,7 @@ impl ModelProfile {
                 return *profile;
             }
         }
+
         DEFAULT_PROFILE
     }
 
@@ -315,12 +335,16 @@ impl ModelProfile {
                     ));
                 }
             }
-            ReasoningStyle::ThinkingBudget => {
+            ReasoningStyle::ThinkingBudget
+                if reasoning_effort.is_some_and(|e| !matches!(e, "off" | "none")) =>
+            {
                 section.push_str(
                     "- Extended thinking is enabled: plan inside the thinking block, then act with tools.\n",
                 );
             }
-            ReasoningStyle::None => {}
+            ReasoningStyle::None
+            | ReasoningStyle::ThinkingToggle
+            | ReasoningStyle::ThinkingBudget => {}
         }
         section
     }
@@ -335,7 +359,9 @@ pub fn reasoning_effort_for(profile: &ModelProfile, configured: Option<&str>) ->
     match profile.reasoning {
         ReasoningStyle::None => None,
         ReasoningStyle::Effort => Some(configured.unwrap_or("medium").to_string()),
-        ReasoningStyle::ThinkingBudget => configured.map(str::to_string),
+        ReasoningStyle::ThinkingBudget | ReasoningStyle::ThinkingToggle => {
+            configured.map(str::to_string)
+        }
     }
 }
 
@@ -353,10 +379,81 @@ pub fn protocol_for(model: &str) -> WireProtocol {
 pub fn configured_reasoning_effort() -> Option<String> {
     let value = std::env::var("AGENT_REASONING_EFFORT").ok()?;
     let value = value.trim().to_ascii_lowercase();
-    if value.is_empty() || value == "none" || value == "off" {
+    if value.is_empty() {
         return None;
     }
     Some(value)
+}
+
+/// Conservative wire capabilities; a custom deployment may expose fewer levels.
+pub fn supported_reasoning_efforts(model: &str) -> &'static [&'static str] {
+    let m = model.to_ascii_lowercase();
+    if m.contains("deepseek") {
+        return &["off", "on", "low", "high", "max"];
+    }
+    if m.contains("kimi-k3") || m.contains("kimi-k2.8") {
+        return &["off", "low", "high", "max"];
+    }
+    if m.contains("kimi-k2.7-code") {
+        return &["low", "high"];
+    }
+    if m.contains("kimi-k2.6") {
+        return &["off", "low", "high"];
+    }
+    if m.contains("kimi") || m.contains("moonshot") {
+        return if m.contains("thinking") {
+            &["on"]
+        } else {
+            &["off", "on"]
+        };
+    }
+    if m.contains("claude-opus-4-6") {
+        return &["off", "low", "medium", "high", "max"];
+    }
+    if m.contains("claude") {
+        return &["off", "low", "medium", "high"];
+    }
+    if m.contains("gpt-5.6") {
+        return if m.contains("luna") {
+            &["low", "medium", "high", "xhigh", "max"]
+        } else {
+            &["low", "medium", "high", "xhigh", "max", "ultra"]
+        };
+    }
+    if m.contains("gpt-5.2")
+        || m.contains("gpt-5.3")
+        || m.contains("gpt-5.4")
+        || m.contains("gpt-5.5")
+    {
+        return &["low", "medium", "high", "xhigh"];
+    }
+    if m.contains("codex") || m.starts_with("o3") || m.starts_with("o4") {
+        return &["low", "medium", "high"];
+    }
+    if m.contains("gpt-5.1") {
+        return &["off", "low", "medium", "high"];
+    }
+    if m.contains("gpt-5") {
+        return &["minimal", "low", "medium", "high"];
+    }
+    if ModelProfile::resolve(model).supports_reasoning() {
+        &["low", "medium", "high"]
+    } else {
+        &[]
+    }
+}
+
+pub fn validate_reasoning_effort(model: &str, effort: Option<&str>) -> anyhow::Result<()> {
+    if let Some(effort) = effort.filter(|s| !s.is_empty() && *s != "auto") {
+        let effort = if effort == "none" { "off" } else { effort };
+        let levels = supported_reasoning_efforts(model);
+        anyhow::ensure!(
+            levels.contains(&effort),
+            "model {model} does not support reasoning '{effort}'; supported: {}",
+            levels.join(", ")
+        );
+    }
+    Ok(())
 }
 
 /// Anthropic `thinking.budget_tokens`：显式配置优先，其次按 effort 档位换算。
@@ -500,7 +597,10 @@ mod tests {
         );
 
         let deepseek = ModelProfile::resolve("deepseek-chat");
-        assert_eq!(reasoning_effort_for(&deepseek, Some("high")), None);
+        assert_eq!(
+            reasoning_effort_for(&deepseek, Some("high")),
+            Some("high".into())
+        );
         assert_eq!(reasoning_effort_for(&deepseek, Some("  ")), None);
     }
 
@@ -512,7 +612,7 @@ mod tests {
 
         let edit = ModelProfile::resolve("claude-sonnet-4-5").tool_guidance(None);
         assert!(edit.contains("FileEdit"));
-        assert!(edit.contains("Extended thinking"));
+        assert!(!edit.contains("Extended thinking"));
 
         // 不支持推理开关的档案不注入档位说明。
         let plain = ModelProfile::resolve("deepseek-chat").tool_guidance(Some("high"));

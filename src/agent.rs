@@ -42,7 +42,7 @@ const COMPACT_SYSTEM_PROMPT: &str =
 
 #[derive(Clone)]
 pub struct AgentRuntime {
-    pub provider: Arc<dyn ModelProvider>,
+    pub provider: Arc<crate::connection::LiveProvider>,
     pub memory: MemoryStore,
     pub directory: AgentDirectory,
     pub planner: Arc<dyn Planner>,
@@ -51,6 +51,7 @@ pub struct AgentRuntime {
     pub skills: SkillCatalog,
     pub max_steps: usize,
     pub tools: ToolRegistry,
+    pub mcp_status: Arc<tokio::sync::RwLock<Vec<serde_json::Value>>>,
     pub sessions: SessionStore,
     /// 单次 run 内允许的最大工具调用轮数。
     pub max_turns: usize,
@@ -63,6 +64,11 @@ pub struct AgentRuntime {
     /// `AGENT_REASONING_EFFORT` 配置的推理档位；是否真正下发给
     /// provider 由模型能力档案决定。
     pub reasoning_effort: Option<String>,
+    session_locks: Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>,
+        >,
+    >,
 }
 
 impl AgentRuntime {
@@ -75,7 +81,9 @@ impl AgentRuntime {
         sessions: SessionStore,
     ) -> Self {
         Self {
-            provider,
+            provider: Arc::new(crate::connection::LiveProvider::new(provider)),
+            mcp_status: Arc::default(),
+            session_locks: Arc::default(),
             memory,
             directory: AgentDirectory::new(),
             planner: Arc::new(HeuristicPlanner),
@@ -181,7 +189,28 @@ impl AgentRuntime {
         handler: Arc<dyn PermissionHandler>,
         sink: Option<StreamSink>,
     ) -> Result<AgentResponse> {
-        let result = self.run_inner(request, handler, sink.clone()).await;
+        let session_lock = {
+            let mut locks = self.session_locks.lock().unwrap_or_else(|e| e.into_inner());
+            locks.retain(|_, value| value.strong_count() > 0);
+            match locks
+                .get(&request.session_id)
+                .and_then(std::sync::Weak::upgrade)
+            {
+                Some(lock) => lock,
+                None => {
+                    let lock = Arc::new(tokio::sync::Mutex::new(()));
+                    locks.insert(request.session_id.clone(), Arc::downgrade(&lock));
+                    lock
+                }
+            }
+        };
+        let _session_guard = session_lock.lock().await;
+        // A settings change applies to new runs only; never change provider mid tool-loop.
+        let mut runtime = self.clone();
+        runtime.provider = Arc::new(crate::connection::LiveProvider::new(
+            self.provider.snapshot(),
+        ));
+        let result = runtime.run_inner(request, handler, sink.clone()).await;
         match &result {
             Ok(response) => emit(
                 sink.as_ref(),
@@ -231,8 +260,11 @@ impl AgentRuntime {
             .reasoning_effort
             .as_deref()
             .or(self.reasoning_effort.as_deref());
-        let reasoning_effort =
-            crate::model_profile::reasoning_effort_for(&profile, configured_effort);
+        crate::model_profile::validate_reasoning_effort(&model, configured_effort)?;
+        let reasoning_effort = crate::model_profile::reasoning_effort_for(
+            &profile,
+            configured_effort.filter(|s| *s != "auto"),
+        );
         info!(
             model = %model,
             profile = profile.name,
@@ -549,6 +581,31 @@ impl AgentRuntime {
         // Bash 可能执行任意副作用，一律视为破坏性；文件类工具用 is_read_only 区分。
         let is_destructive = name == "Bash";
         let target_paths = tool.target_paths(&input, tool_ctx);
+        let mut effective_rules = rules.to_vec();
+        // Workspace reads are routine; explicit deny/ask rules still win.
+        let read_paths = if matches!(name, "Glob" | "Grep") {
+            vec![tool_ctx.resolve_path(input["path"].as_str().unwrap_or("."))]
+        } else {
+            target_paths.clone()
+        };
+        let workspace = tool_ctx.working_dir.canonicalize().ok();
+        let local_read = is_read_only
+            && matches!(name, "FileRead" | "Glob" | "Grep")
+            && !read_paths.is_empty()
+            && read_paths.iter().all(|p| {
+                workspace
+                    .as_ref()
+                    .is_some_and(|root| p.canonicalize().is_ok_and(|path| path.starts_with(root)))
+            });
+        if local_read {
+            effective_rules.push(PermissionRule::new(
+                name,
+                None,
+                permissions::RuleAction::Allow,
+                permissions::RuleSource::Session,
+            ));
+        }
+        let rules = effective_rules.as_slice();
         // rule_contents 为空时（非 Bash 工具）以整工具粒度评估一次。
         let mut rule_contents = tool.rule_contents(&input);
         if rule_contents.is_empty() {
@@ -585,6 +642,7 @@ impl AgentRuntime {
             PermissionDecision::Deny { reason } => return ToolOutput::err(reason),
             PermissionDecision::Ask => {
                 let prompt = PermissionPrompt {
+                    details: input.clone(),
                     tool_name: name.to_string(),
                     description: tool.description().to_string(),
                     rule_content: {
@@ -816,7 +874,7 @@ fn render_message_for_summary(message: &ChatMessage) -> String {
                 }
             }
             // 压缩摘要不携带思维链，避免把推理内容当成事实回灌给模型。
-            ContentBlock::Thinking { .. } => String::new(),
+            ContentBlock::Thinking { .. } | ContentBlock::ProviderReasoning { .. } => String::new(),
         })
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>()
@@ -999,7 +1057,9 @@ mod tests {
                         pending.remove(position);
                         completed.push(tool_use_id.clone());
                     }
-                    ContentBlock::Text { .. } | ContentBlock::Thinking { .. } => {}
+                    ContentBlock::Text { .. }
+                    | ContentBlock::Thinking { .. }
+                    | ContentBlock::ProviderReasoning { .. } => {}
                 }
             }
         }
@@ -1092,6 +1152,43 @@ mod tests {
             .iter()
             .flat_map(|message| &message.content)
             .any(|block| matches!(block, ContentBlock::ToolResult { .. })));
+    }
+
+    #[tokio::test]
+    async fn workspace_read_defaults_allow_but_explicit_deny_wins() {
+        for denied in [false, true] {
+            let provider = Arc::new(MockProvider::new(vec![
+                tool_use_response("read", "FileRead", json!({"file_path":"note.txt"})),
+                text_response("done"),
+            ]));
+            let (runtime, cwd) = test_runtime(provider.clone()).await;
+            std::fs::write(cwd.path().join("note.txt"), "workspace-body").unwrap();
+            if denied {
+                std::fs::write(
+                    cwd.path().join(".claude/settings.json"),
+                    r#"{"permissions":{"deny":["FileRead"]}}"#,
+                )
+                .unwrap();
+            }
+            runtime
+                .run(request("local-read", cwd.path(), None, "read file"))
+                .await
+                .unwrap();
+            let requests = provider.requests();
+            let results: Vec<_> = requests[1]
+                .messages
+                .iter()
+                .flat_map(|m| &m.content)
+                .filter_map(|b| match b {
+                    ContentBlock::ToolResult {
+                        content, is_error, ..
+                    } => Some((content, *is_error)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(results[0].1, denied);
+            assert_eq!(results[0].0.contains("workspace-body"), !denied);
+        }
     }
 
     #[tokio::test]

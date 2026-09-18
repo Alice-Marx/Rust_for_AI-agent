@@ -306,6 +306,8 @@ pub fn load_rules(cwd: &Path) -> Vec<PermissionRule> {
 /// 展示给用户的授权请求。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionPrompt {
+    #[serde(default)]
+    pub details: serde_json::Value,
     pub tool_name: String,
     pub description: String,
     pub rule_content: Option<String>,
@@ -589,6 +591,7 @@ mod tests {
     async fn deny_all_handler_always_refuses() {
         let handler = DenyAllHandler;
         let prompt = PermissionPrompt {
+            details: serde_json::json!({}),
             tool_name: "Bash".to_string(),
             description: "run ls".to_string(),
             rule_content: Some("ls".to_string()),

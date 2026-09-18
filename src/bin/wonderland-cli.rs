@@ -113,6 +113,12 @@ enum Command {
     Tools,
     /// 列出已连接的 MCP 服务器及其工具
     Mcp,
+    /// OAuth 登录配置中的 MCP 服务器，然后自动重新连接
+    McpLogin { name: String },
+    /// 重新加载当前目录的 MCP 配置
+    McpReload,
+    /// 查看模型能力档案
+    Profile,
     /// 列出当前项目的自定义斜杠命令
     Commands,
     /// 列出已登录的订阅账号
@@ -184,7 +190,7 @@ struct VerifyResponse {
 impl AgentApi {
     fn new(server: String) -> Self {
         Self {
-            client: Client::new(),
+            client: wonderland::connection::service_client(),
             base_url: server.trim_end_matches('/').to_string(),
         }
     }
@@ -210,6 +216,14 @@ impl AgentApi {
         let response = self
             .client
             .post(self.url("/v1/agent/stream"))
+            .header("x-wonderland-interactive", {
+                use std::io::IsTerminal;
+                if io::stdin().is_terminal() {
+                    "true"
+                } else {
+                    "false"
+                }
+            })
             .json(&request)
             .send()
             .await
@@ -245,6 +259,19 @@ impl AgentApi {
                             .and_then(|value| value.as_str())
                             .unwrap_or_default();
                         match kind {
+                            "permission_request" => {
+                                eprintln!(
+                                    "\n{} 请求执行：\n{}",
+                                    event["tool"],
+                                    serde_json::to_string_pretty(&event["input"])?
+                                );
+                                eprint!("允许这一次？[y/N] ");
+                                io::stderr().flush()?;
+                                let mut answer = String::new();
+                                io::stdin().read_line(&mut answer)?;
+                                let id = event["id"].as_str().context("missing approval ID")?;
+                                self.client.post(self.url(&format!("/v1/permissions/{id}"))).json(&serde_json::json!({"allow":matches!(answer.trim(),"y"|"Y"|"yes")})).send().await?.error_for_status()?;
+                            }
                             "text_delta" => {
                                 print!(
                                     "{}",
@@ -315,6 +342,9 @@ impl AgentApi {
             println!();
         }
         if let Some(response) = final_response {
+            if !printed_text {
+                println!("{}", response.output);
+            }
             return Ok(response);
         }
         if let Some(message) = failure {
@@ -337,7 +367,7 @@ impl AgentApi {
 
     async fn models(&self) -> Result<Vec<CliProxyModel>> {
         self.client
-            .get(self.url("/v1/providers/cliproxyapi/models"))
+            .get(self.url("/v1/models"))
             .send()
             .await
             .context("无法连接 CLIProxyAPI 模型接口")?
@@ -533,7 +563,7 @@ async fn main() -> Result<()> {
             } else {
                 api.run(request).await?
             };
-            print_response(&response);
+            print_response(&response, !settings.stream);
         }
         Command::Chat { prompt: None } => {
             interactive_chat(
@@ -558,7 +588,7 @@ async fn main() -> Result<()> {
             } else {
                 api.run(request).await?
             };
-            print_response(&response);
+            print_response(&response, !settings.stream);
         }
         Command::Health => {
             let health = api.health().await?;
@@ -621,6 +651,72 @@ async fn main() -> Result<()> {
                     },
                 );
             }
+        }
+        Command::Profile => {
+            let value: serde_json::Value = api
+                .client
+                .get(api.url("/v1/models/profile"))
+                .query(&[("model", cli.model.as_deref().unwrap_or(""))])
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
+        Command::McpReload => {
+            let value: serde_json::Value = api
+                .client
+                .post(api.url("/v1/mcp/reload"))
+                .json(&serde_json::json!({"cwd":settings.cwd}))
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
+        Command::McpLogin { name } => {
+            let encoded: String = url::form_urlencoded::byte_serialize(name.as_bytes()).collect();
+            let value: serde_json::Value = api
+                .client
+                .post(api.url(&format!("/v1/mcp/{encoded}/login")))
+                .json(&serde_json::json!({"cwd":settings.cwd}))
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!("{}", value["url"].as_str().unwrap_or_default());
+            let state = value["state"]
+                .as_str()
+                .context("MCP login returned no state")?;
+            for _ in 0..150 {
+                sleep(Duration::from_secs(2)).await;
+                let status: serde_json::Value = api
+                    .client
+                    .get(api.url("/v1/mcp/login/status"))
+                    .query(&[("state", state)])
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json()
+                    .await?;
+                if status["status"] == "error" {
+                    anyhow::bail!("{}", status["error"]);
+                }
+                if status["status"] == "ok" {
+                    api.client
+                        .post(api.url("/v1/mcp/reload"))
+                        .json(&serde_json::json!({"cwd":settings.cwd}))
+                        .send()
+                        .await?
+                        .error_for_status()?;
+                    println!("MCP 登录成功，已重新连接");
+                    return Ok(());
+                }
+            }
+            anyhow::bail!("MCP 登录超时");
         }
         Command::Mcp => {
             let servers = api.mcp_servers().await?;
@@ -936,8 +1032,10 @@ async fn resume_session(api: &AgentApi, user_id: &str) -> Result<String> {
     }
 }
 
-fn print_response(response: &AgentResponse) {
-    println!("{}", response.output);
+fn print_response(response: &AgentResponse, include_output: bool) {
+    if include_output {
+        println!("{}", response.output);
+    }
     if !response.todos.is_empty() {
         println!("\ntodos:");
         for (index, todo) in response.todos.iter().enumerate() {

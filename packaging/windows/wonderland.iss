@@ -6,7 +6,7 @@
 #define MyAppURL "https://github.com/Alice-Marx/Rust_for_AI-agent"
 #define MyAppExeName "wonderland-desktop.exe"
 #ifndef MyAppVersion
-  #define MyAppVersion "0.5.0"
+  #define MyAppVersion "0.6.0"
 #endif
 #define BuildRoot "..\..\dist\staging\windows-x64"
 
@@ -30,6 +30,8 @@ SolidCompression=yes
 SetupIconFile=..\..\assets\icons\icon.ico
 WizardStyle=modern
 ChangesEnvironment=yes
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayName={#MyAppName}
 UninstallDisplayIcon={app}\{#MyAppExeName}
 VersionInfoVersion={#MyAppVersion}
@@ -52,16 +54,13 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 Source: "{#BuildRoot}\wonderland.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BuildRoot}\wonderland-desktop.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BuildRoot}\wonderland-cli.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BuildRoot}\*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#BuildRoot}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BuildRoot}\docs\*"; DestDir: "{app}\docs"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#BuildRoot}\cliproxyapi\*"; DestDir: "{app}\cliproxyapi"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "Start-Wonderland.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\README.md"; DestDir: "{app}"; DestName: "README.md"; Flags: ignoreversion
 Source: "{#BuildRoot}\THIRD-PARTY-NOTICES\*"; DestDir: "{app}\THIRD-PARTY-NOTICES"; Flags: ignoreversion recursesubdirs createallsubdirs
-
-[InstallDelete]
-; Remove old program directories after migration. Persistent user data stays in
-; {localappdata}\WonderlandData (or migrated from RustAIAgentData) and is never removed.
-Type: filesandordirs; Name: "{localappdata}\Rust AI Agent"
-Type: filesandordirs; Name: "{localappdata}\Programs\Rust AI Agent"
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Start-Wonderland.ps1"""; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"

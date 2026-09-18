@@ -8,7 +8,7 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
     },
-    routing::{get, post},
+    routing::{any, get, post},
     Json, Router,
 };
 use futures_util::stream::Stream;
@@ -22,6 +22,7 @@ use crate::{
     expenses::ExpenseStore,
     memory::MemoryKind,
     model::{AgentRequest, MemoryWriteRequest, SandboxRequest},
+    provider::ModelProvider,
     skills::SkillSummary,
 };
 
@@ -30,6 +31,68 @@ pub struct AppState {
     pub runtime: Arc<AgentRuntime>,
     pub expenses: ExpenseStore,
     pub cliproxy: Option<Arc<CliProxyApiClient>>,
+}
+
+impl AppState {
+    fn subscription_client(&self) -> Option<Arc<CliProxyApiClient>> {
+        self.cliproxy.clone().or_else(|| {
+            crate::provider::active_subscription_endpoint().map(|e| {
+                Arc::new(CliProxyApiClient::new(
+                    e.base_url.clone(),
+                    Some(e.api_key.clone()),
+                    e.management_url.clone(),
+                    Some(e.management_key.clone()),
+                ))
+            })
+        })
+    }
+}
+
+async fn list_models(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<crate::cliproxy::CliProxyModel>>, ApiError> {
+    Ok(Json(state.runtime.provider.list_models().await?))
+}
+
+async fn get_connection(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let directory = state
+        .runtime
+        .sessions
+        .dir()
+        .parent()
+        .unwrap_or(std::path::Path::new("."));
+    Ok(Json(
+        match crate::connection::ConnectionSettings::load(directory)? {
+            Some(settings) => settings.public(),
+            None => {
+                serde_json::json!({"provider":std::env::var("AGENT_PROVIDER").unwrap_or_else(|_|state.runtime.provider.name().into()),"model":state.runtime.provider.default_model(),"base_url":"","has_api_key":false})
+            }
+        },
+    ))
+}
+async fn set_connection(
+    State(state): State<AppState>,
+    Json(mut settings): Json<crate::connection::ConnectionSettings>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let directory = state
+        .runtime
+        .sessions
+        .dir()
+        .parent()
+        .unwrap_or(std::path::Path::new("."));
+    if settings.api_key.is_empty() {
+        if let Some(previous) = crate::connection::ConnectionSettings::load(directory)? {
+            if previous.provider == settings.provider && previous.base_url == settings.base_url {
+                settings.api_key = previous.api_key;
+            }
+        }
+    }
+    let provider = settings.build().await?;
+    settings.save(directory)?;
+    state.runtime.provider.replace(provider);
+    Ok(Json(settings.public()))
 }
 
 pub fn router(state: AppState) -> Router {
@@ -47,6 +110,17 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/skills", get(list_skills))
         .route("/v1/tools", get(list_tools))
         .route("/v1/mcp/servers", get(list_mcp_servers))
+        .route("/v1/mcp/reload", post(reload_mcp))
+        .route("/v1/mcp/{name}/login", post(mcp_login).delete(mcp_logout))
+        .route("/v1/mcp/login/status", get(mcp_login_status))
+        .route("/v1/models/profile", get(model_profile))
+        .route("/v1/models", get(list_models))
+        .route("/v1/connection", get(get_connection).put(set_connection))
+        .route("/v1/permissions/{id}", post(answer_permission))
+        .route(
+            "/v1/providers/cliproxyapi/management/{*path}",
+            any(proxy_management),
+        )
         .route("/v1/skills/reload", post(reload_skills))
         .route(
             "/v1/providers/cliproxyapi/models",
@@ -72,6 +146,76 @@ pub fn router(state: AppState) -> Router {
         .nest("/expenses", expense_router())
         .with_state(state)
         .layer(TraceLayer::new_for_http())
+        .layer(middleware::from_fn(protect_local_api))
+}
+
+async fn protect_local_api(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<Response, StatusCode> {
+    if let Some(origin) = request
+        .headers()
+        .get("origin")
+        .and_then(|h| h.to_str().ok())
+    {
+        let expected = request
+            .headers()
+            .get("host")
+            .and_then(|h| h.to_str().ok())
+            .unwrap_or("");
+        if origin != format!("http://{expected}") && origin != format!("https://{expected}") {
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
+    if request.uri().path() != "/health" {
+        if let Ok(token) = std::env::var("WONDERLAND_SERVER_TOKEN") {
+            if !token.is_empty()
+                && request
+                    .headers()
+                    .get("authorization")
+                    .and_then(|h| h.to_str().ok())
+                    != Some(format!("Bearer {token}").as_str())
+            {
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+        }
+    }
+    Ok(next.run(request).await)
+}
+
+async fn proxy_management(
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+    request: axum::extract::Request,
+) -> Result<Response, ApiError> {
+    let client = state
+        .subscription_client()
+        .ok_or_else(|| ApiError::service_unavailable(cliproxy_not_ready_message()))?;
+    let (parts, body) = request.into_parts();
+    let bytes = axum::body::to_bytes(body, 16 * 1024 * 1024)
+        .await
+        .map_err(anyhow::Error::from)?;
+    let response = client
+        .management_api(
+            parts.method,
+            &path,
+            parts.uri.query(),
+            parts
+                .headers
+                .get("content-type")
+                .and_then(|h| h.to_str().ok()),
+            bytes.to_vec(),
+        )
+        .await?;
+    let status = response.status();
+    let content_type = response.headers().get("content-type").cloned();
+    let mut builder = Response::builder().status(status);
+    if let Some(content_type) = content_type {
+        builder = builder.header("content-type", content_type);
+    }
+    Ok(builder
+        .body(axum::body::Body::from_stream(response.bytes_stream()))
+        .map_err(anyhow::Error::from)?)
 }
 
 fn expense_router() -> Router<AppState> {
@@ -121,12 +265,25 @@ enum SseFrame {
     },
 }
 
+async fn answer_permission(
+    Path(id): Path<String>,
+    Json(answer): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !crate::approval::answer(&id, answer["allow"] == true) {
+        return Err(ApiError::not_found(
+            "permission request expired or already answered",
+        ));
+    }
+    Ok(Json(serde_json::json!({"status":"ok"})))
+}
+
 /// 流式运行 Agent：以 SSE 推送增量事件，最后一条响应帧带上完整结果。
 ///
 /// 事件形状见 provider::StreamEvent，例如
 /// data: {"type":"text_delta","text":"..."}
 async fn run_agent_stream(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(request): Json<AgentRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
     let (sink, receiver) = tokio::sync::mpsc::unbounded_channel::<crate::provider::StreamEvent>();
@@ -143,13 +300,19 @@ async fn run_agent_stream(
                 }
             }
         });
-        let outcome = runtime
-            .run_with_events(
-                request,
-                Arc::new(crate::permissions::DenyAllHandler),
-                Some(sink),
-            )
-            .await;
+        let handler: Arc<dyn crate::permissions::PermissionHandler> = if headers
+            .get("x-wonderland-interactive")
+            .is_some_and(|h| h == "true")
+        {
+            Arc::new(crate::approval::InteractiveHandler(sink.clone()))
+        } else {
+            Arc::new(crate::permissions::DenyAllHandler)
+        };
+        let run = runtime.run_with_events(request, handler, Some(sink));
+        let outcome = tokio::select! {
+            result = run => result,
+            _ = frames.closed() => { forward.abort(); return; }
+        };
         let _ = forward.await;
         match outcome {
             Ok(response) => {
@@ -175,6 +338,7 @@ async fn run_agent_stream(
 
 #[derive(Serialize)]
 struct HealthResponse {
+    model: Option<String>,
     status: &'static str,
     agents: Vec<String>,
     sandbox_enabled: bool,
@@ -189,6 +353,7 @@ struct HealthResponse {
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
+        model: state.runtime.provider.default_model(),
         status: "ok",
         agents: state.runtime.directory.names().await,
         sandbox_enabled: state.runtime.sandbox.policy().enabled,
@@ -201,7 +366,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
             .map(str::to_string)
             .collect(),
         provider: state.runtime.provider.name(),
-        cliproxyapi_configured: state.cliproxy.is_some(),
+        cliproxyapi_configured: state.subscription_client().is_some(),
         skills: state.runtime.skills.summaries().await.len(),
     })
 }
@@ -216,7 +381,7 @@ async fn list_cliproxy_accounts(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<crate::cliproxy::CliProxyAccount>>, ApiError> {
     let client = state
-        .cliproxy
+        .subscription_client()
         .clone()
         .ok_or_else(|| ApiError::service_unavailable("CLIProxyAPI is not configured"))?;
     Ok(Json(client.list_accounts().await?))
@@ -231,7 +396,7 @@ async fn refresh_cliproxy_accounts(
     State(state): State<AppState>,
 ) -> Result<Json<RefreshAccountsResponse>, ApiError> {
     let client = state
-        .cliproxy
+        .subscription_client()
         .clone()
         .ok_or_else(|| ApiError::service_unavailable("CLIProxyAPI is not configured"))?;
     Ok(Json(RefreshAccountsResponse {
@@ -243,7 +408,7 @@ async fn list_cliproxy_models(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<crate::cliproxy::CliProxyModel>>, ApiError> {
     let client = state
-        .cliproxy
+        .subscription_client()
         .ok_or_else(|| ApiError::service_unavailable(cliproxy_not_ready_message()))?;
     Ok(Json(client.list_models().await?))
 }
@@ -253,7 +418,7 @@ async fn verify_cliproxy(
     Json(request): Json<CliProxyVerifyRequest>,
 ) -> Result<Json<crate::cliproxy::CliProxyVerification>, ApiError> {
     let client = state
-        .cliproxy
+        .subscription_client()
         .ok_or_else(|| ApiError::service_unavailable(cliproxy_not_ready_message()))?;
     Ok(Json(client.verify(request.model).await?))
 }
@@ -263,14 +428,43 @@ pub struct CliProxyLoginRequest {
     pub provider: String,
 }
 
+type LoginCache = tokio::sync::Mutex<
+    std::collections::HashMap<String, (std::time::Instant, crate::cliproxy::CliProxyLoginStatus)>,
+>;
+fn login_cache() -> &'static LoginCache {
+    static CACHE: std::sync::OnceLock<LoginCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
 async fn start_cliproxy_login(
     State(state): State<AppState>,
     Json(request): Json<CliProxyLoginRequest>,
 ) -> Result<Json<crate::cliproxy::CliProxyLoginStart>, ApiError> {
     let client = state
-        .cliproxy
+        .subscription_client()
         .ok_or_else(|| ApiError::service_unavailable(cliproxy_not_ready_message()))?;
-    Ok(Json(client.start_login(&request.provider).await?))
+    let started = client.start_login(&request.provider).await?;
+    if let Some(id) = started.state.clone() {
+        login_cache()
+            .lock()
+            .await
+            .retain(|_, (at, _)| at.elapsed() < std::time::Duration::from_secs(3600));
+        tokio::spawn(async move {
+            for _ in 0..300 {
+                match client.login_status(&id).await {
+                    Ok(status) if status.status != "wait" => {
+                        login_cache()
+                            .lock()
+                            .await
+                            .insert(id, (std::time::Instant::now(), status));
+                        return;
+                    }
+                    _ => tokio::time::sleep(std::time::Duration::from_secs(2)).await,
+                }
+            }
+        });
+    }
+    Ok(Json(started))
 }
 
 #[derive(Debug, Deserialize)]
@@ -282,8 +476,11 @@ async fn cliproxy_login_status(
     State(state): State<AppState>,
     Query(query): Query<CliProxyLoginQuery>,
 ) -> Result<Json<crate::cliproxy::CliProxyLoginStatus>, ApiError> {
+    if let Some((_, status)) = login_cache().lock().await.get(&query.state) {
+        return Ok(Json(status.clone()));
+    }
     let client = state
-        .cliproxy
+        .subscription_client()
         .ok_or_else(|| ApiError::service_unavailable(cliproxy_not_ready_message()))?;
     Ok(Json(client.login_status(&query.state).await?))
 }
@@ -293,7 +490,7 @@ async fn cancel_cliproxy_login(
     Query(query): Query<CliProxyLoginQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let client = state
-        .cliproxy
+        .subscription_client()
         .ok_or_else(|| ApiError::service_unavailable(cliproxy_not_ready_message()))?;
     let cancelled = client.cancel_login(&query.state).await?;
     Ok(Json(serde_json::json!({
@@ -443,7 +640,11 @@ fn scan_sessions(
             .join(" ");
         if let Some(position) = rendered.to_lowercase().find(&needle) {
             let chars: Vec<char> = rendered.chars().collect();
-            let start = position.saturating_sub(60);
+            let start = rendered.to_lowercase()[..position]
+                .chars()
+                .count()
+                .saturating_sub(60)
+                .min(chars.len());
             let end = (start + 180).min(chars.len());
             hits.push(crate::session_index::IndexedSession {
                 id: session.id.clone(),
@@ -524,7 +725,11 @@ struct McpServerSummary {
 }
 
 /// 已连接的 MCP 服务器及其暴露的工具名。
-async fn list_mcp_servers(State(state): State<AppState>) -> Json<Vec<McpServerSummary>> {
+async fn list_mcp_servers(State(state): State<AppState>) -> Json<Vec<serde_json::Value>> {
+    let statuses = state.runtime.mcp_status.read().await.clone();
+    if !statuses.is_empty() {
+        return Json(statuses);
+    }
     let mut servers: Vec<McpServerSummary> = Vec::new();
     for tool in state.runtime.tools.iter() {
         let Some(server) = crate::mcp::tool_server(tool.name()) else {
@@ -539,7 +744,86 @@ async fn list_mcp_servers(State(state): State<AppState>) -> Json<Vec<McpServerSu
         }
     }
     servers.sort_by(|left, right| left.name.cmp(&right.name));
-    Json(servers)
+    Json(
+        servers
+            .into_iter()
+            .map(|s| serde_json::to_value(s).unwrap())
+            .collect(),
+    )
+}
+
+#[derive(Default, Deserialize)]
+struct McpWorkspace {
+    cwd: Option<String>,
+}
+
+async fn reload_mcp(
+    State(state): State<AppState>,
+    Json(workspace): Json<McpWorkspace>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let cwd = workspace
+        .cwd
+        .map(std::path::PathBuf::from)
+        .unwrap_or(std::env::current_dir().map_err(anyhow::Error::from)?);
+    let outcome = crate::mcp::load_tools(&cwd).await;
+    let statuses = crate::mcp::summaries(&outcome);
+    state.runtime.tools.replace_mcp(outcome.tools);
+    *state.runtime.mcp_status.write().await = statuses.clone();
+    Ok(Json(serde_json::json!({"servers":statuses})))
+}
+fn configured_mcp(
+    name: &str,
+    workspace: McpWorkspace,
+) -> anyhow::Result<crate::mcp::McpServerConfig> {
+    let cwd = workspace
+        .cwd
+        .map(std::path::PathBuf::from)
+        .unwrap_or(std::env::current_dir().map_err(anyhow::Error::from)?);
+    crate::mcp::load_server_configs(&cwd)
+        .into_iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, c)| c)
+        .ok_or_else(|| anyhow::anyhow!("MCP server is not configured: {name}"))
+}
+async fn mcp_login(
+    Path(name): Path<String>,
+    Json(workspace): Json<McpWorkspace>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let config = configured_mcp(&name, workspace)?;
+    let url = config
+        .url
+        .ok_or_else(|| anyhow::anyhow!("stdio MCP does not use HTTP OAuth"))?;
+    Ok(Json(
+        crate::mcp_oauth::start(&url, config.oauth.unwrap_or_default()).await?,
+    ))
+}
+async fn mcp_logout(
+    Path(name): Path<String>,
+    Json(workspace): Json<McpWorkspace>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let config = configured_mcp(&name, workspace)?;
+    crate::mcp_oauth::logout(&config.url.unwrap_or_default())?;
+    Ok(Json(serde_json::json!({"status":"ok"})))
+}
+async fn mcp_login_status(
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    Json(crate::mcp_oauth::status(query.get("state").map(String::as_str).unwrap_or("")).await)
+}
+async fn model_profile(
+    State(state): State<AppState>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    let model = query
+        .get("model")
+        .filter(|m| !m.is_empty())
+        .cloned()
+        .or_else(|| state.runtime.provider.default_model())
+        .unwrap_or_default();
+    let profile = state.runtime.model_profile_for(&model);
+    Json(
+        serde_json::json!({"model":model,"supported_reasoning_efforts":crate::model_profile::supported_reasoning_efforts(&model),"name":profile.name,"context_window":profile.context_window,"max_output_tokens":profile.max_output_tokens,"protocol":profile.protocol,"reasoning":format!("{:?}",profile.reasoning),"cache":format!("{:?}",profile.cache),"edit_preference":format!("{:?}",profile.edit_preference)}),
+    )
 }
 
 #[derive(Serialize)]

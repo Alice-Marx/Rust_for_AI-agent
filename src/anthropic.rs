@@ -40,7 +40,7 @@ impl AnthropicModel {
         model: impl Into<String>,
     ) -> Self {
         Self {
-            client: Client::new(),
+            client: crate::connection::model_client(),
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
             model: model.into(),
@@ -76,6 +76,21 @@ impl ModelProvider for AnthropicModel {
 
     fn default_model(&self) -> Option<String> {
         Some(self.model.clone())
+    }
+
+    async fn list_models(&self) -> Result<Vec<crate::cliproxy::CliProxyModel>> {
+        let value: Value = self
+            .client
+            .get(format!("{}/models", self.base_url))
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .timeout(std::time::Duration::from_secs(20))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(serde_json::from_value(value["data"].clone())?)
     }
 
     async fn complete(&self, request: &ModelRequest) -> Result<ModelResponse> {
@@ -152,6 +167,12 @@ impl ModelProvider for AnthropicModel {
                 let value: Value = serde_json::from_str(trimmed)
                     .with_context(|| format!("invalid anthropic stream chunk: {trimmed}"))?;
                 accumulator.apply(&value, sink)?;
+                if matches!(
+                    value.get("type").and_then(Value::as_str),
+                    Some("message_stop" | "error")
+                ) {
+                    return accumulator.finish(sink);
+                }
             }
         }
         accumulator.finish(sink)
@@ -176,9 +197,13 @@ pub fn build_anthropic_request_with_stream(request: &ModelRequest, stream: bool)
         body.insert("stream".to_string(), json!(true));
     }
 
+    let adaptive =
+        request.model.contains("claude-opus-4-6") || request.model.contains("claude-sonnet-4-6");
     let budget_tokens = request
         .reasoning_effort
         .as_deref()
+        .filter(|effort| !matches!(*effort, "off" | "none"))
+        .filter(|_| !adaptive)
         .map(|effort| thinking_budget_tokens(Some(effort)));
     // Anthropic 要求 max_tokens 严格大于 thinking 预算。
     let max_tokens = match budget_tokens {
@@ -217,7 +242,13 @@ pub fn build_anthropic_request_with_stream(request: &ModelRequest, stream: bool)
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
+        .filter(|value| !matches!(*value, "off" | "none"))
     {
+        if adaptive {
+            body.insert("thinking".into(), json!({"type":"adaptive"}));
+            body.insert("output_config".into(), json!({"effort":effort}));
+            return Value::Object(body);
+        }
         let budget = thinking_budget_tokens(Some(effort));
         if budget < max_tokens {
             body.insert(
@@ -292,11 +323,18 @@ fn render_messages(messages: &[ChatMessage]) -> Vec<Value> {
                     }
                     blocks.push(Value::Object(entry));
                 }
+                (
+                    Role::Assistant,
+                    ContentBlock::ProviderReasoning {
+                        provider, payload, ..
+                    },
+                ) if provider == "anthropic" => blocks.push(payload.clone()),
                 // user 消息里的 ToolUse、assistant 消息里的 ToolResult 都不合法；忽略。
                 // user 消息里的 Thinking 同样不回传。
                 (_, ContentBlock::ToolUse { .. })
                 | (_, ContentBlock::ToolResult { .. })
-                | (Role::User, ContentBlock::Thinking { .. }) => {}
+                | (Role::User, ContentBlock::Thinking { .. })
+                | (_, ContentBlock::ProviderReasoning { .. }) => {}
             }
         }
         if blocks.is_empty() {
@@ -396,7 +434,14 @@ pub fn parse_anthropic_response(value: &Value) -> Result<ModelResponse> {
                 let input = block.get("input").cloned().unwrap_or_else(|| json!({}));
                 blocks.push(ContentBlock::tool_use(id, name, input));
             }
-            // redacted_thinking 等未知块类型不参与会话轨迹。
+            "redacted_thinking" => {
+                blocks.push(ContentBlock::ProviderReasoning {
+                    provider: "anthropic".into(),
+                    summary: String::new(),
+                    payload: block.clone(),
+                });
+            }
+            // Unknown block types are ignored.
             _ => {}
         }
     }
@@ -464,6 +509,9 @@ pub struct AnthropicStreamAccumulator {
 
 #[derive(Debug, Clone, Default)]
 enum AnthropicStreamBlock {
+    Redacted {
+        payload: Value,
+    },
     #[default]
     Unknown,
     Text {
@@ -510,7 +558,10 @@ impl AnthropicStreamAccumulator {
                             .unwrap_or_default()
                             .to_string(),
                     },
-                    "thinking" | "redacted_thinking" => AnthropicStreamBlock::Thinking {
+                    "redacted_thinking" => AnthropicStreamBlock::Redacted {
+                        payload: block.clone(),
+                    },
+                    "thinking" => AnthropicStreamBlock::Thinking {
                         thinking: block
                             .get("thinking")
                             .and_then(Value::as_str)
@@ -683,6 +734,10 @@ impl AnthropicStreamAccumulator {
         if let Some(message) = self.failure {
             anyhow::bail!("anthropic stream failed: {message}");
         }
+        anyhow::ensure!(
+            self.stop_reason.is_some(),
+            "anthropic stream disconnected before stop_reason"
+        );
         let mut blocks = Vec::new();
         let mut has_tool_use = false;
         for block in &self.blocks {
@@ -715,6 +770,13 @@ impl AnthropicStreamAccumulator {
                     let input = serde_json::from_str(json)
                         .unwrap_or_else(|_| json!({ "_invalid_arguments": json }));
                     blocks.push(ContentBlock::tool_use(id.clone(), name.clone(), input));
+                }
+                AnthropicStreamBlock::Redacted { payload } => {
+                    blocks.push(ContentBlock::ProviderReasoning {
+                        provider: "anthropic".into(),
+                        summary: String::new(),
+                        payload: payload.clone(),
+                    })
                 }
                 AnthropicStreamBlock::Unknown => {}
             }
@@ -992,7 +1054,7 @@ mod tests {
     }
 
     #[test]
-    fn redacted_thinking_is_skipped() {
+    fn redacted_thinking_is_preserved() {
         let value = json!({
             "content": [
                 {"type": "redacted_thinking", "data": "xxx"},
@@ -1001,7 +1063,7 @@ mod tests {
             "stop_reason": "end_turn"
         });
         let response = parse_anthropic_response(&value).unwrap();
-        assert_eq!(response.blocks.len(), 1);
+        assert_eq!(response.blocks.len(), 2);
         assert_eq!(response.text(), "ok");
     }
 }

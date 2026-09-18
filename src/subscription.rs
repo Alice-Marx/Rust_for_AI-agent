@@ -23,9 +23,37 @@ use tokio::sync::Mutex;
 /// 默认监听端口，与安装包启动脚本保持一致。
 pub const DEFAULT_PORT: u16 = 18317;
 /// 内置默认版本，与 packaging/windows/build-windows-package.ps1 同步。
-pub const DEFAULT_VERSION: &str = "7.3.6";
+pub const DEFAULT_VERSION: &str = "7.3.7";
 const RELEASE_BASE: &str = "https://github.com/router-for-me/CLIProxyAPI/releases/download";
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(20);
+
+pub fn configured_port(directory: &Path) -> Result<u16> {
+    let requested = std::env::var("CLIPROXYAPI_PORT")
+        .ok()
+        .map(|s| s.parse::<u16>())
+        .transpose()?;
+    resolve_port(directory, requested)
+}
+
+fn resolve_port(directory: &Path, requested: Option<u16>) -> Result<u16> {
+    let existing = if directory.join("config.yaml").is_file() {
+        let config: serde_yaml::Value =
+            serde_yaml::from_slice(&std::fs::read(directory.join("config.yaml"))?)?;
+        let port = config["port"]
+            .as_u64()
+            .and_then(|n| u16::try_from(n).ok())
+            .filter(|p| *p > 0)
+            .context("config.yaml requires a valid nonzero port")?;
+        Some(port)
+    } else {
+        None
+    };
+    anyhow::ensure!(requested != Some(0), "CLIPROXYAPI_PORT must be nonzero");
+    if let (Some(requested), Some(existing)) = (requested, existing) {
+        anyhow::ensure!(requested==existing,"CLIPROXYAPI_PORT conflicts with the port in existing config.yaml; update the configuration or use its port {existing}");
+    }
+    Ok(requested.or(existing).unwrap_or(DEFAULT_PORT))
+}
 
 /// 本机访问密钥，与 PowerShell 启动器共用同一份文件。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -137,19 +165,23 @@ impl SubscriptionManager {
 
         let out_log = std::fs::File::create(self.config.data_dir.join("cliproxyapi.out.log"))?;
         let err_log = std::fs::File::create(self.config.data_dir.join("cliproxyapi.err.log"))?;
-        let child = Command::new(&self.config.binary)
+        let mut command = Command::new(&self.config.binary);
+        #[cfg(windows)]
+        command.creation_flags(0x08000000);
+        let child = command
             .arg("-config")
             .arg(self.config_path())
             .current_dir(&self.config.data_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::from(out_log))
             .stderr(Stdio::from(err_log))
-            .kill_on_drop(false)
+            .kill_on_drop(true)
             .spawn()
             .with_context(|| format!("启动 {} 失败", self.config.binary.display()))?;
         *self.child.lock().await = Some(child);
 
         if !self.wait_until_healthy().await {
+            self.stop().await;
             bail!(
                 "CLIProxyAPI 启动后 {} 秒内未就绪，请查看 {}",
                 HEALTH_TIMEOUT.as_secs(),
@@ -159,11 +191,11 @@ impl SubscriptionManager {
         Ok(endpoint)
     }
 
-    /// 健康检查（/healthz 不需要密钥）。
+    /// 使用带访问密钥的模型端点验证受管实例。
     pub async fn is_healthy(&self) -> bool {
-        let url = format!("http://127.0.0.1:{}/healthz", self.config.port);
+        let url = format!("http://127.0.0.1:{}/v1/models", self.config.port);
         matches!(
-            tokio::time::timeout(Duration::from_secs(2), reqwest::get(&url)).await,
+            tokio::time::timeout(Duration::from_secs(2), reqwest::Client::new().get(&url).bearer_auth(&self.config.settings.api_key).send()).await,
             Ok(Ok(response)) if response.status().is_success()
         )
     }
@@ -351,6 +383,29 @@ pub async fn download_binary(version: &str, target_dir: &Path) -> Result<PathBuf
     }
     std::fs::create_dir_all(target_dir)?;
 
+    if asset.ends_with(".tar.gz") {
+        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes.as_ref()));
+        for entry in archive.entries()? {
+            let mut entry = entry?;
+            if entry.header().entry_type().is_file()
+                && entry.path()?.file_name() == Some(std::ffi::OsStr::new(name))
+            {
+                let temp = target.with_extension("download");
+                let mut file = std::fs::File::create(&temp)?;
+                std::io::copy(&mut entry, &mut file)?;
+                drop(file);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o755))?;
+                }
+                std::fs::rename(temp, &target)?;
+                return Ok(target);
+            }
+        }
+        bail!("CLIProxyAPI archive missing executable");
+    }
+
     let reader = std::io::Cursor::new(bytes.to_vec());
     let mut archive = zip::ZipArchive::new(reader).context("CLIProxyAPI 发布包不是合法 zip")?;
     for index in 0..archive.len() {
@@ -359,8 +414,11 @@ pub async fn download_binary(version: &str, target_dir: &Path) -> Result<PathBuf
         if !entry_name.ends_with(name) {
             continue;
         }
-        let mut file = std::fs::File::create(&target)?;
+        let temp = target.with_extension("download");
+        let mut file = std::fs::File::create(&temp)?;
         std::io::copy(&mut entry, &mut file)?;
+        drop(file);
+        std::fs::rename(temp, &target)?;
         tracing::info!(path = %target.display(), "downloaded CLIProxyAPI sidecar");
         return Ok(target);
     }
@@ -381,7 +439,8 @@ fn release_asset_name(version: &str) -> String {
     } else {
         "linux_amd64"
     };
-    format!("CLIProxyAPI_{version}_{platform}.zip")
+    let extension = if cfg!(windows) { "zip" } else { "tar.gz" };
+    format!("CLIProxyAPI_{version}_{platform}.{extension}")
 }
 
 /// SHA-256 十六进制摘要（避免引入额外依赖，自带一份最小实现）。
@@ -774,6 +833,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reuse_configured_port_and_reject_conflicts() {
+        let directory = tempfile::tempdir().unwrap();
+        assert_eq!(resolve_port(directory.path(), None).unwrap(), DEFAULT_PORT);
+        std::fs::write(directory.path().join("config.yaml"), "port: 18327\n").unwrap();
+        assert_eq!(resolve_port(directory.path(), None).unwrap(), 18327);
+        assert_eq!(resolve_port(directory.path(), Some(18327)).unwrap(), 18327);
+        assert!(resolve_port(directory.path(), Some(18317)).is_err());
+        assert!(resolve_port(directory.path(), Some(0)).is_err());
+        std::fs::write(directory.path().join("config.yaml"), "port: 99999\n").unwrap();
+        assert!(resolve_port(directory.path(), None).is_err());
+    }
+
+    #[test]
     fn renders_minimal_local_config() {
         let yaml = render_config(
             18317,
@@ -893,9 +965,9 @@ mod tests {
 
     #[test]
     fn release_asset_name_targets_current_platform() {
-        let asset = release_asset_name("7.3.6");
-        assert!(asset.starts_with("CLIProxyAPI_7.3.6_"));
-        assert!(asset.ends_with(".zip"));
+        let asset = release_asset_name("7.3.7");
+        assert!(asset.starts_with("CLIProxyAPI_7.3.7_"));
+        assert!(asset.ends_with(if cfg!(windows) { ".zip" } else { ".tar.gz" }));
         if cfg!(windows) {
             assert!(asset.contains("windows_amd64"));
         }

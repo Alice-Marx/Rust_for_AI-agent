@@ -17,16 +17,16 @@
 | --- | --- | --- |
 | `claude-code/` | Claude Code | 工具协议、权限管线、hooks、子代理、自定义命令、MCP 约定、上下文压缩 |
 | `codex/` | OpenAI Codex CLI | V4A `apply_patch`、`model_reasoning_effort`、模型能力分级、execpolicy 前缀规则 |
-| `kimi-cli/` | Kimi CLI | 多厂商接入约定、思维链只读回显、会话/技能布局 |
+| `kimi-cli/` | Kimi CLI | 多厂商接入约定、工具续轮保留 reasoning_content、MCP OAuth、会话/技能布局 |
 | `kimi-code/` | Kimi Code | 多厂商模型目录与端点配置方式 |
 | `deepseek-harness/` | DeepSeek Harness | 工具执行管线分层、会话事件轨迹与用户隔离 |
 
-本地参考检出位置（开发过程使用，不随本仓库提交）：
+## 0.6.0 参考映射
 
-```text
-F:/codex/_refs/rust-ai-agent
-F:/codex/_refs/expense-tracker-api-2
-F:/codex/_refs/CLIProxyAPI
-```
+- Codex：Responses SSE 事件、function_call_output、加密 reasoning 原始封装、模型推理档位和 ApplyPatch 偏好。
+- Claude Code：Messages thinking 签名、显式缓存、先读后写、权限确认、hooks、agents 与 commands。
+- Kimi CLI/Code：thinking.type / effort、reasoning_content 续传、PKCE 登录、MCP 配置与令牌刷新。
+- DeepSeek Harness：thinking/reasoning_effort 参数及工具续轮、会话查询层分离。
+- CLIProxyAPI：以 MIT 原版 v7.3.7 sidecar 分发，完整管理路由通过本地 API 转发。主项目未复制账号令牌或上游参考目录。
 
-目标仓库只保留针对 Agent 平台的实现，避免把参考仓库当作 vendored dependency；具体映射见主 README 的“设计说明”。
+本地参考目录是调研输入，不作为主项目编译依赖。Kimi 实测结果与其他提供商模拟回归验证分别记录在 docs/VALIDATION-0.6.0.md。参考协议不能证明与官方工具整体效果或效率相同。

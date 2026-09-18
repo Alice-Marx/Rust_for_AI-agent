@@ -27,7 +27,10 @@ async fn main() -> Result<()> {
     let memory = MemoryStore::open(data_dir.join("memory.json")).await?;
     let evaluations = EvaluationStore::open(data_dir.join("evaluations.json")).await?;
     let skills = SkillCatalog::open(default_skill_directories(&data_dir)).await?;
-    let provider = provider_from_env_async().await?;
+    let provider = match wonderland::connection::ConnectionSettings::load(&data_dir)? {
+        Some(settings) => settings.build().await?,
+        None => provider_from_env_async().await?,
+    };
     // 管理客户端：优先环境变量；订阅模式下自动指向刚拉起的 sidecar，
     // 因此只登录订阅账号即可使用，无需手工配置 CLIPROXYAPI_*。
     let cliproxy = CliProxyApiClient::from_env()
@@ -43,7 +46,11 @@ async fn main() -> Result<()> {
         })
         .map(Arc::new);
     let sandbox = SandboxExecutor::new(SandboxPolicy {
-        enabled: env_bool("AGENT_ENABLE_SANDBOX", false),
+        enabled: env_bool("AGENT_ENABLE_SANDBOX", true),
+        memory_limit_mb: Some(env_u64("AGENT_SANDBOX_MEMORY_MB", 512)),
+        max_processes: Some(env_u64("AGENT_SANDBOX_MAX_PROCESSES", 8).clamp(1, 128) as u32),
+        max_output_bytes: env_u64("AGENT_SANDBOX_MAX_OUTPUT_BYTES", 65_536).clamp(1024, 16_777_216)
+            as usize,
         timeout_ms: env_u64("AGENT_SANDBOX_TIMEOUT_MS", 2_000),
         ..SandboxPolicy::default()
     });
@@ -82,8 +89,14 @@ async fn main() -> Result<()> {
         let mut tools = ToolRegistry::builtin_with_directory(runtime.directory.clone());
         // MCP：把 .mcp.json / .claude/settings.json / .wonderland/settings.json
         // 里配置的服务器工具（mcp__<server>__<tool>）注册进同一张工具表。
+        if runtime.sandbox.policy().enabled {
+            tools.register(Arc::new(wonderland::tools::sandbox::SandboxRun(
+                runtime.sandbox.clone(),
+            )));
+        }
         let cwd = std::env::current_dir()?;
         let mcp = wonderland::mcp::load_tools(&cwd).await;
+        *runtime.mcp_status.write().await = wonderland::mcp::summaries(&mcp);
         for (server, tool_count) in &mcp.servers {
             tracing::info!(server = %server, tools = tool_count, "connected mcp server");
         }
@@ -102,6 +115,11 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| "127.0.0.1:8080".to_string())
         .parse()?;
     let listener = tokio::net::TcpListener::bind(address).await?;
+    anyhow::ensure!(
+        address.ip().is_loopback()
+            || std::env::var("WONDERLAND_SERVER_TOKEN").is_ok_and(|t| !t.is_empty()),
+        "binding outside loopback requires WONDERLAND_SERVER_TOKEN"
+    );
     tracing::info!(%address, "Wonderland API started");
     axum::serve(
         listener,
@@ -111,7 +129,11 @@ async fn main() -> Result<()> {
             cliproxy,
         }),
     )
+    .with_graceful_shutdown(async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
     .await?;
+    wonderland::provider::stop_subscription().await;
     Ok(())
 }
 

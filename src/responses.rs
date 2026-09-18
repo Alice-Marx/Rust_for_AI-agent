@@ -43,7 +43,7 @@ impl ResponsesModel {
         provider_name: &'static str,
     ) -> Self {
         Self {
-            client: Client::new(),
+            client: crate::connection::model_client(),
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.filter(|value| !value.trim().is_empty()),
             model: model.into(),
@@ -139,6 +139,14 @@ impl ModelProvider for ResponsesModel {
                 let value: Value = serde_json::from_str(trimmed)
                     .with_context(|| format!("invalid responses stream chunk: {trimmed}"))?;
                 accumulator.apply(&value, sink)?;
+                if matches!(
+                    value.get("type").and_then(Value::as_str),
+                    Some(
+                        "response.completed" | "response.incomplete" | "response.failed" | "error"
+                    )
+                ) {
+                    return accumulator.finish(sink);
+                }
             }
         }
         accumulator.finish(sink)
@@ -149,6 +157,7 @@ impl ModelProvider for ResponsesModel {
 pub fn build_responses_request(request: &ModelRequest) -> Value {
     let mut body = Map::new();
     body.insert("model".to_string(), json!(request.model));
+    body.insert("max_output_tokens".to_string(), json!(request.max_tokens));
     if !request.system.trim().is_empty() {
         body.insert("instructions".to_string(), json!(request.system));
     }
@@ -189,7 +198,7 @@ pub fn build_responses_request(request: &ModelRequest) -> Value {
         // summary=auto 让流式界面能显示推理摘要（与 Codex 的 reasoning.summary 一致）。
         body.insert(
             "reasoning".to_string(),
-            json!({ "effort": effort, "summary": "auto" }),
+            json!({ "effort": if effort == "off" { "none" } else { effort }, "summary": "auto" }),
         );
     }
     // 关键三项：不落库、要回加密封装的推理内容、会话级缓存 key。
@@ -257,25 +266,22 @@ fn render_input_items(messages: &[ChatMessage]) -> Vec<Value> {
                 }
                 (
                     Role::Assistant,
-                    ContentBlock::Thinking {
-                        thinking,
-                        signature,
+                    ContentBlock::ProviderReasoning {
+                        provider, payload, ..
                     },
-                ) => {
-                    // encrypted_content 必须原样回传，否则模型会丢失上一轮推理。
-                    if signature.as_deref().unwrap_or_default().is_empty() {
-                        continue;
+                ) if provider == "openai-responses" => {
+                    if payload["encrypted_content"]
+                        .as_str()
+                        .is_some_and(|s| !s.is_empty())
+                    {
+                        items.push(payload.clone());
                     }
-                    items.push(json!({
-                        "type": "reasoning",
-                        "summary": reasoning_summary(thinking),
-                        "encrypted_content": signature,
-                    }));
                 }
                 // user 消息里的 ToolUse/Thinking、assistant 消息里的 ToolResult 都不合法，忽略。
                 (_, ContentBlock::ToolUse { .. })
                 | (_, ContentBlock::ToolResult { .. })
-                | (Role::User, ContentBlock::Thinking { .. }) => {}
+                | (_, ContentBlock::Thinking { .. })
+                | (_, ContentBlock::ProviderReasoning { .. }) => {}
             }
         }
     }
@@ -385,7 +391,11 @@ fn item_to_block(item: &Value) -> Option<ContentBlock> {
             if summary.trim().is_empty() && encrypted.is_none() {
                 None
             } else {
-                Some(ContentBlock::thinking(summary, encrypted))
+                Some(ContentBlock::ProviderReasoning {
+                    provider: "openai-responses".into(),
+                    summary,
+                    payload: item.clone(),
+                })
             }
         }
         _ => None,
@@ -454,6 +464,7 @@ enum StreamItem {
     Reasoning {
         summary: String,
         encrypted: Option<String>,
+        payload: Value,
     },
     FunctionCall {
         call_id: String,
@@ -486,7 +497,9 @@ impl ResponsesStreamAccumulator {
         match kind {
             "response.output_item.added" => {
                 if let Some(item) = event.get("item") {
-                    self.items.resize_with(index + 1, StreamItem::default);
+                    if self.items.len() <= index {
+                        self.items.resize_with(index + 1, StreamItem::default);
+                    }
                     self.items[index] = item_from_payload(item, sink);
                 }
             }
@@ -559,7 +572,9 @@ impl ResponsesStreamAccumulator {
             }
             "response.output_item.done" => {
                 if let Some(item) = event.get("item") {
-                    self.items.resize_with(index + 1, StreamItem::default);
+                    if self.items.len() <= index {
+                        self.items.resize_with(index + 1, StreamItem::default);
+                    }
                     let previous = std::mem::take(&mut self.items[index]);
                     self.items[index] = merge_item(previous, item_from_payload(item, sink));
                 }
@@ -610,7 +625,9 @@ impl ResponsesStreamAccumulator {
     }
 
     fn slot(&mut self, index: usize) -> &mut StreamItem {
-        self.items.resize_with(index + 1, StreamItem::default);
+        if self.items.len() <= index {
+            self.items.resize_with(index + 1, StreamItem::default);
+        }
         &mut self.items[index]
     }
 
@@ -618,6 +635,10 @@ impl ResponsesStreamAccumulator {
         if let Some(message) = self.failure {
             bail!("responses stream failed: {message}");
         }
+        anyhow::ensure!(
+            self.status.is_some(),
+            "responses stream disconnected before a terminal event"
+        );
         let mut blocks = Vec::new();
         let mut has_tool_use = false;
         for item in &self.items {
@@ -627,9 +648,22 @@ impl ResponsesStreamAccumulator {
                         blocks.push(ContentBlock::text(text.clone()));
                     }
                 }
-                StreamItem::Reasoning { summary, encrypted } => {
+                StreamItem::Reasoning {
+                    summary,
+                    encrypted,
+                    payload,
+                } => {
                     if !summary.trim().is_empty() || encrypted.is_some() {
-                        blocks.push(ContentBlock::thinking(summary.clone(), encrypted.clone()));
+                        let mut payload = payload.clone();
+                        if payload["summary"].as_array().is_none_or(|a| a.is_empty()) {
+                            payload["summary"] = reasoning_summary(summary);
+                        }
+                        payload["encrypted_content"] = json!(encrypted);
+                        blocks.push(ContentBlock::ProviderReasoning {
+                            provider: "openai-responses".into(),
+                            summary: summary.clone(),
+                            payload,
+                        });
                     }
                 }
                 StreamItem::FunctionCall {
@@ -723,6 +757,7 @@ fn item_from_payload(item: &Value, sink: Option<&StreamSink>) -> StreamItem {
                 })
                 .unwrap_or_default();
             StreamItem::Reasoning {
+                payload: item.clone(),
                 summary,
                 encrypted: item
                     .get("encrypted_content")
@@ -809,10 +844,15 @@ fn merge_item(previous: StreamItem, incoming: StreamItem) -> StreamItem {
             text: if next.is_empty() { text } else { next },
         },
         (
-            StreamItem::Reasoning { summary, encrypted },
+            StreamItem::Reasoning {
+                summary,
+                encrypted,
+                payload,
+            },
             StreamItem::Reasoning {
                 summary: next_summary,
                 encrypted: next_encrypted,
+                payload: next_payload,
             },
         ) => StreamItem::Reasoning {
             summary: if next_summary.is_empty() {
@@ -821,6 +861,11 @@ fn merge_item(previous: StreamItem, incoming: StreamItem) -> StreamItem {
                 next_summary
             },
             encrypted: next_encrypted.or(encrypted),
+            payload: if next_payload.is_null() {
+                payload
+            } else {
+                next_payload
+            },
         },
         (_, incoming) => incoming,
     }
@@ -909,7 +954,11 @@ mod tests {
         let body = build_responses_request(&ModelRequest {
             messages: vec![
                 ChatMessage::assistant_blocks(vec![
-                    ContentBlock::thinking("let me check", Some("enc-1".to_string())),
+                    ContentBlock::ProviderReasoning {
+                        provider: "openai-responses".into(),
+                        summary: "let me check".into(),
+                        payload: json!({"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"let me check"}],"encrypted_content":"enc-1"}),
+                    },
                     ContentBlock::text("running"),
                     ContentBlock::tool_use("call_1", "Bash", json!({"command": "ls"})),
                 ]),
@@ -1006,6 +1055,12 @@ mod tests {
         ] {
             accumulator.apply(&event, Some(&sink)).unwrap();
         }
+        accumulator
+            .apply(
+                &json!({"type":"response.completed","response":{"status":"completed"}}),
+                Some(&sink),
+            )
+            .unwrap();
         let response = accumulator.finish(Some(&sink)).unwrap();
         assert_eq!(response.text(), "检查完成");
         assert_eq!(response.stop_reason, StopReason::ToolUse);
@@ -1076,14 +1131,19 @@ mod tests {
                 Some(&sink),
             )
             .unwrap();
+        accumulator
+            .apply(
+                &json!({"type":"response.completed","response":{"status":"completed"}}),
+                Some(&sink),
+            )
+            .unwrap();
         let response = accumulator.finish(Some(&sink)).unwrap();
         match &response.blocks[0] {
-            ContentBlock::Thinking {
-                thinking,
-                signature,
+            ContentBlock::ProviderReasoning {
+                summary, payload, ..
             } => {
-                assert_eq!(thinking, "先看文件");
-                assert_eq!(signature.as_deref(), Some("enc-9"));
+                assert_eq!(summary, "先看文件");
+                assert_eq!(payload["encrypted_content"], "enc-9");
             }
             other => panic!("expected thinking block, got {other:?}"),
         }

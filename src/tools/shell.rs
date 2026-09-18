@@ -20,8 +20,23 @@ pub fn default_shell() -> (String, Vec<String>) {
     }
     #[cfg(windows)]
     {
-        if find_in_path("bash").is_some() {
-            return ("bash".to_string(), vec!["-c".to_string()]);
+        // System32/bash.exe launches WSL, which can exist without a working distro.
+        if let Some(git) = find_in_path("git") {
+            if let Some(root) = git.parent().and_then(|p| p.parent()) {
+                for relative in ["bin/bash.exe", "usr/bin/bash.exe"] {
+                    let bash = root.join(relative);
+                    if bash.is_file() {
+                        return (bash.display().to_string(), vec!["-c".into()]);
+                    }
+                }
+            }
+        }
+        if let Some(bash) = find_in_path("bash").filter(|p| {
+            !p.to_string_lossy()
+                .to_ascii_lowercase()
+                .contains("system32")
+        }) {
+            return (bash.display().to_string(), vec!["-c".to_string()]);
         }
         ("cmd".to_string(), vec!["/C".to_string()])
     }
@@ -182,7 +197,13 @@ impl BashTool {
             .min(MAX_TIMEOUT_MS);
 
         let (shell, args) = default_shell();
-        let mut child = match Command::new(&shell)
+        let mut command_builder = Command::new(&shell);
+        command_builder.kill_on_drop(true);
+        #[cfg(windows)]
+        command_builder.creation_flags(0x08000000);
+        #[cfg(unix)]
+        command_builder.process_group(0);
+        let mut child = match command_builder
             .args(&args)
             .arg(command)
             .current_dir(&ctx.working_dir)
@@ -198,6 +219,8 @@ impl BashTool {
                 )))
             }
         };
+
+        let tree = crate::process_tree::ProcessTree::attach(child.id().unwrap())?;
 
         let mut stdout_pipe = child.stdout.take();
         let mut stderr_pipe = child.stderr.take();
@@ -229,6 +252,7 @@ impl BashTool {
                 }
             };
 
+        drop(tree);
         let stdout = stdout_task.await.unwrap_or_default();
         let stderr = stderr_task.await.unwrap_or_default();
 

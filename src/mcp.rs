@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -29,7 +30,7 @@ use crate::tools::{Tool, ToolContext, ToolOutput};
 /// 与参考实现一致：MCP 工具在模型侧的名字前缀。
 pub const MCP_TOOL_PREFIX: &str = "mcp__";
 /// 我们声明的协议版本。
-pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+pub const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
 /// 工具名在各家 API 上的长度上限（OpenAI 为 64）。
 const MAX_TOOL_NAME_LEN: usize = 64;
 /// 默认请求超时。
@@ -38,6 +39,7 @@ const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 /// 一个 MCP 服务器的启动配置，字段名与 Claude Code 的 `mcpServers` 对齐。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct McpServerConfig {
+    #[serde(default)]
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
@@ -61,6 +63,8 @@ pub struct McpServerConfig {
     /// http 传输的附加请求头（例如 Authorization）。
     #[serde(default)]
     pub headers: HashMap<String, String>,
+    #[serde(default)]
+    pub oauth: Option<crate::mcp_oauth::OAuthConfig>,
 }
 
 impl McpServerConfig {
@@ -69,7 +73,7 @@ impl McpServerConfig {
             return false;
         }
         match self.transport_kind() {
-            McpTransportKind::Http => self
+            McpTransportKind::Http | McpTransportKind::Sse => self
                 .url
                 .as_deref()
                 .map(str::trim)
@@ -86,7 +90,8 @@ impl McpServerConfig {
             .map(str::to_ascii_lowercase)
             .as_deref()
         {
-            Some("http") | Some("sse") | Some("streamable-http") | Some("streamable_http") => {
+            Some("sse") => McpTransportKind::Sse,
+            Some("http") | Some("streamable-http") | Some("streamable_http") => {
                 McpTransportKind::Http
             }
             _ if self.command.trim().is_empty()
@@ -108,6 +113,7 @@ impl McpServerConfig {
 pub enum McpTransportKind {
     Stdio,
     Http,
+    Sse,
 }
 
 /// 从项目目录加载 `mcpServers` 配置，后加载的文件覆盖同名服务器。
@@ -300,6 +306,12 @@ fn request_timeout() -> Duration {
 
 type PendingMap = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
 
+pub(crate) fn rpc_id(value: &Value) -> Option<i64> {
+    value
+        .get("id")
+        .and_then(|id| id.as_i64().or_else(|| id.as_str()?.parse().ok()))
+}
+
 /// 会话抽象：stdio 与 HTTP 两种传输共享同一套工具适配。
 #[async_trait]
 pub trait McpSession: Send + Sync {
@@ -315,8 +327,12 @@ pub trait McpSession: Send + Sync {
 
     /// tools/list，自动跟随 nextCursor 分页。
     async fn list_tools(&self) -> Result<Vec<McpToolInfo>> {
+        if self.capabilities().get("tools").is_none() {
+            return Ok(Vec::new());
+        }
         let mut tools = Vec::new();
         let mut cursor: Option<String> = None;
+        let mut seen = std::collections::HashSet::new();
         loop {
             let params = match &cursor {
                 Some(cursor) => json!({ "cursor": cursor }),
@@ -326,7 +342,10 @@ pub trait McpSession: Send + Sync {
             let (page, next) = parse_tools_list(&result);
             tools.extend(page);
             match next {
-                Some(next) => cursor = Some(next),
+                Some(next) => {
+                    anyhow::ensure!(seen.insert(next.clone()), "MCP repeated pagination cursor");
+                    cursor = Some(next);
+                }
                 None => break,
             }
         }
@@ -355,6 +374,7 @@ pub struct McpHttpClient {
     next_id: AtomicI64,
     timeout: Duration,
     capabilities: std::sync::OnceLock<Value>,
+    protocol: std::sync::OnceLock<String>,
 }
 
 impl McpHttpClient {
@@ -364,7 +384,10 @@ impl McpHttpClient {
             .clone()
             .context("http 传输的 mcp 服务器缺少 url")?;
         let client = Arc::new(Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(request_timeout())
+                .redirect(reqwest::redirect::Policy::none())
+                .build()?,
             name: name.to_string(),
             url,
             headers: config.headers.clone(),
@@ -372,6 +395,7 @@ impl McpHttpClient {
             next_id: AtomicI64::new(1),
             timeout: request_timeout(),
             capabilities: std::sync::OnceLock::new(),
+            protocol: std::sync::OnceLock::new(),
         });
         let handshake = client
             .request(
@@ -387,6 +411,13 @@ impl McpHttpClient {
             )
             .await
             .with_context(|| format!("mcp http server {name} failed to initialize"))?;
+        let _ = client.protocol.set(
+            handshake
+                .get("protocolVersion")
+                .and_then(Value::as_str)
+                .unwrap_or(MCP_PROTOCOL_VERSION)
+                .to_string(),
+        );
         let _ = client.capabilities.set(
             handshake
                 .get("capabilities")
@@ -399,7 +430,7 @@ impl McpHttpClient {
         Ok(client)
     }
 
-    fn build_request(&self, body: Value) -> reqwest::RequestBuilder {
+    async fn build_request(&self, body: Value) -> Result<reqwest::RequestBuilder> {
         let mut builder = self
             .client
             .post(&self.url)
@@ -408,16 +439,29 @@ impl McpHttpClient {
         for (name, value) in &self.headers {
             builder = builder.header(name, value);
         }
-        builder.json(&body)
+        if let Some(session) = self.session_id.lock().await.as_ref() {
+            builder = builder.header("mcp-session-id", session);
+        }
+        if let Some(protocol) = self.protocol.get() {
+            builder = builder.header("MCP-Protocol-Version", protocol);
+        }
+        if let Some(token) = crate::mcp_oauth::access_token(&self.url).await? {
+            builder = builder.bearer_auth(token);
+        }
+        Ok(builder.json(&body))
     }
 
     async fn notify(&self, method: &str, params: Value) -> Result<()> {
         let response = self
             .build_request(json!({"jsonrpc": "2.0", "method": method, "params": params}))
+            .await?
             .send()
             .await
             .context("mcp http notification failed")?;
         self.remember_session(&response).await;
+        response
+            .error_for_status()
+            .context("MCP notification rejected")?;
         Ok(())
     }
 
@@ -448,15 +492,14 @@ impl McpSession for McpHttpClient {
 
     async fn request(&self, method: &str, params: Value) -> Result<Value> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let mut builder = self.build_request(json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params,
-        }));
-        if let Some(session) = self.session_id.lock().await.clone() {
-            builder = builder.header("mcp-session-id", session);
-        }
+        let builder = self
+            .build_request(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": method,
+                "params": params,
+            }))
+            .await?;
         let response = tokio::time::timeout(self.timeout, builder.send())
             .await
             .map_err(|_| anyhow::anyhow!("mcp {method} timed out"))?
@@ -469,17 +512,34 @@ impl McpSession for McpHttpClient {
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
             .to_string();
-        let body = response.text().await.unwrap_or_default();
         if !status.is_success() {
-            bail!("mcp http {method} returned {status}: {body}");
+            bail!("mcp http {method} returned {status}");
         }
         let payload = if content_type.contains("text/event-stream") {
-            find_sse_response(&body, id)
-                .with_context(|| format!("mcp http {method} 的 SSE 响应里没有 id={id} 的结果"))?
+            let mut stream = response.bytes_stream();
+            let mut decoder = SseBuffer::new();
+            let deadline = tokio::time::Instant::now() + self.timeout;
+            loop {
+                let chunk = tokio::time::timeout_at(deadline, stream.next())
+                    .await
+                    .context("MCP SSE response timed out")?
+                    .context("MCP SSE closed before response")??;
+                let found = decoder
+                    .push_bytes(&chunk)
+                    .into_iter()
+                    .filter_map(|data| serde_json::from_str::<Value>(&data).ok())
+                    .find(|value| rpc_id(value) == Some(id));
+                if let Some(payload) = found {
+                    break payload;
+                }
+            }
         } else {
-            serde_json::from_str::<Value>(&body)
-                .with_context(|| format!("mcp http {method} 返回了非法 JSON"))?
+            response
+                .json::<Value>()
+                .await
+                .context("MCP invalid JSON response")?
         };
+        anyhow::ensure!(rpc_id(&payload) == Some(id), "MCP response ID mismatch");
         if let Some(error) = payload.get("error").filter(|value| !value.is_null()) {
             bail!("mcp {method} failed: {error}");
         }
@@ -516,6 +576,7 @@ pub fn find_sse_response(body: &str, id: i64) -> Option<Value> {
 
 /// 一个已握手的 MCP 服务器连接（stdio 传输）。
 pub struct McpClient {
+    reader: tokio::task::JoinHandle<()>,
     name: String,
     stdin: Mutex<ChildStdin>,
     pending: PendingMap,
@@ -524,13 +585,21 @@ pub struct McpClient {
     capabilities: std::sync::OnceLock<Value>,
 }
 
+impl Drop for McpClient {
+    fn drop(&mut self) {
+        self.reader.abort();
+    }
+}
+
 impl McpClient {
     /// 启动服务器进程并完成 initialize 握手。
     pub async fn connect(name: &str, config: &McpServerConfig, cwd: &Path) -> Result<Arc<Self>> {
         let mut command = Command::new(&config.command);
         command.args(&config.args);
         command.envs(&config.env);
-        command.kill_on_drop(false);
+        command.kill_on_drop(true);
+        #[cfg(windows)]
+        command.creation_flags(0x08000000);
         command.stdin(Stdio::piped());
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
@@ -554,7 +623,7 @@ impl McpClient {
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let reader_pending = pending.clone();
         let server_name = name.to_string();
-        tokio::spawn(async move {
+        let reader = tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 let line = line.trim();
@@ -601,6 +670,7 @@ impl McpClient {
 
         let client = Arc::new(Self {
             name: name.to_string(),
+            reader,
             stdin: Mutex::new(stdin),
             pending,
             next_id: AtomicI64::new(1),
@@ -771,6 +841,11 @@ pub struct McpLoadOutcome {
     pub servers: Vec<(String, usize)>,
 }
 
+pub fn summaries(outcome: &McpLoadOutcome) -> Vec<Value> {
+    outcome.servers.iter().map(|(name, count)| json!({"name":name,"status":"connected","tool_count":count,"tools":outcome.tools.iter().filter(|t| tool_server(t.name()) == Some(name.as_str())).map(|t| t.name()).collect::<Vec<_>>() }))
+        .chain(outcome.errors.iter().map(|(name,error)| json!({"name":name,"status":"error","error":error,"tools":[]}))).collect()
+}
+
 /// 启动全部配置的 MCP 服务器并收集工具。单个服务器失败不影响其它服务器。
 pub async fn load_tools(cwd: &Path) -> McpLoadOutcome {
     let mut outcome = McpLoadOutcome::default();
@@ -779,6 +854,7 @@ pub async fn load_tools(cwd: &Path) -> McpLoadOutcome {
             McpTransportKind::Http => McpHttpClient::connect(&name, &config)
                 .await
                 .map(|client| client as Arc<dyn McpSession>),
+            McpTransportKind::Sse => crate::mcp_sse::connect(&name, &config).await,
             McpTransportKind::Stdio => McpClient::connect(&name, &config, cwd)
                 .await
                 .map(|client| client as Arc<dyn McpSession>),
@@ -1154,6 +1230,7 @@ second"
             transport: Some("http".to_string()),
             url: Some("http://127.0.0.1:9000/mcp".to_string()),
             headers: HashMap::new(),
+            oauth: None,
         };
         assert_eq!(http.transport_kind(), McpTransportKind::Http);
         assert!(http.is_enabled());
@@ -1343,6 +1420,7 @@ for line in sys.stdin:
                 transport: None,
                 url: None,
                 headers: HashMap::new(),
+                oauth: None,
             },
             root,
         )

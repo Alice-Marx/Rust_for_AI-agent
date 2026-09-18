@@ -3,6 +3,7 @@ pub mod fs;
 pub mod notebook;
 pub mod patch;
 pub mod plan;
+pub mod sandbox;
 pub mod search;
 pub mod shell;
 pub mod task;
@@ -125,7 +126,7 @@ pub trait Tool: Send + Sync {
 
 #[derive(Default, Clone)]
 pub struct ToolRegistry {
-    tools: Vec<Arc<dyn Tool>>,
+    tools: Arc<std::sync::RwLock<Vec<Arc<dyn Tool>>>>,
 }
 
 impl ToolRegistry {
@@ -174,21 +175,33 @@ impl ToolRegistry {
     }
 
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
-        self.tools.push(tool);
+        self.tools
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(tool);
     }
 
     pub fn find(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        self.tools.iter().find(|t| t.name() == name).cloned()
+        self.iter().find(|t| t.name() == name)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &Arc<dyn Tool>> {
-        self.tools.iter()
+    pub fn iter(&self) -> impl Iterator<Item = Arc<dyn Tool>> {
+        self.tools
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .into_iter()
+    }
+
+    pub fn replace_mcp(&self, tools: Vec<Arc<dyn Tool>>) {
+        let mut all = self.tools.write().unwrap_or_else(|e| e.into_inner());
+        all.retain(|tool| !tool.name().starts_with(crate::mcp::MCP_TOOL_PREFIX));
+        all.extend(tools);
     }
 
     /// 中立的工具定义列表，可直接填入 `ModelRequest::tools`。
     pub fn tool_definitions(&self) -> Vec<crate::provider::ToolDefinition> {
-        self.tools
-            .iter()
+        self.iter()
             .map(|tool| crate::provider::ToolDefinition {
                 name: tool.name().to_string(),
                 description: tool.description().to_string(),
@@ -199,8 +212,7 @@ impl ToolRegistry {
 
     /// OpenAI tools 格式：`{"type":"function","function":{"name","description","parameters"}}`。
     pub fn openai_tool_definitions(&self) -> Vec<serde_json::Value> {
-        self.tools
-            .iter()
+        self.iter()
             .map(|tool| {
                 serde_json::json!({
                     "type": "function",

@@ -49,6 +49,11 @@ pub enum ContentBlock {
     },
     /// 模型的推理/思考内容（Anthropic thinking 块、DeepSeek `reasoning_content`）。
     /// `signature` 仅 Anthropic 使用：回传历史时必须原样带回，否则请求会被拒绝。
+    ProviderReasoning {
+        provider: String,
+        summary: String,
+        payload: Value,
+    },
     Thinking {
         thinking: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -91,6 +96,7 @@ impl ContentBlock {
     pub fn as_thinking(&self) -> Option<&str> {
         match self {
             Self::Thinking { thinking, .. } => Some(thinking),
+            Self::ProviderReasoning { summary, .. } => Some(summary),
             _ => None,
         }
     }
@@ -194,6 +200,12 @@ pub enum StopReason {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamEvent {
+    PermissionRequest {
+        id: String,
+        tool: String,
+        input: Value,
+        reason: String,
+    },
     /// 助手文本增量。
     TextDelta { text: String },
     /// 思维链增量（Anthropic thinking / DeepSeek reasoning_content）。
@@ -248,8 +260,9 @@ pub fn emit(sink: Option<&StreamSink>, event: StreamEvent) {
 /// 多行 data: 按规范用换行拼接。
 #[derive(Debug, Default)]
 pub struct SseBuffer {
-    buffer: String,
+    buffer: Vec<u8>,
     data_lines: Vec<String>,
+    skip_lf: bool,
 }
 
 impl SseBuffer {
@@ -257,31 +270,42 @@ impl SseBuffer {
         Self::default()
     }
 
-    /// 送入一段字节（按 UTF-8 有损解码），返回本次完整的事件负载。
+    /// Buffer bytes until a whole line exists: TCP chunks may split a UTF-8 codepoint.
     pub fn push_bytes(&mut self, chunk: &[u8]) -> Vec<String> {
-        let text = String::from_utf8_lossy(chunk);
-        self.push(&text)
+        let mut events = Vec::new();
+        for &byte in chunk {
+            if self.skip_lf {
+                self.skip_lf = false;
+                if byte == b'\n' {
+                    continue;
+                }
+            }
+            if byte == b'\r' || byte == b'\n' {
+                self.skip_lf = byte == b'\r';
+                let line = String::from_utf8_lossy(&self.buffer);
+                if line.is_empty() {
+                    if !self.data_lines.is_empty() {
+                        events.push(self.data_lines.join("\n"));
+                        self.data_lines.clear();
+                    }
+                } else if let Some(rest) = line.strip_prefix("data:") {
+                    // SSE strips exactly one ASCII space, preserving indentation.
+                    self.data_lines
+                        .push(rest.strip_prefix(' ').unwrap_or(rest).to_string());
+                } else if line == "data" {
+                    self.data_lines.push(String::new());
+                }
+                self.buffer.clear();
+            } else {
+                self.buffer.push(byte);
+            }
+        }
+        events
     }
 
     /// 送入一段文本，返回本次完整的事件负载。
     pub fn push(&mut self, chunk: &str) -> Vec<String> {
-        self.buffer.push_str(chunk);
-        let mut events = Vec::new();
-        while let Some(newline) = self.buffer.find('\n') {
-            let line = self.buffer[..newline].trim_end_matches('\r').to_string();
-            self.buffer.drain(..=newline);
-            if line.is_empty() {
-                if !self.data_lines.is_empty() {
-                    events.push(self.data_lines.join("\n"));
-                    self.data_lines.clear();
-                }
-                continue;
-            }
-            if let Some(rest) = line.strip_prefix("data:") {
-                self.data_lines.push(rest.trim_start().to_string());
-            }
-        }
-        events
+        self.push_bytes(chunk.as_bytes())
     }
 }
 
@@ -351,6 +375,17 @@ pub trait ModelProvider: Send + Sync {
         vec![self.name()]
     }
 
+    async fn list_models(&self) -> Result<Vec<crate::cliproxy::CliProxyModel>> {
+        Ok(self
+            .default_model()
+            .into_iter()
+            .map(|id| crate::cliproxy::CliProxyModel {
+                id,
+                object: "model".into(),
+                owned_by: Some(self.name().into()),
+            })
+            .collect())
+    }
     async fn complete(&self, request: &ModelRequest) -> Result<ModelResponse>;
 
     /// 流式调用。默认实现退化为非流式，并把结果一次性展开为增量事件，
@@ -373,7 +408,10 @@ pub fn replay_response_as_events(response: &ModelResponse, sink: Option<&StreamS
             ContentBlock::Text { text } => {
                 emit(sink, StreamEvent::TextDelta { text: text.clone() })
             }
-            ContentBlock::Thinking { thinking, .. } => emit(
+            ContentBlock::Thinking { thinking, .. }
+            | ContentBlock::ProviderReasoning {
+                summary: thinking, ..
+            } => emit(
                 sink,
                 StreamEvent::ReasoningDelta {
                     text: thinking.clone(),
@@ -477,7 +515,7 @@ impl OpenAiCompatibleModel {
         provider_name: &'static str,
     ) -> Self {
         Self {
-            client: Client::new(),
+            client: crate::connection::model_client(),
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.filter(|value| !value.trim().is_empty()),
             model: model.into(),
@@ -494,6 +532,19 @@ impl ModelProvider for OpenAiCompatibleModel {
 
     fn default_model(&self) -> Option<String> {
         Some(self.model.clone())
+    }
+
+    async fn list_models(&self) -> Result<Vec<crate::cliproxy::CliProxyModel>> {
+        let mut request = self
+            .client
+            .get(format!("{}/models", self.base_url))
+            .timeout(std::time::Duration::from_secs(20));
+        if let Some(key) = &self.api_key {
+            request = request.bearer_auth(key);
+        }
+        let response = request.send().await?.error_for_status()?;
+        let value: Value = response.json().await?;
+        Ok(serde_json::from_value(value["data"].clone())?)
     }
 
     async fn complete(&self, request: &ModelRequest) -> Result<ModelResponse> {
@@ -578,6 +629,10 @@ impl ModelProvider for OpenAiCompatibleModel {
                     continue;
                 }
                 if trimmed == "[DONE]" {
+                    anyhow::ensure!(
+                        accumulator.stop_reason.is_some(),
+                        "model stream ended before finish_reason"
+                    );
                     return Ok(accumulator.finish(sink));
                 }
                 let value: Value = serde_json::from_str(trimmed)
@@ -585,6 +640,10 @@ impl ModelProvider for OpenAiCompatibleModel {
                 accumulator.apply(&value, sink)?;
             }
         }
+        anyhow::ensure!(
+            accumulator.stop_reason.is_some(),
+            "model stream disconnected before finish_reason"
+        );
         Ok(accumulator.finish(sink))
     }
 }
@@ -629,7 +688,9 @@ pub fn build_openai_request(request: &ModelRequest) -> Value {
                             }));
                         }
                         // user 消息里不应出现 ToolUse 与 Thinking，忽略。
-                        ContentBlock::ToolUse { .. } | ContentBlock::Thinking { .. } => {}
+                        ContentBlock::ToolUse { .. }
+                        | ContentBlock::Thinking { .. }
+                        | ContentBlock::ProviderReasoning { .. } => {}
                     }
                 }
                 if !text.is_empty() {
@@ -638,6 +699,7 @@ pub fn build_openai_request(request: &ModelRequest) -> Value {
             }
             Role::Assistant => {
                 let mut text = String::new();
+                let mut reasoning = String::new();
                 let mut tool_calls = Vec::new();
                 for block in &message.content {
                     match block {
@@ -657,9 +719,13 @@ pub fn build_openai_request(request: &ModelRequest) -> Value {
                                 },
                             }));
                         }
-                        // assistant 消息里不应出现 ToolResult；Thinking 不回流到
-                        // OpenAI 兼容端点（DeepSeek/Kimi 等要求思维链只读不回传）。
-                        ContentBlock::ToolResult { .. } | ContentBlock::Thinking { .. } => {}
+                        ContentBlock::Thinking {
+                            thinking,
+                            signature: None,
+                        } => reasoning.push_str(thinking),
+                        ContentBlock::ToolResult { .. }
+                        | ContentBlock::Thinking { .. }
+                        | ContentBlock::ProviderReasoning { .. } => {}
                     }
                 }
                 let mut entry = Map::new();
@@ -675,6 +741,14 @@ pub fn build_openai_request(request: &ModelRequest) -> Value {
                 if !tool_calls.is_empty() {
                     entry.insert("tool_calls".to_string(), Value::Array(tool_calls));
                 }
+                let model = request.model.to_ascii_lowercase();
+                if (model.contains("deepseek")
+                    || model.contains("kimi")
+                    || model.contains("moonshot"))
+                    && !reasoning.is_empty()
+                {
+                    entry.insert("reasoning_content".to_string(), json!(reasoning));
+                }
                 messages.push(Value::Object(entry));
             }
         }
@@ -685,7 +759,10 @@ pub fn build_openai_request(request: &ModelRequest) -> Value {
     body.insert("messages".to_string(), Value::Array(messages));
     // max_tokens 必须显式发送，部分端点缺省时只返回极短的补全。
     body.insert("max_tokens".to_string(), json!(request.max_tokens));
-    if let Some(temperature) = request.temperature {
+    let model = request.model.to_ascii_lowercase();
+    let vendor_thinking =
+        model.contains("deepseek") || model.contains("kimi") || model.contains("moonshot");
+    if let Some(temperature) = request.temperature.filter(|_| !vendor_thinking) {
         body.insert("temperature".to_string(), json!(temperature));
     }
     // 只有模型能力档案声明支持 reasoning 时才由 AgentRuntime 下发该字段。
@@ -695,15 +772,31 @@ pub fn build_openai_request(request: &ModelRequest) -> Value {
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        body.insert("reasoning_effort".to_string(), json!(effort));
+        if vendor_thinking {
+            body.insert("thinking".to_string(), json!({"type": if matches!(effort, "off" | "none") { "disabled" } else { "enabled" }}));
+            if (model.contains("kimi-k3")
+                || model.contains("kimi-k2.8")
+                || model.contains("kimi-k2.7")
+                || model.contains("kimi-k2.6"))
+                && matches!(effort, "low" | "high" | "max")
+            {
+                body["thinking"]["effort"] = json!(effort);
+                body["thinking"]["keep"] = json!("all");
+            }
+            if model.contains("deepseek") && matches!(effort, "low" | "high" | "max") {
+                body.insert("reasoning_effort".into(), json!(effort));
+            }
+        } else {
+            body.insert("reasoning_effort".to_string(), json!(effort));
+        }
     }
-    // Kimi CLI / Kimi Code 用会话级 prompt_cache_key 提升缓存命中率；
-    // 其它兼容端点会忽略未知字段。
+    // Send prompt_cache_key only to model families whose wire contract supports it.
     if let Some(key) = request
         .prompt_cache_key
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
+        .filter(|_| model.starts_with("gpt-") || model.starts_with("o3") || model.starts_with("o4"))
     {
         body.insert("prompt_cache_key".to_string(), json!(key));
     }
@@ -743,7 +836,7 @@ pub fn parse_openai_response(value: &Value) -> Result<ModelResponse> {
 
     let mut blocks = Vec::new();
     // DeepSeek / Kimi / Qwen 等端点把思维链放在 reasoning_content（部分端点用
-    // reasoning）。思维链只读：它保留在会话轨迹与展示层，但不回流到请求体中。
+    // reasoning）。工具续轮需要原样保留推理内容。
     for key in ["reasoning_content", "reasoning"] {
         if let Some(reasoning) = message
             .get(key)
@@ -975,7 +1068,7 @@ impl OpenAiStreamAccumulator {
     pub fn finish(self, sink: Option<&StreamSink>) -> ModelResponse {
         let mut blocks = Vec::new();
         if !self.reasoning.trim().is_empty() {
-            blocks.push(ContentBlock::thinking(self.reasoning.trim(), None));
+            blocks.push(ContentBlock::thinking(self.reasoning.clone(), None));
         }
         if !self.text.trim().is_empty() {
             blocks.push(ContentBlock::text(self.text.trim_end()));
@@ -1171,27 +1264,93 @@ pub async fn provider_from_env_async() -> Result<Arc<dyn ModelProvider>> {
         .to_ascii_lowercase();
     let subscription_mode = configured == "subscription" || configured == "cliproxyapi";
     if subscription_mode {
-        let exe_dir = std::env::current_exe()
-            .ok()
-            .and_then(|path| path.parent().map(Path::to_path_buf))
-            .unwrap_or_else(|| PathBuf::from("."));
-        let (manager, _) = crate::subscription::from_env(&exe_dir)
-            .context("订阅模式需要 CLIProxyAPI sidecar，但未找到可执行文件")?;
-        let endpoint = manager.ensure_running().await?;
-        // 进程存活期内必须持有 manager，否则 sidecar 句柄会被丢弃。
-        let _ = SUBSCRIPTION_MANAGER.set(manager);
-        let _ = SUBSCRIPTION_ENDPOINT.set(endpoint.clone());
-        return Ok(subscription_provider(&endpoint));
+        return ensure_subscription().await;
     }
     provider_from_env()
+}
+
+pub async fn ensure_subscription() -> Result<Arc<dyn ModelProvider>> {
+    ensure_subscription_with_options(None, configured_wire()).await
+}
+
+pub async fn ensure_subscription_with_options(
+    model: Option<&str>,
+    wire: Option<crate::model_profile::WireProtocol>,
+) -> Result<Arc<dyn ModelProvider>> {
+    static START: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _guard = START.lock().await;
+    if let Ok(base_url) = std::env::var("CLIPROXYAPI_BASE_URL") {
+        if !base_url.trim().is_empty() {
+            let endpoint = crate::subscription::SubscriptionEndpoint {
+                management_url: std::env::var("CLIPROXYAPI_MANAGEMENT_URL").unwrap_or_else(|_| {
+                    format!(
+                        "{}/v0/management",
+                        base_url.trim_end_matches('/').trim_end_matches("/v1")
+                    )
+                }),
+                api_key: std::env::var("CLIPROXYAPI_API_KEY").unwrap_or_default(),
+                management_key: std::env::var("CLIPROXYAPI_MANAGEMENT_KEY").unwrap_or_default(),
+                base_url,
+                port: 0,
+            };
+            let _ = SUBSCRIPTION_ENDPOINT.set(endpoint.clone());
+            return Ok(subscription_provider(&endpoint, model, wire));
+        }
+    }
+    if let Some(manager) = SUBSCRIPTION_MANAGER.get() {
+        return Ok(subscription_provider(
+            &manager.ensure_running().await?,
+            model,
+            wire,
+        ));
+    }
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let data_dir = crate::subscription::default_data_dir();
+    let binary = match crate::subscription::locate_binary(&exe_dir, &data_dir) {
+        Some(path) => path,
+        None => {
+            crate::subscription::download_binary(
+                crate::subscription::DEFAULT_VERSION,
+                &data_dir.join("bin"),
+            )
+            .await?
+        }
+    };
+    let settings =
+        crate::subscription::load_or_create_settings(&data_dir.join("launcher-settings.json"))?;
+    let port = crate::subscription::configured_port(&data_dir)?;
+    let manager =
+        crate::subscription::SubscriptionManager::new(crate::subscription::SubscriptionConfig {
+            binary,
+            data_dir,
+            settings,
+            port,
+        });
+    let endpoint = manager.ensure_running().await?;
+    // 进程存活期内必须持有 manager，否则 sidecar 句柄会被丢弃。
+    let _ = SUBSCRIPTION_MANAGER.set(manager);
+    let _ = SUBSCRIPTION_ENDPOINT.set(endpoint.clone());
+    Ok(subscription_provider(&endpoint, model, wire))
+}
+
+pub async fn stop_subscription() {
+    if let Some(manager) = SUBSCRIPTION_MANAGER.get() {
+        manager.stop().await;
+    }
 }
 
 /// 订阅端点上的协议栈。
 fn subscription_provider(
     endpoint: &crate::subscription::SubscriptionEndpoint,
+    model: Option<&str>,
+    wire: Option<crate::model_profile::WireProtocol>,
 ) -> Arc<dyn ModelProvider> {
-    let default_model = std::env::var("AGENT_MODEL")
-        .ok()
+    let default_model = model
+        .map(str::to_owned)
+        .or_else(|| std::env::var("AGENT_MODEL").ok())
         .or_else(|| std::env::var("CLIPROXYAPI_MODEL").ok())
         .unwrap_or_else(|| "gpt-5.4".to_string());
     let chat = Arc::new(OpenAiCompatibleModel::new_with_optional_key(
@@ -1215,7 +1374,7 @@ fn subscription_provider(
         crate::router::ProtocolRouter::new(chat)
             .with_responses(responses)
             .with_anthropic(anthropic)
-            .with_forced(configured_wire()),
+            .with_forced(wire),
     )
 }
 
