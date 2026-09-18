@@ -16,3 +16,5 @@ npm install -g rust-ai-wonderland-cli@0.7.0
 ```
 
 账号、登录、权限和模型行为由各自官方 CLI 或 CLIProxyAPI 管理。内嵌终端是用户级终端，不等同于 Agent 的 SandboxRun 隔离。完整验证范围见 [VALIDATION-0.7.0.md](VALIDATION-0.7.0.md)。
+
+验证：Windows 278 个库测试、8 个桌面测试、7 个协议集成测试和 2 个 npm 测试通过；Linux/macOS 编译与原生 PTY 回归通过。本机完成 0.6.0→0.7.0 升级安装，原版 Codex/Claude TUI 启动通过。安装程序未签名；模型协议适配和直接调用官方 CLI 不代表已证明与官方桌面产品效率完全相同。
