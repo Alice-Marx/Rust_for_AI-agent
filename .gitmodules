@@ -1,0 +1,18 @@
+[submodule "anytool/kimi/kimi-cli"]
+	path = anytool/kimi/kimi-cli
+	url = https://github.com/MoonshotAI/kimi-cli.git
+[submodule "anytool/kimi/kimi-code"]
+	path = anytool/kimi/kimi-code
+	url = https://github.com/MoonshotAI/kimi-code.git
+[submodule "anytool/ChatGPT/codex"]
+	path = anytool/ChatGPT/codex
+	url = https://github.com/openai/codex.git
+[submodule "anytool/minimax/minimax-code"]
+	path = anytool/minimax/minimax-code
+	url = https://github.com/MiniMax-AI/minimax-code.git
+[submodule "anytool/minimax/cli"]
+	path = anytool/minimax/cli
+	url = https://github.com/MiniMax-AI/cli.git
+[submodule "anytool/mimo/MiMo-Code"]
+	path = anytool/mimo/MiMo-Code
+	url = https://github.com/XiaomiMiMo/MiMo-Code.git
