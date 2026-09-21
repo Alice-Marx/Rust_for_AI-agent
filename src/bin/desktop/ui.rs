@@ -62,6 +62,7 @@ impl DesktopApp {
             for (page, label) in [
                 (studio::Page::Work, "Work"),
                 (studio::Page::Chat, "Chat"),
+                (studio::Page::Teams, "Teams"),
                 (studio::Page::Apps, "应用"),
                 (studio::Page::Projects, "项目"),
                 (studio::Page::Api, "API 对话"),

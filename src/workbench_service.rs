@@ -41,6 +41,8 @@ struct Job {
 pub struct WorkbenchService {
     pub store: Arc<WorkflowStore>,
     pub intelligence: crate::model_intelligence::ModelIntelligence,
+    pub pricing: crate::pricing::PriceService,
+    pub teams: crate::team_service::TeamService,
     jobs: Mutex<HashMap<String, Job>>,
     closing: AtomicBool,
     // OS releases ownership on crash. Holding this lock prevents a second service
@@ -49,6 +51,13 @@ pub struct WorkbenchService {
 }
 
 impl WorkbenchService {
+    pub(crate) fn is_closing(&self) -> bool {
+        self.closing.load(Ordering::SeqCst)
+    }
+    pub(crate) async fn children_running(&self, ids: &[String]) -> bool {
+        let jobs = self.jobs.lock().await;
+        ids.iter().any(|id| jobs.contains_key(id))
+    }
     pub fn open(directory: &Path) -> Result<Arc<Self>> {
         std::fs::create_dir_all(directory)?;
         let ownership = File::options()
@@ -63,9 +72,13 @@ impl WorkbenchService {
         let store = Arc::new(WorkflowStore::open(directory.join("workflows.sqlite"))?);
         store.recover_interrupted()?;
         let intelligence = crate::model_intelligence::ModelIntelligence::open(directory)?;
+        let pricing = crate::pricing::PriceService::open(directory)?;
+        let teams = crate::team_service::TeamService::open(directory)?;
         Ok(Arc::new(Self {
             store,
             intelligence,
+            pricing,
+            teams,
             jobs: Mutex::new(HashMap::new()),
             closing: AtomicBool::new(false),
             _ownership: ownership,
@@ -98,6 +111,22 @@ impl WorkbenchService {
     }
 
     pub async fn start(self: &Arc<Self>, id: &str) -> Result<WorkflowRecord> {
+        ensure!(
+            !self
+                .store
+                .events(id, 0, 10)?
+                .iter()
+                .any(|event| event.kind == "team_owner"),
+            "this child is owned by a collaboration; start its parent team"
+        );
+        self.start_with_effort(id, None).await
+    }
+
+    pub(crate) async fn start_with_effort(
+        self: &Arc<Self>,
+        id: &str,
+        effort: Option<String>,
+    ) -> Result<WorkflowRecord> {
         let mut jobs = self.jobs.lock().await;
         ensure!(
             !self.closing.load(Ordering::SeqCst),
@@ -121,6 +150,8 @@ impl WorkbenchService {
         }
         let (cancel, cancel_rx) = watch::channel(false);
         let (controls, controls_rx) = mpsc::channel(32);
+        self.store
+            .append_event(id, "execution_settings", json!({"reasoning_effort":effort}))?;
         let record = self
             .store
             .transition(id, &[Status::Draft], Status::Running, None)?;
@@ -137,7 +168,9 @@ impl WorkbenchService {
         let service = Arc::clone(self);
         let task = record.clone();
         tokio::spawn(async move {
-            service.run(task, cancel, cancel_rx, controls_rx).await;
+            service
+                .run(task, effort, cancel, cancel_rx, controls_rx)
+                .await;
         });
         Ok(record)
     }
@@ -145,6 +178,7 @@ impl WorkbenchService {
     async fn run(
         self: Arc<Self>,
         record: WorkflowRecord,
+        effort: Option<String>,
         cancel: watch::Sender<bool>,
         cancel_rx: watch::Receiver<bool>,
         controls: mpsc::Receiver<NativeControl>,
@@ -157,7 +191,7 @@ impl WorkbenchService {
             prompt: record.prompt,
             read_only: record.read_only,
             max_duration_secs: record.max_duration_secs,
-            reasoning_effort: None,
+            reasoning_effort: effort,
             config_path: None,
         };
         let runner = tokio::spawn(native_executor::execute_with_control(
@@ -292,6 +326,14 @@ impl WorkbenchService {
         let jobs = self.jobs.lock().await;
         ensure!(!jobs.contains_key(id), "execution has not settled");
         ensure!(
+            !self
+                .store
+                .events(id, 0, 10)?
+                .iter()
+                .any(|event| event.kind == "team_owner"),
+            "this child requires its parent team's independent verification"
+        );
+        ensure!(
             !evidence.trim().is_empty() && evidence.len() <= 16_384,
             "provide acceptance evidence between 1 and 16384 bytes"
         );
@@ -311,12 +353,13 @@ impl WorkbenchService {
 
     pub async fn shutdown(&self) {
         self.closing.store(true, Ordering::SeqCst);
+        self.teams.stop_all().await;
         for job in self.jobs.lock().await.values() {
             let _ = job.cancel.send(true);
         }
         // Native runner has bounded cancellation and process-tree cleanup.
         for _ in 0..100 {
-            if self.jobs.lock().await.is_empty() {
+            if self.jobs.lock().await.is_empty() && self.teams.is_idle().await {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -326,6 +369,7 @@ impl WorkbenchService {
 
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .merge(crate::team_service::routes())
         .route("/api/v1/apps", get(apps))
         .route("/api/v1/intelligence", get(intelligence))
         .route("/api/v1/intelligence/refresh", post(refresh_intelligence))
@@ -360,7 +404,9 @@ async fn apps() -> Json<Value> {
     Json(json!(crate::desktop_bridge::official_apps()))
 }
 async fn intelligence(State(s): State<AppState>) -> Json<Value> {
-    Json(s.workbench.intelligence.status())
+    let mut status = s.workbench.intelligence.status();
+    status["pricing"] = s.workbench.pricing.status();
+    Json(status)
 }
 async fn refresh_intelligence(State(s): State<AppState>) -> ApiResult {
     Ok(Json(json!(s.workbench.intelligence.refresh().await?)))

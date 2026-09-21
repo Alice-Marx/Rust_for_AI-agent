@@ -1,5 +1,5 @@
 use std::{
-    io::{self, Write},
+    io::{self, Read, Write},
     time::Duration,
 };
 
@@ -83,6 +83,16 @@ enum Command {
     Work {
         #[command(subcommand)]
         action: WorkAction,
+    },
+    /// 创建和管理多模型团队任务（创建不会自动启动）
+    Team {
+        #[command(subcommand)]
+        action: TeamAction,
+    },
+    /// 查看官方价格快照、在线刷新或查询精确渠道报价
+    Pricing {
+        #[command(subcommand)]
+        action: PricingAction,
     },
     /// 查看模型数据来源；--refresh 每次在线刷新 LiveBench
     Intelligence {
@@ -188,6 +198,114 @@ enum WorkAction {
         id: String,
         evidence: String,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum TeamAction {
+    List,
+    /// 从 TeamCreate JSON 文件创建计划，随后使用 team start 启动
+    Create {
+        #[arg(long)]
+        file: std::path::PathBuf,
+    },
+    Get {
+        id: String,
+    },
+    Start {
+        id: String,
+    },
+    Cancel {
+        id: String,
+    },
+    Events {
+        id: String,
+        #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(i64).range(0..))]
+        after: i64,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PricingAction {
+    /// 显示缓存及核验状态，不发起官方来源刷新
+    Status,
+    /// 重新下载并核验官方来源
+    Refresh,
+    Quote {
+        #[arg(long)]
+        app: String,
+        #[arg(long)]
+        model: String,
+        /// 显式计费渠道，例如 api 或 subscription；不从登录状态推断
+        #[arg(long)]
+        billing: String,
+    },
+}
+
+fn team_request(action: TeamAction) -> Result<(String, Option<serde_json::Value>)> {
+    let segment = |id: &str| -> Result<String> {
+        anyhow::ensure!(!id.is_empty() && id != "." && id != "..", "团队 ID 无效");
+        Ok(url::form_urlencoded::byte_serialize(id.as_bytes())
+            .collect::<String>()
+            .replace('+', "%20"))
+    };
+    Ok(match action {
+        TeamAction::List => ("/api/v1/teams".into(), None),
+        TeamAction::Create { file } => {
+            const MAX_TEAM_FILE: usize = 8 * 1024 * 1024;
+            let file = std::fs::File::open(&file)
+                .with_context(|| format!("无法读取团队计划：{}", file.display()))?;
+            anyhow::ensure!(
+                file.metadata()?.is_file() && file.metadata()?.len() <= MAX_TEAM_FILE as u64,
+                "团队计划必须是最多 8 MiB 的 JSON 文件"
+            );
+            let mut bytes = Vec::new();
+            file.take(MAX_TEAM_FILE as u64 + 1)
+                .read_to_end(&mut bytes)?;
+            anyhow::ensure!(bytes.len() <= MAX_TEAM_FILE, "团队计划超过 8 MiB");
+            let request: wonderland::team_store::TeamCreate =
+                serde_json::from_slice(&bytes).context("团队计划 JSON 不符合 TeamCreate 格式")?;
+            ("/api/v1/teams".into(), Some(serde_json::to_value(request)?))
+        }
+        TeamAction::Get { id } => (format!("/api/v1/teams/{}", segment(&id)?), None),
+        TeamAction::Start { id } => (
+            format!("/api/v1/teams/{}/start", segment(&id)?),
+            Some(serde_json::json!({})),
+        ),
+        TeamAction::Cancel { id } => (
+            format!("/api/v1/teams/{}/cancel", segment(&id)?),
+            Some(serde_json::json!({})),
+        ),
+        TeamAction::Events { id, after } => (
+            format!("/api/v1/teams/{}/events?after={after}", segment(&id)?),
+            None,
+        ),
+    })
+}
+
+fn pricing_request(action: PricingAction) -> Result<(String, Option<serde_json::Value>)> {
+    Ok(match action {
+        PricingAction::Status => ("/api/v1/pricing".into(), None),
+        PricingAction::Refresh => (
+            "/api/v1/pricing/refresh".into(),
+            Some(serde_json::json!({})),
+        ),
+        PricingAction::Quote {
+            app,
+            model,
+            billing,
+        } => {
+            anyhow::ensure!(
+                !app.trim().is_empty() && !model.trim().is_empty() && !billing.trim().is_empty(),
+                "报价需要明确的应用、模型和计费渠道"
+            );
+            let query = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("app_id", &app)
+                .append_pair("model", &model)
+                .append_pair("billing_channel", &billing)
+                .finish();
+            (format!("/api/v1/pricing/quote?{query}"), None)
+        }
+    })
 }
 
 impl AgentApi {
@@ -620,7 +738,11 @@ async fn main() -> Result<()> {
         .map(std::path::PathBuf::from)
         .unwrap_or(std::env::current_dir()?);
     let commands = wonderland::commands::load_commands(&cwd);
-    let default_session = match (&cli.session_id, cli.resume) {
+    let uses_chat = matches!(
+        cli.command.as_ref(),
+        None | Some(Command::Chat { .. } | Command::Run { .. })
+    );
+    let default_session = match (&cli.session_id, cli.resume && uses_chat) {
         (Some(session_id), _) => session_id.clone(),
         (None, true) => resume_session(&api, &cli.user_id).await?,
         (None, false) => Uuid::new_v4().to_string(),
@@ -648,6 +770,20 @@ async fn main() -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&api.work_request(path, body).await?)?
+            );
+        }
+        Command::Team { action } => {
+            let (path, body) = team_request(action)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&api.work_request(&path, body).await?)?
+            );
+        }
+        Command::Pricing { action } => {
+            let (path, body) = pricing_request(action)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&api.work_request(&path, body).await?)?
             );
         }
         Command::Work { action } => {
@@ -1218,4 +1354,82 @@ fn print_response(response: &AgentResponse, include_output: bool) {
         response.usage.input_tokens,
         response.usage.output_tokens,
     );
+}
+
+#[cfg(test)]
+mod management_tests {
+    use super::*;
+
+    #[test]
+    fn pricing_requires_billing_and_preserves_exact_query_values() {
+        assert!(Cli::try_parse_from([
+            "wonderland-cli",
+            "pricing",
+            "quote",
+            "--app",
+            "codex",
+            "--model",
+            "gpt-test"
+        ])
+        .is_err());
+        let cli = Cli::try_parse_from([
+            "wonderland-cli",
+            "pricing",
+            "quote",
+            "--app",
+            "codex",
+            "--model",
+            "gpt-test+variant&reason=high",
+            "--billing",
+            "subscription",
+        ])
+        .unwrap();
+        let Some(Command::Pricing { action }) = cli.command else {
+            panic!("wrong command")
+        };
+        let (path, body) = pricing_request(action).unwrap();
+        assert!(body.is_none());
+        let url = url::Url::parse(&format!("http://localhost{path}")).unwrap();
+        assert_eq!(
+            url.query_pairs().into_owned().collect::<Vec<_>>(),
+            vec![
+                ("app_id".into(), "codex".into()),
+                ("model".into(), "gpt-test+variant&reason=high".into()),
+                ("billing_channel".into(), "subscription".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn team_events_reject_negative_cursor_and_escape_path_id() {
+        assert!(Cli::try_parse_from([
+            "wonderland-cli",
+            "team",
+            "events",
+            "team-1",
+            "--after",
+            "-1"
+        ])
+        .is_err());
+        let (path, body) = team_request(TeamAction::Events {
+            id: "team/a b?x=1".into(),
+            after: 42,
+        })
+        .unwrap();
+        assert_eq!(path, "/api/v1/teams/team%2Fa%20b%3Fx%3D1/events?after=42");
+        assert!(body.is_none());
+        assert!(team_request(TeamAction::Get { id: "..".into() }).is_err());
+    }
+
+    #[test]
+    fn team_plan_must_match_typed_schema_and_creation_does_not_start() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("team.json");
+        std::fs::write(&file, r#"{"prompt":"repair tests","cwd":"E:/projects/demo","planner":{"app_id":"kimi-cli","model":"kimi-for-coding"},"checks":[{"program":"cargo","args":["test"],"timeout_secs":300}]}"#).unwrap();
+        let (path, body) = team_request(TeamAction::Create { file: file.clone() }).unwrap();
+        assert_eq!(path, "/api/v1/teams");
+        assert_eq!(body.unwrap()["planner"]["model"], "kimi-for-coding");
+        std::fs::write(&file, r#"{"prompt":"repair tests","unexpected":true}"#).unwrap();
+        assert!(team_request(TeamAction::Create { file }).is_err());
+    }
 }

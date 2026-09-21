@@ -8,11 +8,14 @@ use std::{
 use wonderland::workflow::{
     ProjectRecord, WorkflowCreate, WorkflowEvent, WorkflowRecord, WorkflowStatus,
 };
+#[path = "teams.rs"]
+mod teams;
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Page {
     Work,
     Chat,
+    Teams,
     Apps,
     Projects,
     Api,
@@ -24,6 +27,8 @@ struct SavedView {
     page: Page,
     selected: Option<String>,
     board: bool,
+    #[serde(default)]
+    team_selected: Option<String>,
 }
 
 enum Reply {
@@ -82,6 +87,7 @@ pub struct Studio {
     evidence: String,
     answers: HashMap<String, Answer>,
     search: String,
+    teams: teams::Teams,
     #[cfg(feature = "ui-snapshots")]
     fixture: bool,
 }
@@ -122,6 +128,7 @@ impl Studio {
             evidence: String::new(),
             answers: HashMap::new(),
             search: String::new(),
+            teams: teams::Teams::new(cwd),
             #[cfg(feature = "ui-snapshots")]
             fixture: false,
         }
@@ -133,6 +140,7 @@ impl Studio {
                 self.page = saved.page;
                 self.selected = saved.selected;
                 self.board = saved.board;
+                self.teams.selected = saved.team_selected;
                 self.composing = self.selected.is_none() && !self.board;
             }
         }
@@ -146,6 +154,7 @@ impl Studio {
                 page: self.page,
                 selected: self.selected.clone(),
                 board: self.board,
+                team_selected: self.teams.selected.clone(),
             },
         );
     }
@@ -158,6 +167,7 @@ impl Studio {
         self.page = page;
     }
     pub fn project_context(&mut self, cwd: &str) {
+        self.teams.project_context(cwd);
         if self.workspace != cwd {
             if self.cwd == self.workspace || self.cwd.is_empty() {
                 self.cwd = cwd.into();
@@ -180,6 +190,7 @@ impl Studio {
         if self.fixture {
             return;
         }
+        self.teams.poll(ctx, server, self.page == Page::Teams);
         if self.source != server {
             self.source = server.into();
             self.records.clear();
@@ -409,6 +420,29 @@ impl Studio {
             });
         }
         match self.page {
+            Page::Teams => {
+                self.teams.render(ui, &self.apps);
+                if let Some(project) = self.teams.open_project.take() {
+                    self.open_project = Some(project);
+                }
+                if let Some(id) = self.teams.open_workflow.take() {
+                    self.page = Page::Work;
+                    self.select_record(&id);
+                    let (tx, source, ctx) =
+                        (self.tx.clone(), self.source.clone(), ui.ctx().clone());
+                    thread::spawn(move || {
+                        let result = Runtime::new().map_err(|e| e.to_string()).and_then(|rt| {
+                            rt.block_on(get_json::<WorkflowRecord>(
+                                &source,
+                                &format!("/api/v1/workflows/{id}"),
+                            ))
+                            .map(Some)
+                        });
+                        let _ = tx.send(Reply::Mutation { source, result });
+                        ctx.request_repaint();
+                    });
+                }
+            }
             Page::Apps => self.render_apps(ui),
             Page::Projects => self.render_projects(ui, cwd),
             Page::Work | Page::Chat => self.render_work(ui, cwd),
@@ -1289,6 +1323,10 @@ impl Studio {
         self.composing = false;
         self.board = true;
         match mode {
+            "studio-teams" | "studio-teams-new" => {
+                self.page = Page::Teams;
+                self.teams.prepare_snapshot(cwd, mode == "studio-teams-new");
+            }
             "studio-apps" => self.page = Page::Apps,
             "studio-projects" => self.page = Page::Projects,
             "studio-task" => {

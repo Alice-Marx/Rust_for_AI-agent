@@ -166,7 +166,7 @@ impl ModelIntelligence {
                 if target.scheme() != "https"
                     || !matches!(
                         target.host_str(),
-                        Some("api.github.com" | "raw.githubusercontent.com")
+                        Some("api.github.com" | "raw.githubusercontent.com" | "github.com")
                     )
                 {
                     return attempt.error("LiveBench 重定向离开了允许的 HTTPS 来源");
@@ -325,8 +325,29 @@ impl ModelIntelligence {
     }
 
     async fn github_main_sha(&self, repository: &str) -> Result<String> {
+        ensure!(
+            matches!(repository, NEW_LIVEBENCH_REPO | LIVEBENCH_REPO),
+            "unrecognized LiveBench repository"
+        );
         let url = format!("{GITHUB_API}/{repository}/commits/main");
-        let bytes = self.fetch_bounded(&url, 1_048_576).await?;
+        let bytes = match self.fetch_bounded(&url, 1_048_576).await {
+            Ok(bytes) => bytes,
+            Err(api_error) => {
+                // GitHub's public REST quota is independent of its official Git
+                // transport. Fetch fresh advertised refs from the same repository;
+                // no cached SHA, subprocess credential lookup or branch guess.
+                let refs_url = format!(
+                    "https://github.com/{repository}.git/info/refs?service=git-upload-pack"
+                );
+                let refs = self
+                    .fetch_bounded(&refs_url, MAX_SOURCE_BYTES)
+                    .await
+                    .with_context(|| {
+                        format!("GitHub REST failed ({api_error}); official Git refs also failed")
+                    })?;
+                return parse_advertised_main(&refs);
+            }
+        };
         let value: Value = serde_json::from_slice(&bytes).context("GitHub commit 响应不是 JSON")?;
         let sha = value
             .get("sha")
@@ -403,6 +424,47 @@ impl ModelIntelligence {
             }
         }
     }
+}
+
+fn parse_advertised_main(bytes: &[u8]) -> Result<String> {
+    let mut cursor = 0usize;
+    let mut found = None;
+    let mut service = false;
+    while cursor < bytes.len() {
+        ensure!(cursor + 4 <= bytes.len(), "truncated Git ref frame");
+        let size = usize::from_str_radix(std::str::from_utf8(&bytes[cursor..cursor + 4])?, 16)
+            .context("invalid Git ref frame size")?;
+        cursor += 4;
+        if size == 0 {
+            continue;
+        }
+        ensure!(
+            size >= 4 && cursor + size - 4 <= bytes.len(),
+            "invalid Git ref frame length"
+        );
+        let frame = std::str::from_utf8(&bytes[cursor..cursor + size - 4])?;
+        cursor += size - 4;
+        if frame == "# service=git-upload-pack\n" {
+            service = true;
+            continue;
+        }
+        let reference = frame
+            .split('\0')
+            .next()
+            .unwrap_or("")
+            .trim_end_matches('\n');
+        if let Some((sha, name)) = reference.split_once(' ') {
+            if name == "refs/heads/main" {
+                ensure!(
+                    is_sha(sha) && found.is_none(),
+                    "invalid or duplicate advertised main revision"
+                );
+                found = Some(sha.to_owned());
+            }
+        }
+    }
+    ensure!(service, "unexpected Git ref service");
+    found.context("official Git transport did not advertise refs/heads/main")
 }
 
 fn timestamp() -> String {
@@ -894,6 +956,28 @@ fn validate_nonempty_bounded(value: &str, label: &str, max: usize) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn official_git_refs_require_framing_service_and_exact_main() {
+        let frame = |text: &str| format!("{:04x}{text}", text.len() + 4);
+        let sha = "1234567890123456789012345678901234567890";
+        let refs = format!(
+            "{}0000{}{}0000",
+            frame("# service=git-upload-pack\n"),
+            frame(&format!("{sha} HEAD\0symref=HEAD:refs/heads/main\n")),
+            frame(&format!("{sha} refs/heads/main\n"))
+        );
+        assert_eq!(parse_advertised_main(refs.as_bytes()).unwrap(), sha);
+        assert!(parse_advertised_main(&refs.as_bytes()[..refs.len() - 1]).is_err());
+        assert!(parse_advertised_main(
+            refs.replace("refs/heads/main", "refs/heads/fake")
+                .as_bytes()
+        )
+        .is_err());
+        assert!(parse_advertised_main(
+            format!("{refs}{}", frame(&format!("{sha} refs/heads/main\n"))).as_bytes()
+        )
+        .is_err());
+    }
 
     #[test]
     fn release_discovery_uses_only_published_literal_dates() {

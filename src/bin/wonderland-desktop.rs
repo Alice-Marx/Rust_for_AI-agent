@@ -1227,7 +1227,11 @@ impl eframe::App for DesktopApp {
         }
         let studio_mode = matches!(
             self.studio.page,
-            studio::Page::Work | studio::Page::Chat | studio::Page::Apps | studio::Page::Projects
+            studio::Page::Work
+                | studio::Page::Chat
+                | studio::Page::Apps
+                | studio::Page::Projects
+                | studio::Page::Teams
         );
         // Give the conversation room when settings are open on a small screen.
         if !studio_mode

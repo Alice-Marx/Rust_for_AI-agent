@@ -39,3 +39,5 @@ jobs:
       - run: cargo check --locked --all-targets --features ui-snapshots
       - name: Headless desktop bridge, workspace and native PTY tests
         run: cargo test --locked --lib desktop_
+      - name: Collaboration state, verification and Git isolation tests
+        run: cargo test --locked --lib team_
