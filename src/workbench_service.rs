@@ -104,7 +104,7 @@ impl WorkbenchService {
         native_executor::validate_binding(
             &request.app_id,
             &request.model,
-            None,
+            request.reasoning_effort.as_deref(),
             request.read_only,
         )?;
         let cwd =
@@ -117,21 +117,21 @@ impl WorkbenchService {
     }
 
     pub async fn start(self: &Arc<Self>, id: &str) -> Result<WorkflowRecord> {
-        ensure!(
-            !self
-                .store
-                .events(id, 0, 10)?
-                .iter()
-                .any(|event| event.kind == "team_owner"),
-            "this child is owned by a collaboration; start its parent team"
-        );
-        self.start_with_effort(id, None).await
+        self.start_stored(id, None).await
     }
 
-    pub(crate) async fn start_with_effort(
+    pub(crate) async fn start_team_child(
         self: &Arc<Self>,
         id: &str,
-        effort: Option<String>,
+        team_id: &str,
+    ) -> Result<WorkflowRecord> {
+        self.start_stored(id, Some(team_id)).await
+    }
+
+    async fn start_stored(
+        self: &Arc<Self>,
+        id: &str,
+        team_id: Option<&str>,
     ) -> Result<WorkflowRecord> {
         let mut jobs = self.jobs.lock().await;
         ensure!(
@@ -139,16 +139,40 @@ impl WorkbenchService {
             "service is shutting down"
         );
         let record = self.store.get(id)?.context("task not found")?;
+        let events = self.store.events(id, 0, 10)?;
+        let owner = events.iter().find(|event| event.kind == "team_owner");
+        match (team_id, owner) {
+            (None, Some(_)) => {
+                anyhow::bail!("this child is owned by a collaboration; start its parent team")
+            }
+            (Some(team_id), Some(owner)) => {
+                ensure!(
+                    owner.data["team_id"].as_str() == Some(team_id),
+                    "this child belongs to another collaboration"
+                );
+                let binding = &owner.data["executor"];
+                ensure!(
+                    binding["app_id"].as_str() == Some(record.app_id.as_str())
+                        && binding["model"].as_str() == Some(record.model.as_str())
+                        && binding["reasoning_effort"] == json!(record.reasoning_effort),
+                    "stored child settings do not match its collaboration binding"
+                );
+            }
+            (Some(_), None) => anyhow::bail!("task has no collaboration owner"),
+            (None, None) => {}
+        }
         // A retry creates a new task and a fresh native session. Never replay edits
         // or swap the native session identity of a possibly partially completed run.
         ensure!(
             record.status == Status::Draft,
             "only a draft can start; create a new task to retry"
         );
-        ensure!(
-            native_executor::supports_native(&record.app_id),
-            "managed adapter unavailable"
-        );
+        native_executor::validate_binding(
+            &record.app_id,
+            &record.model,
+            record.reasoning_effort.as_deref(),
+            record.read_only,
+        )?;
         let cwd = std::fs::canonicalize(&record.cwd)?;
         ensure!(cwd.is_dir(), "project directory is unavailable");
         for job in jobs.values() {
@@ -156,8 +180,11 @@ impl WorkbenchService {
         }
         let (cancel, cancel_rx) = watch::channel(false);
         let (controls, controls_rx) = mpsc::channel(32);
-        self.store
-            .append_event(id, "execution_settings", json!({"reasoning_effort":effort}))?;
+        self.store.append_event(
+            id,
+            "execution_settings",
+            json!({"reasoning_effort":record.reasoning_effort}),
+        )?;
         let record = self
             .store
             .transition(id, &[Status::Draft], Status::Running, None)?;
@@ -174,9 +201,7 @@ impl WorkbenchService {
         let service = Arc::clone(self);
         let task = record.clone();
         tokio::spawn(async move {
-            service
-                .run(task, effort, cancel, cancel_rx, controls_rx)
-                .await;
+            service.run(task, cancel, cancel_rx, controls_rx).await;
         });
         Ok(record)
     }
@@ -184,7 +209,6 @@ impl WorkbenchService {
     async fn run(
         self: Arc<Self>,
         record: WorkflowRecord,
-        effort: Option<String>,
         cancel: watch::Sender<bool>,
         cancel_rx: watch::Receiver<bool>,
         controls: mpsc::Receiver<NativeControl>,
@@ -197,7 +221,7 @@ impl WorkbenchService {
             prompt: record.prompt,
             read_only: record.read_only,
             max_duration_secs: record.max_duration_secs,
-            reasoning_effort: effort,
+            reasoning_effort: record.reasoning_effort,
             config_path: None,
         };
         let runner = tokio::spawn(native_executor::execute_with_control(
@@ -415,6 +439,7 @@ async fn apps() -> Json<Value> {
                 let capabilities = native_executor::capabilities(&app.id);
                 let mut value = json!(app);
                 value["native_controls"] = json!(capabilities);
+                value["workflow_settings"] = json!({"reasoning_effort_at_create":true});
                 value
             })
             .collect(),
@@ -464,7 +489,20 @@ async fn events(
         .store
         .events(&id, q.after, q.limit)?)))
 }
-async fn start(State(s): State<AppState>, HttpPath(id): HttpPath<String>) -> ApiResult {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartRequest {}
+
+async fn start(
+    State(s): State<AppState>,
+    HttpPath(id): HttpPath<String>,
+    body: axum::body::Bytes,
+) -> ApiResult {
+    if !body.is_empty() {
+        serde_json::from_slice::<StartRequest>(&body).context(
+            "start accepts an empty object only; execution uses the saved task settings",
+        )?;
+    }
     Ok(Json(json!(s.workbench.start(&id).await?)))
 }
 async fn cancel(State(s): State<AppState>, HttpPath(id): HttpPath<String>) -> ApiResult {
@@ -640,6 +678,62 @@ mod tests {
         }
         assert!(service.store.list().unwrap().is_empty());
     }
+
+    #[tokio::test]
+    async fn unsupported_effort_is_rejected_on_create_and_stored_draft_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = WorkbenchService::open(dir.path()).unwrap();
+        for (app, model, effort) in [
+            ("codex", "gpt-test", "off"),
+            ("claude", "claude-sonnet-4-6", "ultra"),
+            ("deepseek", "deepseek-chat", "medium"),
+            ("kimi-cli", "kimi-for-coding", "high"),
+        ] {
+            let mut request = draft(dir.path());
+            request.app_id = app.into();
+            request.model = model.into();
+            request.reasoning_effort = Some(effort.into());
+            assert!(service
+                .create(request.clone())
+                .unwrap_err()
+                .to_string()
+                .contains("reasoning effort"));
+            // A prior/imported draft can bypass service creation. Start must
+            // revalidate before recording execution or launching any tool.
+            let stored = service.store.create(request).unwrap();
+            let before = service.store.events(&stored.id, 0, 20).unwrap();
+            assert!(service
+                .start(&stored.id)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("reasoning effort"));
+            assert_eq!(service.store.get(&stored.id).unwrap(), Some(stored.clone()));
+            assert_eq!(service.store.events(&stored.id, 0, 20).unwrap(), before);
+            assert!(service.jobs.lock().await.is_empty());
+        }
+        assert_eq!(service.store.list().unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn stored_cross_provider_binding_is_rejected_before_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = WorkbenchService::open(dir.path()).unwrap();
+        let mut request = draft(dir.path());
+        request.app_id = "claude".into();
+        let record = service.store.create(request).unwrap();
+        let before = service.store.events(&record.id, 0, 20).unwrap();
+        assert!(service
+            .start(&record.id)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("provider"));
+        assert_eq!(service.store.get(&record.id).unwrap(), Some(record.clone()));
+        assert_eq!(service.store.events(&record.id, 0, 20).unwrap(), before);
+        assert!(service.jobs.lock().await.is_empty());
+    }
+
     #[tokio::test]
     async fn cancellation_waits_for_worker_cleanup_and_permissions_are_one_time() {
         let dir = tempfile::tempdir().unwrap();

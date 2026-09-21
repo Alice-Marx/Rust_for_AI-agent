@@ -1,6 +1,6 @@
 # rust-ai-wonderland-cli
 
-Wonderland 0.10.0 工作台预览版的零依赖终端客户端。Node.js 18+，连接已启动的 Wonderland Rust 后端；后端来自桌面安装包、便携包或源码构建。npm 包不包含后端。
+Wonderland 终端客户端，当前源码 0.11.0 开发中，npm 最新预览版为 0.10.0。Node.js 18+，连接已启动的 Wonderland Rust 后端；后端来自桌面安装包、便携包或源码构建。npm 包不包含后端。
 
 新增官方应用任务命令：
 
@@ -20,7 +20,7 @@ wonderland-cli intelligence refresh
 
 `apps --probe <id>` 只检测注册程序的版本、路径和 SHA-256，不调用模型或读取凭据。程序已安装不代表账号、模型或订阅可用；文件指纹也不是发行商签名认证。
 
-推理档位目前在 Teams 执行器绑定中使用 `reasoning_effort` 指定；单个 Work 任务使用官方默认档位，并明确拒绝 `--reasoning`，避免静默丢弃用户选择。
+当前源码支持在 `work create` 时使用全局 `--reasoning`，保存为任务的 `reasoning_effort`；例如 `wonderland-cli --model claude-sonnet-4-6 --reasoning high work create claude "检查错误处理"`。启动使用已保存配置，不接受临时覆盖；省略档位表示沿用官方默认。Teams 同样在执行器绑定中指定 `reasoning_effort`。这项改动需要配套的新版源码后端；已发布 0.10.0 仍只支持在 Teams 中指定档位。
 
 团队任务使用 JSON 计划。以下命令在 npm CLI 和 Rust CLI 中相同，`create` 仅创建计划，`start` 明确启动执行：
 

@@ -804,8 +804,8 @@ async fn main() -> Result<()> {
         Command::Work { action } => {
             use serde_json::json;
             anyhow::ensure!(
-                cli.reasoning.is_none(),
-                "单个 Work 任务暂不接受 --reasoning；请在 Teams 计划的 executor.reasoning_effort 中指定，或不传此参数使用官方默认档位"
+                cli.reasoning.is_none() || matches!(&action, WorkAction::Create { .. }),
+                "--reasoning 只能在 work create 时指定，任务启动使用草稿中已保存的配置"
             );
             let (path, body, start_after) = match action {
                 WorkAction::List => ("/api/v1/workflows".into(), None, false),
@@ -818,9 +818,17 @@ async fn main() -> Result<()> {
                     start,
                 } => (
                     "/api/v1/workflows".into(),
-                    Some(
-                        json!({"prompt":prompt,"title":title.unwrap_or_default(),"cwd":cwd.to_string_lossy(),"mode":if chat {"chat"} else {"work"},"app_id":app,"model":cli.model.context("请通过全局 --model 参数指定模型")?,"read_only":read_only}),
-                    ),
+                    Some(json!(wonderland::workflow::WorkflowCreate {
+                        prompt,
+                        title: title.unwrap_or_default(),
+                        cwd: cwd.to_string_lossy().into_owned(),
+                        mode: if chat { "chat" } else { "work" }.into(),
+                        app_id: app,
+                        model: cli.model.context("请通过全局 --model 参数指定模型")?,
+                        reasoning_effort: cli.reasoning,
+                        read_only,
+                        ..Default::default()
+                    })),
                     start,
                 ),
                 WorkAction::Get { id } => (format!("/api/v1/workflows/{id}"), None, false),

@@ -40,7 +40,10 @@ jobs:
       - name: Headless desktop bridge, workspace and native PTY tests
         run: cargo test --locked --lib desktop_
       - name: Collaboration state, verification and Git isolation tests
-        run: cargo test --locked --lib team_
+        run: |
+          cargo test --locked --lib team_
+          cargo test --locked --lib workflow::tests
+          cargo test --locked --lib workbench_service::tests
       - name: Official tool adapters and local installation diagnostics
         run: |
           cargo test --locked --lib native_executor

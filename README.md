@@ -1,8 +1,10 @@
 # Wonderland · Rust AI Agent
 
-Wonderland 是支持多模型 API 与订阅账号的 Rust 编码工作区，提供 Windows 桌面应用、原生 CLI、npm CLI 和本地 HTTP 服务。当前开发版本 **0.10.0（官方执行器扩展预览版）**。
+Wonderland 是支持多模型 API 与订阅账号的 Rust 编码工作区，提供 Windows 桌面应用、原生 CLI、npm CLI 和本地 HTTP 服务。最新已发布版本 **0.10.0（官方执行器扩展预览版）**；当前源码为 **0.11.0 开发中，尚未发布**，继续完善任务配置持久化。
 
 本版继续实现[多模型协作建设方案](docs/MULTI_MODEL_ORCHESTRATION_PLAN.md)与[桌面产品方案](docs/DESKTOP_PRODUCT_PLAN.md)。Work/Chat、持久任务看板、项目与 Teams 共用官方执行器：Codex app-server、Kimi Wire，以及新增的 Claude Code 双向 stream-json、DeepSeek Harness ACP。模型执行由对应原生工具承担，原工具源码不作修改。
+
+当前源码新增 Work/Chat 推理档位持久化，并与 Teams 共用固定配置。仓库布局、主分支整理和数据库迁移说明见[开发文档索引](docs/README.md)；已发布 0.10.0 安装包仍维持其发布时功能。
 
 **Teams 已支持固定官方执行器自动拆解任务，以及逐节点指定模型的 DAG 执行。** 节点在独立 Git 工作区运行，受依赖、写入范围、并发数、重试和总时限约束；集成后运行用户预先指定的验证命令。桌面、Rust CLI、npm CLI 共用持久状态与权限流程。
 
@@ -80,7 +82,7 @@ wonderland-cli --model kimi-k2.5 --cwd E:/my-project chat
 需要 Node.js 18+，以及已启动的 Wonderland 服务。npm 包是服务客户端，不包含 Rust 后端。Windows 安装包已经附带原生 CLI，也可以安装 npm 客户端：
 
 ```powershell
-npm install -g rust-ai-wonderland-cli
+npm install -g rust-ai-wonderland-cli@next
 wonderland-cli --version
 wonderland-cli health
 wonderland-cli --cwd E:/my-project --model kimi-k2.5 --reasoning on chat
@@ -89,7 +91,7 @@ wonderland-cli search "模型适配"
 wonderland-cli profile --model gpt-5.4
 ```
 
-发布前可安装本地包：`npm install -g ./dist/rust-ai-wonderland-cli-0.7.0.tgz`。命令别名为 `wonderland`、`wonderland-cli`；原生 `wonderland.exe` 是后端服务，因此安装两种 CLI 后建议使用 `wonderland-cli` 并检查 PATH 顺序。
+也可安装本地发布包：`npm install -g ./dist/rust-ai-wonderland-cli-0.10.0.tgz`。`next` 对应已发布预览版，`latest` 仍为 0.7.0 稳定频道。命令别名为 `wonderland`、`wonderland-cli`；原生 `wonderland.exe` 是后端服务，因此安装两种 CLI 后建议使用 `wonderland-cli` 并检查 PATH 顺序。
 
 原生 CLI 使用 `wonderland-cli --model gpt-5.4 profile`（全局参数放在子命令前）。`--no-stream` 等待完整回答，`--reasoning` 按模型能力选择档位。交互终端会询问需要批准的工具参数；重定向/非交互终端不会擅自批准。
 

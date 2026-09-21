@@ -571,13 +571,13 @@ async function main() {
       break;
     }
     case "work": {
-      if (options.reasoning !== null) throw new Error("Single Work tasks do not accept --reasoning yet; use executor.reasoning_effort in a Teams plan, or omit it for the official default");
       const [action = "list", id, requestId, ...tail] = options.args;
+      if (options.reasoning !== null && action !== "create") throw new Error("--reasoning is only accepted by work create; starting a task uses the saved reasoning_effort");
       let endpoint = "/api/v1/workflows";
       let body;
       if (action === "create") {
         if (!id || !requestId || !options.model) throw new Error("work create requires an app, prompt and --model");
-        body = {app_id:id,model:options.model,prompt:[requestId,...tail].join(" "),cwd:options.cwd,mode:"work",read_only:options.mode === "plan"};
+        body = {app_id:id,model:options.model,...(options.reasoning === null ? {} : {reasoning_effort:options.reasoning}),prompt:[requestId,...tail].join(" "),cwd:options.cwd,mode:"work",read_only:options.mode === "plan"};
       } else if (action !== "list") {
         if (!id) throw new Error("work operation requires a task ID");
         endpoint += `/${encodeURIComponent(id)}`;

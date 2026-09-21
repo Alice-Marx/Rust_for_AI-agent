@@ -24,3 +24,11 @@ CodexHost 的主要目标是在 Codex Desktop 的交互环境内接入多个 Har
 0.10.0 已新增自有 Rust Claude Code 双向 stream-json transport 和 DeepSeek Harness ACP transport。分别固定经过验证的官方发行版，检查生效模型与推理档位，并区分原生用量、上下文占用和实际计费证据。应用目录使用结构化能力报告，新增安装版本/入口/指纹诊断；安装检查不推测认证或模型可用性。
 
 Claude 已完成官方 CLI 离线协议轨迹和本地合成响应测试，DeepSeek 已完成真实官方 CLI 无密钥握手，均未完成真实付费推理。两个适配器的恢复、分叉保持不可用。模型列表、原生额度、远程主机和插件清单仍需由适配器逐项实现及报告，不能从 CodexHost 的能力列表推断 Wonderland 已支持。
+
+## 0.10.0 之后的源码整理与配置持久化
+
+再次在线检查上游 HEAD，仍为上述提交。`packages/shared-contracts/src/harness-models.ts` 将请求的模型/推理选项、逐模型可用选项及会话生效状态分开；`packages/host-runtime/src/app-server-host.ts` 的 thinking 切换在原生操作和状态 revision 更新后确认结果。这一分层用于本轮修正 Wonderland 单任务配置遗漏。
+
+Work/Chat 的草稿、数据库记录、复制任务和 NativeRequest 现在携带同一 `reasoning_effort`。Teams 创建子任务时保存该绑定，启动时核对 owner 和完整执行器绑定，不再通过额外启动参数注入。SQLite v1→v2 事务增加可空列，旧任务保持未指定；历史 execution_settings 事件不回填成用户的新选择。
+
+桌面从当前连接服务的 native_controls 读取档位，不用本地编译常量替代服务能力；单任务需服务另行声明 reasoning_effort_at_create。选项表示适配器支持提交的请求，并不等同于账号中该模型已验证生效。Claude/DeepSeek 有原生回读检查；Codex 当前是传入固定的 turn effort，尚未完成逐模型生效状态回读。因此任务详情使用“请求推理”文案，不把请求值当成官方确认值。

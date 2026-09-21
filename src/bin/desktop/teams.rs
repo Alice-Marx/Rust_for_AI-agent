@@ -586,11 +586,11 @@ impl Teams {
                 });
                 if previous != self.app_id { self.model.clear(); self.effort.clear(); }
                 ui.add(TextEdit::singleline(&mut self.model).hint_text("精确模型 ID").desired_width(220.));
-                let efforts = wonderland::native_executor::capabilities(&self.app_id).reasoning_efforts;
-                if !efforts.is_empty() {
+                let efforts = advertised_efforts(apps, &self.app_id);
+                if !efforts.is_empty() || !self.effort.is_empty() {
                     egui::ComboBox::from_id_salt("team-effort").selected_text(if self.effort.is_empty() { "默认推理档位" } else { &self.effort }).show_ui(ui, |ui| {
                         ui.selectable_value(&mut self.effort, String::new(), "默认推理档位");
-                        for effort in efforts { ui.selectable_value(&mut self.effort, effort.clone(), effort); }
+                        for effort in &efforts { ui.selectable_value(&mut self.effort, effort.clone(), effort); }
                     });
                 }
             });
@@ -640,7 +640,9 @@ impl Teams {
             let request = self.build_request();
             if let Err(error) = &request { ui.label(RichText::new(error).small().color(MUTED)); }
             ui.horizontal_wrapped(|ui| {
-                let enabled = self.connected && !self.busy && request.is_ok() && apps.iter().any(|app| app_id(app) == self.app_id && managed(app));
+                let supported_effort = self.effort.is_empty() || advertised_efforts(apps, &self.app_id).contains(&self.effort);
+                if !supported_effort { ui.colored_label(AMBER, "当前服务未提供此推理档位，请重新选择。"); }
+                let enabled = self.connected && !self.busy && supported_effort && request.is_ok() && apps.iter().any(|app| app_id(app) == self.app_id && managed(app));
                 if ui.add_enabled(enabled, egui::Button::new(RichText::new(if self.strategy == TeamStrategy::Automatic { "创建并检查条件  →" } else { "创建并开始协作  →" }).strong().color(BG)).fill(ACCENT)).clicked() {
                     if let Ok(request) = &request { self.mutate(ui.ctx(), "/api/v1/teams".into(), json!(request), true); }
                 }

@@ -1,0 +1,47 @@
+# 开发文档与仓库结构
+
+最新发布物是 [0.10.0](RELEASE-0.10.0.md)。当前源码已递增为 0.11.0 开发版本，尚未发布；npm 的 next 仍指向已发布 0.10.0，发布记录中的限制按对应版本理解。新改动经测试后进入主分支，只有独立构建并发布的版本才更新安装器与 npm。
+
+## 代码位置
+
+| 目录/模块 | 职责 |
+| --- | --- |
+| src/workflow.rs、workbench_service.rs | 单任务 SQLite 状态、配置与执行控制 |
+| src/team_*.rs | 团队 DAG、官方执行器绑定、独立工作区和验收 |
+| src/native_executor.rs、native_executor/ | Codex、Kimi、Claude、DeepSeek 原生协议 |
+| src/model_intelligence.rs、pricing.rs | LiveBench 与官方价格证据 |
+| src/bin/desktop/ | Rust egui 工作台、Teams、项目与终端界面 |
+| src/bin/wonderland-cli.rs | 原生 Rust 服务客户端 |
+| packaging/npm/wonderland-cli/ | npm 服务客户端及测试 |
+| packaging/windows/ | 安装包和便携包构建 |
+| anytool/ | 固定提交的上游子模块与 Claude 来源快照，详见目录 README |
+| 根目录的官方工具检出 | 本地只读参考，不参与主程序构建，也不自动打包 |
+
+主程序的适配器独立维护，上游目录不承担 Wonderland 功能修改。根目录的 MiMo-Code、minimax-code、cli 与 anytool 中记录的版本一致，原文件保留并加入忽略规则；qwen-code 同样保留为本地参考。用户的 RESEARCH_PAPER_FRAMEWORK.md 保持原状，未作为代码提交。不要通过整体 git add 将研究材料、凭据或本地参考仓库混入发布。
+
+## 本轮整理
+
+核对时，GitHub main 的两个上游目录提交（22ad26f、eb3c12b）与开发分支的 0.8–0.10 功能提交（04abea3、513505c、61819b1）分开。已在开发分支合并 main 的目录记录，保留全部功能与上游固定提交；同时修正文档中仍指向旧 npm 包的命令。main 在统一检查通过后接收这些已测试内容。
+
+## 当前源码的新功能
+
+Work/Chat 支持创建时保存推理档位，任务详情显示请求值，复制任务保留选择。重启后启动任务只读取数据库内的配置；更改配置需要创建新任务。Teams 子任务采用同一保存和校验路径。两个 CLI 只在 work create 接受 --reasoning，start API 也拒绝携带配置覆盖。
+
+SQLite 工作流数据库从 v1 事务迁移到 v2；旧记录保持 reasoning_effort=null，原始模型、历史和状态不变。旧 0.10.0 程序会拒绝读取 v2 数据库，因此调试新源码应使用独立 AGENT_DATA_DIR；若要回退，使用升级前的完整数据备份。应用并不自动降级数据库。
+
+推理选项来自所连接服务的能力报告，不是每个模型实际可用档位的保证。Kimi 当前没有这项受管配置，不能给它填入通用的 high。指定 None/省略表示官方默认，off、none、minimal 等原生值不会互相翻译。
+
+## 本轮验证
+
+Windows 全目标回归通过：404 项库测试、3 项 Rust CLI、18 项桌面、7 项协议集成，共 432 项，外部条件测试 7 项默认忽略。npm 14 项测试通过。新增测试覆盖真实 v1 数据库迁移与重开、旧 JSON、非法档位、跨提供商拒绝、Teams 子任务持久化和归属检查，以及服务能力变更。
+
+另从已发布版本的独立测试数据库创建副本，启动新版后端：Rust CLI 创建 Claude high 只读草稿，npm CLI 创建 DeepSeek off 草稿，旧客户端省略档位得到 null。重启后选择保持不变，5 个既有成功任务的模型、状态和输出保持一致；启动时覆盖配置、Kimi 不支持的 high 都被拒绝。测试未调用模型、未更改原数据库。界面在常规与 940×620 窗口检查过。
+
+## 文档入口
+
+- [多模型协作建设方案](MULTI_MODEL_ORCHESTRATION_PLAN.md)、[桌面产品方案](DESKTOP_PRODUCT_PLAN.md)：长期目标与验收设计，不代表全部实现。
+- [CodexHost 技术参考](CODEX_HOST_REFERENCE.md)：来源、采用方式与能力边界。
+- [Claude 适配](CLAUDE_NATIVE_ADAPTER.md)、[DeepSeek 适配](DEEPSEEK_NATIVE_ADAPTER.md)：支持版本与协议证据。
+- [0.10.0 验证](VALIDATION-0.10.0.md)、[0.9.0 Kimi 实测](VALIDATION-0.9.0.md)：已发布版本的测试记录。
+
+待完成的重点仍包括自动质量/成本选模、可执行预算限制、更多原生适配器、恢复/分叉、插件、定时任务、远程主机及 PR/网站面板。源码目录收录某工具不代表它已支持受管协作。

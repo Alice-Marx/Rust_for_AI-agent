@@ -88,6 +88,7 @@ pub struct Studio {
     workspace: String,
     app_id: String,
     model: String,
+    effort: String,
     read_only: bool,
     minutes: u64,
     acceptance: String,
@@ -105,7 +106,7 @@ impl Studio {
         Self {
             page: Page::Work,
             records: vec![],
-            apps: local_apps(),
+            apps: vec![],
             diagnostics: HashMap::new(),
             probing: None,
             projects: vec![],
@@ -131,6 +132,7 @@ impl Studio {
             workspace: cwd.into(),
             app_id: "codex".into(),
             model: String::new(),
+            effort: String::new(),
             read_only: false,
             minutes: 30,
             acceptance: String::new(),
@@ -204,7 +206,7 @@ impl Studio {
             self.source = server.into();
             self.records.clear();
             self.events.clear();
-            self.apps = local_apps();
+            self.apps.clear();
             self.diagnostics.clear();
             self.probing = None;
             self.projects.clear();
@@ -253,7 +255,10 @@ impl Studio {
                     if let Some(apps) = apps {
                         match apps {
                             Ok(a) => self.apps = a,
-                            Err(e) => self.notice = e,
+                            Err(e) => {
+                                self.apps.clear();
+                                self.notice = e;
+                            }
                         }
                     }
                     if let Some(projects) = projects {
@@ -620,10 +625,23 @@ impl Studio {
                     ui.label(RichText::new("执行应用").small().color(MUTED));
                     let previous_app=self.app_id.clone();
                     egui::ComboBox::from_id_salt("workflow-app").selected_text(app_label(&self.app_id)).width(180.).show_ui(ui,|ui|{for app in &self.apps {let id=app_id(app);if managed(app){ui.selectable_value(&mut self.app_id,id.to_owned(),app_name(app));}}});
-                    if previous_app!=self.app_id {self.model.clear();}
+                    if previous_app!=self.app_id {self.model.clear();self.effort.clear();}
                     ui.label(RichText::new("模型").small().color(MUTED));
                     ui.add(TextEdit::singleline(&mut self.model).hint_text("模型 ID").desired_width(200.)).on_hover_text("使用该官方应用账号中可用的模型 ID，任务启动后保持固定");
                 });
+                let efforts = workflow_efforts(&self.apps, &self.app_id);
+                if !efforts.is_empty() || !self.effort.is_empty() {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("推理档位").small().color(MUTED));
+                        egui::ComboBox::from_id_salt("workflow-effort").selected_text(if self.effort.is_empty() { "官方默认" } else { &self.effort }).show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.effort, String::new(), "官方默认");
+                            for effort in &efforts { ui.selectable_value(&mut self.effort, effort.clone(), effort); }
+                        });
+                        ui.label(RichText::new("随任务保存；实际支持取决于官方工具与模型").small().color(MUTED));
+                    });
+                }
+                let valid_effort = self.effort.is_empty() || efforts.contains(&self.effort);
+                if !valid_effort { ui.colored_label(Color32::from_rgb(236, 204, 136), "当前服务未提供此推理档位，请重新选择；原任务配置保持不变。"); }
                 ui.add_space(5.);
                 ui.horizontal(|ui|{
                     ui.label(RichText::new("项目").small().color(MUTED));
@@ -637,7 +655,7 @@ impl Studio {
                 if !chat {egui::CollapsingHeader::new("验收标准").default_open(true).show(ui,|ui|{ui.add(TextEdit::multiline(&mut self.acceptance).hint_text("每行一项，例如：\n现有测试全部通过\n分页边界行为有回归覆盖").desired_rows(3).desired_width(f32::INFINITY));});}
                 ui.separator();
                 ui.horizontal_wrapped(|ui|{
-                    let valid=self.connected&&!self.busy&&!self.prompt.trim().is_empty()&&!self.model.trim().is_empty()&&!self.cwd.trim().is_empty()&&self.apps.iter().any(|a|app_id(a)==self.app_id&&managed(a));
+                    let valid=self.connected&&!self.busy&&valid_effort&&!self.prompt.trim().is_empty()&&!self.model.trim().is_empty()&&!self.cwd.trim().is_empty()&&self.apps.iter().any(|a|app_id(a)==self.app_id&&managed(a));
                     if ui.add_enabled(valid,egui::Button::new(RichText::new(if chat {"开始讨论  →"}else{"创建并开始  →"}).strong().color(BG)).fill(ACCENT)).clicked(){self.create(ui.ctx(),true,chat);}
                     if ui.add_enabled(valid,egui::Button::new("保存草稿")).clicked(){self.create(ui.ctx(),false,chat);}
                     if self.busy {ui.spinner();}
@@ -666,6 +684,7 @@ impl Studio {
             mode: if chat { "chat".into() } else { "work".into() },
             app_id: self.app_id.clone(),
             model: self.model.trim().into(),
+            reasoning_effort: (!self.effort.is_empty()).then(|| self.effort.clone()),
             read_only: chat || self.read_only,
             max_duration_secs: self.minutes.clamp(1, 1440) * 60,
             acceptance: if chat {
@@ -796,6 +815,14 @@ impl Studio {
             pill(ui, &record.model, MUTED);
             pill(
                 ui,
+                &format!(
+                    "请求推理：{}",
+                    record.reasoning_effort.as_deref().unwrap_or("官方默认")
+                ),
+                MUTED,
+            );
+            pill(
+                ui,
                 if record.read_only {
                     "只读"
                 } else {
@@ -832,6 +859,7 @@ impl Studio {
                 self.cwd = record.cwd.clone();
                 self.app_id = record.app_id.clone();
                 self.model = record.model.clone();
+                self.effort = record.reasoning_effort.clone().unwrap_or_default();
                 self.read_only = record.read_only;
                 self.minutes = record.max_duration_secs.div_ceil(60);
                 self.acceptance = record.acceptance.join("\n");
@@ -1169,8 +1197,9 @@ impl Studio {
                             {
                                 ui.label(RichText::new(notes).color(MUTED).size(12.));
                             }
-                            let controls = wonderland::native_executor::capabilities(&id);
-                            if managed(&app) {
+                            if let Some(controls) =
+                                reported_controls(&app).filter(|_| managed(&app))
+                            {
                                 ui.horizontal_wrapped(|ui| {
                                     if controls.read_only {
                                         pill(ui, "只读讨论", MUTED);
@@ -1441,13 +1470,10 @@ impl Studio {
         self.connected = true;
         self.polling = false;
         self.source = "fixture".into();
-        self.apps = vec![
-            json!({"id":"codex","name":"Codex","capabilities":{"structured_runner":true,"notes":"OpenAI 官方编码应用"}}),
-            json!({"id":"kimi-cli","name":"Kimi CLI","capabilities":{"structured_runner":true,"notes":"Moonshot AI 官方应用"}}),
-            json!({"id":"claude","name":"Claude Code","capabilities":{"structured_runner":true,"notes":"Anthropic 官方原生应用"}}),
-        ];
+        self.apps = local_apps();
         self.cwd = cwd.into();
         self.model = "gpt-5.4".into();
+        self.effort = "high".into();
         for (n, (title, status, app, model)) in [
             (
                 "修复分页边界并添加测试",
@@ -1471,7 +1497,7 @@ impl Studio {
         .into_iter()
         .enumerate()
         {
-            self.records.push(WorkflowRecord{id:format!("fixture-{n}"),title:title.into(),prompt:"检查分页在空结果与最后一页的行为，并补充测试。".into(),cwd:cwd.into(),mode:"work".into(),app_id:app.into(),model:model.into(),read_only:false,max_duration_secs:1800,acceptance:vec!["现有测试通过".into(),"分页边界有回归覆盖".into()],status,created_at:"2026-09-21T09:30:00Z".into(),updated_at:"2026-09-21T09:35:00Z".into(),output:if n==0 {"已完成修改，等待验收。\n\n- 修正最后一页的边界计算\n- 添加空结果与最后一页测试\n\n请在项目中核对变更与测试记录。".into()}else{String::new()},error:None,native_session_id:None});
+            self.records.push(WorkflowRecord{id:format!("fixture-{n}"),title:title.into(),prompt:"检查分页在空结果与最后一页的行为，并补充测试。".into(),cwd:cwd.into(),mode:"work".into(),app_id:app.into(),model:model.into(),reasoning_effort:if app=="codex" {Some("high".into())}else{None},read_only:false,max_duration_secs:1800,acceptance:vec!["现有测试通过".into(),"分页边界有回归覆盖".into()],status,created_at:"2026-09-21T09:30:00Z".into(),updated_at:"2026-09-21T09:35:00Z".into(),output:if n==0 {"已完成修改，等待验收。\n\n- 修正最后一页的边界计算\n- 添加空结果与最后一页测试\n\n请在项目中核对变更与测试记录。".into()}else{String::new()},error:None,native_session_id:None});
         }
         self.notice = "界面展示样例 · 非真实执行结果".into();
         self.composing = false;
@@ -1514,11 +1540,42 @@ impl Studio {
 fn app_id(app: &Value) -> &str {
     app.get("id").and_then(Value::as_str).unwrap_or("")
 }
+#[cfg(any(test, feature = "ui-snapshots"))]
 fn local_apps() -> Vec<Value> {
     wonderland::desktop_bridge::official_apps()
         .into_iter()
-        .filter_map(|app| serde_json::to_value(app).ok())
+        .filter_map(|app| {
+            let controls = wonderland::native_executor::capabilities(&app.id);
+            let mut value = serde_json::to_value(app).ok()?;
+            value["native_controls"] = json!(controls);
+            // Explicit demonstration/test catalogue; live views use the service.
+            value["workflow_settings"] = json!({"reasoning_effort_at_create":true});
+            Some(value)
+        })
         .collect()
+}
+fn reported_controls(app: &Value) -> Option<wonderland::native_executor::NativeCapabilities> {
+    serde_json::from_value(app.get("native_controls")?.clone()).ok()
+}
+fn advertised_efforts(apps: &[Value], id: &str) -> Vec<String> {
+    apps.iter()
+        .find(|app| app_id(app) == id && managed(app))
+        .and_then(reported_controls)
+        .filter(|controls| controls.managed)
+        .map(|controls| controls.reasoning_efforts)
+        .unwrap_or_default()
+}
+fn workflow_efforts(apps: &[Value], id: &str) -> Vec<String> {
+    if !apps.iter().any(|app| {
+        app_id(app) == id
+            && app
+                .pointer("/workflow_settings/reasoning_effort_at_create")
+                .and_then(Value::as_bool)
+                == Some(true)
+    }) {
+        return vec![];
+    }
+    advertised_efforts(apps, id)
 }
 fn app_name(app: &Value) -> &str {
     app.get("name")
@@ -1871,6 +1928,21 @@ mod tests {
         assert_eq!(claude[0].id, "Which modules?");
         assert!(codex[0].allow_other);
         assert_eq!(codex[0].options[0].0, "Core");
+    }
+    #[test]
+    fn reasoning_choices_follow_connected_service_without_local_fallback() {
+        let mut apps = local_apps();
+        let claude = apps.iter_mut().find(|app| app_id(app) == "claude").unwrap();
+        claude["native_controls"]["reasoning_efforts"] = json!(["high"]);
+        assert_eq!(workflow_efforts(&apps, "claude"), vec!["high"]);
+        assert!(workflow_efforts(&apps, "kimi-cli").is_empty());
+        let claude = apps.iter_mut().find(|app| app_id(app) == "claude").unwrap();
+        claude.as_object_mut().unwrap().remove("workflow_settings");
+        assert!(workflow_efforts(&apps, "claude").is_empty());
+        assert_eq!(advertised_efforts(&apps, "claude"), vec!["high"]);
+        let claude = apps.iter_mut().find(|app| app_id(app) == "claude").unwrap();
+        claude["native_controls"] = json!({"reasoning_efforts":["max"]});
+        assert!(advertised_efforts(&apps, "claude").is_empty());
     }
     #[test]
     fn composing_directory_is_not_overwritten_by_repaints() {

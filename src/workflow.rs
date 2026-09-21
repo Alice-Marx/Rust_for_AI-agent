@@ -33,8 +33,8 @@ const MAX_DETAIL_BYTES: usize = 16_384;
 const MAX_ACCEPTANCE_ITEMS: usize = 64;
 const MAX_ACCEPTANCE_ITEM_BYTES: usize = 2_048;
 const MAX_ACCEPTANCE_BYTES: usize = 65_536;
-const SCHEMA_VERSION: i64 = 1;
-const RECORD_COLUMNS: &str = "id,title,prompt,cwd,mode,app_id,model,read_only,max_duration_secs,acceptance,status,created_at,updated_at,output,error,native_session_id";
+const SCHEMA_VERSION: i64 = 2;
+const RECORD_COLUMNS: &str = "id,title,prompt,cwd,mode,app_id,model,read_only,max_duration_secs,acceptance,status,created_at,updated_at,output,error,native_session_id,reasoning_effort";
 
 fn default_duration() -> u64 {
     DEFAULT_MAX_DURATION_SECS
@@ -56,6 +56,8 @@ pub struct WorkflowCreate {
     pub app_id: String,
     #[serde(default)]
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     #[serde(default)]
     pub read_only: bool,
     #[serde(default = "default_duration")]
@@ -73,6 +75,7 @@ impl Default for WorkflowCreate {
             mode: default_mode(),
             app_id: String::new(),
             model: String::new(),
+            reasoning_effort: None,
             read_only: false,
             max_duration_secs: default_duration(),
             acceptance: Vec::new(),
@@ -177,6 +180,8 @@ pub struct WorkflowRecord {
     pub mode: String,
     pub app_id: String,
     pub model: String,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
     pub read_only: bool,
     pub max_duration_secs: u64,
     pub acceptance: Vec<String>,
@@ -282,6 +287,11 @@ impl WorkflowStore {
             );
             CREATE INDEX IF NOT EXISTS workflow_projects_updated ON workflow_projects(updated_at DESC);",
         )?;
+        if version < 2 {
+            // An absent choice remains absent for existing tasks. Do not infer
+            // settings from events or change the requested model on migration.
+            transaction.execute_batch("ALTER TABLE workflows ADD COLUMN reasoning_effort TEXT;")?;
+        }
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         transaction.commit()?;
         Ok(Self {
@@ -306,6 +316,7 @@ impl WorkflowStore {
             mode: request.mode,
             app_id: request.app_id,
             model: request.model,
+            reasoning_effort: request.reasoning_effort,
             read_only: request.read_only,
             max_duration_secs: request.max_duration_secs,
             acceptance: request.acceptance,
@@ -319,9 +330,9 @@ impl WorkflowStore {
         let mut connection = self.lock()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute(
-            "INSERT INTO workflows (id,title,prompt,cwd,mode,app_id,model,read_only,max_duration_secs,acceptance,status,created_at,updated_at,output)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'draft',?11,?11,'')",
-            params![record.id,record.title,record.prompt,record.cwd,record.mode,record.app_id,record.model,record.read_only,record.max_duration_secs as i64,serde_json::to_string(&record.acceptance)?,now],
+            "INSERT INTO workflows (id,title,prompt,cwd,mode,app_id,model,read_only,max_duration_secs,acceptance,status,created_at,updated_at,output,reasoning_effort)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'draft',?11,?11,'',?12)",
+            params![record.id,record.title,record.prompt,record.cwd,record.mode,record.app_id,record.model,record.read_only,record.max_duration_secs as i64,serde_json::to_string(&record.acceptance)?,now,record.reasoning_effort],
         )?;
         insert_event(
             &transaction,
@@ -668,6 +679,9 @@ fn validate_request(mut request: WorkflowCreate) -> Result<WorkflowCreate> {
     );
     validate_text("应用 ID", &request.app_id, MAX_IDENTIFIER_BYTES, false)?;
     validate_text("模型 ID", &request.model, MAX_IDENTIFIER_BYTES, true)?;
+    if let Some(effort) = &request.reasoning_effort {
+        validate_text("推理档位", effort, MAX_IDENTIFIER_BYTES, false)?;
+    }
     ensure!(
         (1..=MAX_DURATION_SECS).contains(&request.max_duration_secs),
         "最长运行时间必须在 1 到 86400 秒之间"
@@ -752,6 +766,7 @@ fn record_from_row(row: &Row<'_>) -> rusqlite::Result<WorkflowRecord> {
         mode: row.get(4)?,
         app_id: row.get(5)?,
         model: row.get(6)?,
+        reasoning_effort: row.get(16)?,
         read_only: row.get(7)?,
         max_duration_secs: row.get::<_, i64>(8)? as u64,
         acceptance: json_from_column(row, 9)?,
@@ -863,6 +878,120 @@ mod tests {
                 None,
             )
             .unwrap()
+    }
+
+    #[test]
+    fn version_one_database_migrates_without_changing_history_and_reopens() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("legacy.sqlite");
+        {
+            // This is the released v1 schema, deliberately created without the
+            // current store so this test exercises a real on-disk migration.
+            let connection = Connection::open(&database).unwrap();
+            connection.execute_batch(
+                "CREATE TABLE workflows (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    title TEXT NOT NULL, prompt TEXT NOT NULL, cwd TEXT NOT NULL,
+                    mode TEXT NOT NULL CHECK(mode IN ('work','chat')),
+                    app_id TEXT NOT NULL, model TEXT NOT NULL,
+                    read_only INTEGER NOT NULL CHECK(read_only IN (0,1)),
+                    max_duration_secs INTEGER NOT NULL CHECK(max_duration_secs BETWEEN 1 AND 86400),
+                    acceptance TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('draft','running','waiting_input','verifying','succeeded','failed','cancelled','blocked','interrupted')),
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    output TEXT NOT NULL DEFAULT '',
+                    output_truncated INTEGER NOT NULL DEFAULT 0 CHECK(output_truncated IN (0,1)),
+                    error TEXT, native_session_id TEXT
+                );
+                CREATE TABLE workflow_events (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE RESTRICT,
+                    kind TEXT NOT NULL, data TEXT NOT NULL, created_at TEXT NOT NULL
+                );
+                CREATE TABLE workflow_projects (
+                    id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL,
+                    cwd TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                PRAGMA user_version = 1;",
+            ).unwrap();
+            connection.execute(
+                "INSERT INTO workflows (id,title,prompt,cwd,mode,app_id,model,read_only,max_duration_secs,acceptance,status,created_at,updated_at,output,native_session_id)
+                 VALUES ('legacy','旧任务','Keep history',?1,'work','codex','gpt-test',0,30,'[\"Review output\"]','verifying','2026-09-01','2026-09-02','Existing output','native-legacy')",
+                [temp.path().canonicalize().unwrap().to_string_lossy().into_owned()],
+            ).unwrap();
+            connection.execute_batch(
+                "INSERT INTO workflow_events (seq,workflow_id,kind,data,created_at)
+                 VALUES (41,'legacy','execution_settings','{\"reasoning_effort\":\"high\"}','2026-09-02');",
+            ).unwrap();
+        }
+        let (legacy, event, new);
+        {
+            let store = WorkflowStore::open(&database).unwrap();
+            legacy = store.get("legacy").unwrap().unwrap();
+            // Old ephemeral settings are evidence, not a new durable choice.
+            assert_eq!(legacy.reasoning_effort, None);
+            assert_eq!(legacy.status, WorkflowStatus::Verifying);
+            assert_eq!(legacy.output, "Existing output");
+            assert_eq!(legacy.native_session_id.as_deref(), Some("native-legacy"));
+            assert_eq!(legacy.acceptance, vec!["Review output"]);
+            event = store.events("legacy", 0, 10).unwrap();
+            assert_eq!(event[0].seq, 41);
+            assert_eq!(event[0].data["reasoning_effort"], "high");
+            let mut input = request(temp.path());
+            input.app_id = "claude".into();
+            input.model = "claude-sonnet-4-6".into();
+            input.reasoning_effort = Some("xhigh".into());
+            new = store.create(input).unwrap();
+            assert_eq!(store.list().unwrap().len(), 2);
+            assert!(store.events(&new.id, 0, 10).unwrap()[0].seq > 41);
+            let version: i64 = store
+                .lock()
+                .unwrap()
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, 2);
+        }
+        let reopened = WorkflowStore::open(&database).unwrap();
+        assert_eq!(reopened.get("legacy").unwrap(), Some(legacy));
+        assert_eq!(reopened.events("legacy", 0, 10).unwrap(), event);
+        assert_eq!(reopened.get(&new.id).unwrap(), Some(new.clone()));
+        assert_eq!(new.reasoning_effort.as_deref(), Some("xhigh"));
+    }
+
+    #[test]
+    fn old_json_defaults_effort_and_explicit_choice_survives_storage() {
+        let temp = tempfile::tempdir().unwrap();
+        let input: WorkflowCreate = serde_json::from_value(json!({
+            "prompt":"existing client", "cwd":temp.path(),
+            "app_id":"codex", "model":"gpt-test"
+        }))
+        .unwrap();
+        assert_eq!(input.reasoning_effort, None);
+        let store = WorkflowStore::open_in_memory().unwrap();
+        let record = store.create(input).unwrap();
+        let mut old_record_json = serde_json::to_value(&record).unwrap();
+        old_record_json
+            .as_object_mut()
+            .unwrap()
+            .remove("reasoning_effort");
+        assert_eq!(
+            serde_json::from_value::<WorkflowRecord>(old_record_json).unwrap(),
+            record
+        );
+        let mut explicit = request(temp.path());
+        explicit.app_id = "codex".into();
+        explicit.model = "gpt-test".into();
+        explicit.reasoning_effort = Some("high".into());
+        let choice = store.create(explicit).unwrap();
+        assert_eq!(
+            store
+                .get(&choice.id)
+                .unwrap()
+                .unwrap()
+                .reasoning_effort
+                .as_deref(),
+            Some("high")
+        );
     }
 
     #[test]

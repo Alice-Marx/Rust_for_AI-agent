@@ -306,9 +306,7 @@ async fn execute_team(
             json!({"workflow_id":child.id,"executor":planner}),
         )?;
         service.teams.register_child(id, &child.id).await?;
-        service
-            .start_with_effort(&child.id, planner.reasoning_effort.clone())
-            .await?;
+        service.start_team_child(&child.id, id).await?;
         let result = wait_child(&service, id, &child.id, cancel.clone(), deadline).await?;
         let nodes = parse_plan(&result.output)?;
         let current = service.teams.store.get(id)?.context("team disappeared")?;
@@ -575,6 +573,7 @@ fn create_child(
         mode: if read_only { "chat" } else { "work" }.into(),
         app_id: binding.app_id.clone(),
         model: binding.model.clone(),
+        reasoning_effort: binding.reasoning_effort.clone(),
         read_only,
         max_duration_secs: deadline
             .saturating_duration_since(Instant::now())
@@ -800,9 +799,7 @@ async fn execute_node(
         &attempt_dir.to_string_lossy(),
     )?;
     service.teams.register_child(id, &child.id).await?;
-    service
-        .start_with_effort(&child.id, binding.reasoning_effort.clone())
-        .await?;
+    service.start_team_child(&child.id, id).await?;
     let result = wait_child(&service, id, &child.id, cancel.clone(), deadline).await?;
     active_check(&cancel, deadline)?;
     ensure!(
@@ -973,6 +970,125 @@ mod tests {
             budget_usd: None,
         }
     }
+
+    #[tokio::test]
+    async fn team_children_persist_exact_bindings_and_retain_owner_after_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let mut children = Vec::new();
+        {
+            let service = WorkbenchService::open(&data).unwrap();
+            for (app, model, effort) in [
+                ("codex", "gpt-test", Some("high")),
+                ("claude", "claude-sonnet-4-6", Some("xhigh")),
+                ("deepseek", "deepseek-chat", Some("off")),
+                ("kimi-cli", "kimi-for-coding", None),
+            ] {
+                let binding = ExecutorBinding {
+                    app_id: app.into(),
+                    model: model.into(),
+                    reasoning_effort: effort.map(str::to_owned),
+                };
+                let mut input = request(dir.path());
+                input.planner = binding.clone();
+                let team = service.teams.create(input).unwrap();
+                for read_only in [true, false] {
+                    let child = create_child(
+                        &service,
+                        &team.id,
+                        &binding,
+                        dir.path(),
+                        "bounded subtask".into(),
+                        read_only,
+                        Instant::now() + Duration::from_secs(30),
+                        if read_only {
+                            "Planner or review"
+                        } else {
+                            "Implementation"
+                        },
+                        vec![],
+                    )
+                    .unwrap();
+                    assert_eq!(child.app_id, binding.app_id);
+                    assert_eq!(child.model, binding.model);
+                    assert_eq!(child.reasoning_effort, binding.reasoning_effort);
+                    let events = service.store.events(&child.id, 0, 10).unwrap();
+                    assert_eq!(
+                        events
+                            .iter()
+                            .find(|event| event.kind == "team_owner")
+                            .unwrap()
+                            .data["executor"],
+                        json!(binding)
+                    );
+                    children.push(service.store.get(&child.id).unwrap().unwrap());
+                }
+            }
+        }
+        let service = WorkbenchService::open(&data).unwrap();
+        for child in children {
+            assert_eq!(service.store.get(&child.id).unwrap(), Some(child.clone()));
+            assert!(service
+                .start(&child.id)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("owned by a collaboration"));
+            assert!(service
+                .start_team_child(&child.id, "another-team")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("another collaboration"));
+            assert!(!service.children_running(&[child.id]).await);
+        }
+    }
+
+    #[tokio::test]
+    async fn child_cannot_start_with_a_different_persisted_reasoning_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = WorkbenchService::open(&dir.path().join("data")).unwrap();
+        let child = service
+            .create(WorkflowCreate {
+                prompt: "test".into(),
+                cwd: dir.path().to_string_lossy().into_owned(),
+                app_id: "codex".into(),
+                model: "gpt-test".into(),
+                reasoning_effort: Some("high".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(service
+            .start_team_child(&child.id, "team")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("no collaboration owner"));
+        service
+            .store
+            .append_event(
+                &child.id,
+                "team_owner",
+                json!({
+                    "team_id":"team", "executor":{
+                        "app_id":"codex", "model":"gpt-test", "reasoning_effort":"low"
+                    }
+                }),
+            )
+            .unwrap();
+        let before = service.store.events(&child.id, 0, 10).unwrap();
+        let before_record = service.store.get(&child.id).unwrap();
+        assert!(service
+            .start_team_child(&child.id, "team")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("do not match"));
+        assert_eq!(service.store.get(&child.id).unwrap(), before_record);
+        assert_eq!(service.store.events(&child.id, 0, 10).unwrap(), before);
+        assert!(!service.children_running(&[child.id]).await);
+    }
+
     #[tokio::test]
     async fn unknown_billing_blocks_before_any_native_child_or_workspace() {
         let dir = tempfile::tempdir().unwrap();
