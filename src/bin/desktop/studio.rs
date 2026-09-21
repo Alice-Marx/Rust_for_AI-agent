@@ -32,6 +32,11 @@ struct SavedView {
 }
 
 enum Reply {
+    AppProbe {
+        source: String,
+        app_id: String,
+        result: Result<Value, String>,
+    },
     Snapshot {
         source: String,
         records: Result<Vec<WorkflowRecord>, String>,
@@ -58,6 +63,8 @@ pub struct Studio {
     pub page: Page,
     records: Vec<WorkflowRecord>,
     apps: Vec<Value>,
+    diagnostics: HashMap<String, Value>,
+    probing: Option<String>,
     projects: Vec<ProjectRecord>,
     events: HashMap<String, Vec<WorkflowEvent>>,
     selected: Option<String>,
@@ -99,6 +106,8 @@ impl Studio {
             page: Page::Work,
             records: vec![],
             apps: local_apps(),
+            diagnostics: HashMap::new(),
+            probing: None,
             projects: vec![],
             events: HashMap::new(),
             selected: None,
@@ -196,6 +205,8 @@ impl Studio {
             self.records.clear();
             self.events.clear();
             self.apps = local_apps();
+            self.diagnostics.clear();
+            self.probing = None;
             self.projects.clear();
             self.selected = None;
             self.polling = false;
@@ -206,6 +217,19 @@ impl Studio {
         }
         while let Ok(reply) = self.rx.try_recv() {
             match reply {
+                Reply::AppProbe {
+                    source,
+                    app_id,
+                    result,
+                } if source == self.source => {
+                    self.probing = None;
+                    match result {
+                        Ok(value) => {
+                            self.diagnostics.insert(app_id, value);
+                        }
+                        Err(error) => self.notice = error,
+                    }
+                }
                 Reply::Snapshot {
                     source,
                     records,
@@ -1099,6 +1123,11 @@ impl Studio {
     }
     fn render_apps(&mut self, ui: &mut Ui) {
         ui.heading("应用");
+        ui.label(
+            RichText::new("保留各应用的官方执行引擎、登录方式与更新机制")
+                .small()
+                .color(MUTED),
+        );
         ui.add_space(12.);
         let apps = self.apps.clone();
         ScrollArea::vertical()
@@ -1140,7 +1169,106 @@ impl Studio {
                             {
                                 ui.label(RichText::new(notes).color(MUTED).size(12.));
                             }
+                            let controls = wonderland::native_executor::capabilities(&id);
+                            if managed(&app) {
+                                ui.horizontal_wrapped(|ui| {
+                                    if controls.read_only {
+                                        pill(ui, "只读讨论", MUTED);
+                                    }
+                                    if controls.permissions {
+                                        pill(ui, "逐次权限确认", MUTED);
+                                    }
+                                    if controls.questions {
+                                        pill(ui, "交互提问", MUTED);
+                                    }
+                                    if !controls.reasoning_efforts.is_empty() {
+                                        pill(ui, "可选推理档位", MUTED);
+                                    }
+                                });
+                            }
+                            if let Some(diagnostic) = self.diagnostics.get(&id) {
+                                let installed = diagnostic["installed"].as_bool().unwrap_or(false);
+                                ui.horizontal_wrapped(|ui| {
+                                    pill(
+                                        ui,
+                                        if installed {
+                                            "已找到程序"
+                                        } else {
+                                            "未检测到程序"
+                                        },
+                                        if installed { ACCENT } else { MUTED },
+                                    );
+                                    if let Some(version) = diagnostic["version"].as_str() {
+                                        ui.label(RichText::new(version).small().color(MUTED));
+                                    }
+                                });
+                                if let Some(path) = diagnostic["path"].as_str() {
+                                    ui.label(RichText::new(path).small().color(MUTED));
+                                }
+                                ui.label(
+                                    RichText::new("账号与模型可用性将在任务启动时验证")
+                                        .small()
+                                        .color(MUTED),
+                                );
+                                if diagnostic
+                                    .pointer("/identity/matches_requested")
+                                    .and_then(Value::as_bool)
+                                    == Some(false)
+                                {
+                                    ui.label(
+                                        RichText::new("程序身份与所选应用不符，请检查命令路径。")
+                                            .small()
+                                            .color(MUTED),
+                                    );
+                                }
+                                if diagnostic
+                                    .pointer("/version_probe/status")
+                                    .and_then(Value::as_str)
+                                    == Some("failed")
+                                {
+                                    ui.label(
+                                        RichText::new("版本检测未通过，展开诊断查看原因。")
+                                            .small()
+                                            .color(MUTED),
+                                    );
+                                }
+                                if !installed {
+                                    if let Some(hint) = diagnostic["install_hint"].as_str() {
+                                        ui.label(RichText::new(hint).small().color(MUTED));
+                                    }
+                                }
+                                egui::CollapsingHeader::new("诊断详情")
+                                    .id_salt(("app-diagnostic", &id))
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            RichText::new(
+                                                serde_json::to_string_pretty(diagnostic)
+                                                    .unwrap_or_default(),
+                                            )
+                                            .monospace()
+                                            .small(),
+                                        );
+                                        if ui.small_button("复制诊断").clicked() {
+                                            ui.ctx().copy_text(
+                                                serde_json::to_string_pretty(diagnostic)
+                                                    .unwrap_or_default(),
+                                            );
+                                        }
+                                    });
+                            }
                             ui.horizontal_wrapped(|ui| {
+                                if ui
+                                    .add_enabled(
+                                        self.connected && self.probing.is_none(),
+                                        egui::Button::new("检测安装"),
+                                    )
+                                    .clicked()
+                                {
+                                    self.probe_app(ui.ctx(), &id);
+                                }
+                                if self.probing.as_deref() == Some(&id) {
+                                    ui.spinner();
+                                }
                                 if managed(&app) && ui.button("创建任务").clicked() {
                                     self.page = Page::Work;
                                     self.composing = true;
@@ -1170,6 +1298,32 @@ impl Studio {
                     ui.label(RichText::new("等待服务返回应用目录…").color(MUTED));
                 }
             });
+    }
+    fn probe_app(&mut self, ctx: &egui::Context, app_id: &str) {
+        self.probing = Some(app_id.into());
+        let (tx, source, ctx, app_id) = (
+            self.tx.clone(),
+            self.source.clone(),
+            ctx.clone(),
+            app_id.to_owned(),
+        );
+        thread::spawn(move || {
+            let result = Runtime::new()
+                .map_err(|error| error.to_string())
+                .and_then(|runtime| {
+                    runtime.block_on(post_json(
+                        &source,
+                        &format!("/api/v1/apps/{app_id}/probe"),
+                        json!({}),
+                    ))
+                });
+            let _ = tx.send(Reply::AppProbe {
+                source,
+                app_id,
+                result,
+            });
+            ctx.request_repaint();
+        });
     }
     fn render_projects(&mut self, ui: &mut Ui, cwd: &str) {
         ui.horizontal(|ui| {
@@ -1290,7 +1444,7 @@ impl Studio {
         self.apps = vec![
             json!({"id":"codex","name":"Codex","capabilities":{"structured_runner":true,"notes":"OpenAI 官方编码应用"}}),
             json!({"id":"kimi-cli","name":"Kimi CLI","capabilities":{"structured_runner":true,"notes":"Moonshot AI 官方应用"}}),
-            json!({"id":"claude","name":"Claude Code","capabilities":{"structured_runner":false,"notes":"通过交互终端使用官方应用"}}),
+            json!({"id":"claude","name":"Claude Code","capabilities":{"structured_runner":true,"notes":"Anthropic 官方原生应用"}}),
         ];
         self.cwd = cwd.into();
         self.model = "gpt-5.4".into();
@@ -1327,7 +1481,11 @@ impl Studio {
                 self.page = Page::Teams;
                 self.teams.prepare_snapshot(cwd, mode == "studio-teams-new");
             }
-            "studio-apps" => self.page = Page::Apps,
+            "studio-apps" => {
+                self.page = Page::Apps;
+                self.apps = local_apps();
+                self.diagnostics.insert("claude".into(), json!({"installed":true,"version":"2.1.193","path":"C:/Apps/Claude/bin/claude.exe","identity":{"matches_requested":true},"version_probe":{"status":"completed"},"authentication":{"status":"unknown"},"fixture":true}));
+            }
             "studio-projects" => self.page = Page::Projects,
             "studio-task" => {
                 self.board = false;
@@ -1369,13 +1527,13 @@ fn app_name(app: &Value) -> &str {
 }
 fn managed(app: &Value) -> bool {
     let id = app_id(app);
-    matches!(id, "codex" | "kimi-cli")
+    wonderland::native_executor::supports_native(id)
         && app.get("enabled").and_then(Value::as_bool).unwrap_or(true)
         && app
             .pointer("/capabilities/structured_runner")
             .or_else(|| app.get("structured_runner"))
             .and_then(Value::as_bool)
-            .unwrap_or(true)
+            .unwrap_or(false)
 }
 fn app_label(id: &str) -> String {
     match id {
@@ -1383,6 +1541,7 @@ fn app_label(id: &str) -> String {
         "kimi-cli" => "Kimi CLI",
         "kimi-code" => "Kimi Code",
         "claude" => "Claude Code",
+        "deepseek" => "DeepSeek Harness",
         _ => id,
     }
     .into()
@@ -1408,6 +1567,7 @@ fn app_color(id: &str) -> Color32 {
         "codex" => ACCENT,
         "kimi-cli" | "kimi-code" => Color32::from_rgb(145, 189, 245),
         "claude" => Color32::from_rgb(232, 172, 145),
+        "deepseek" => Color32::from_rgb(116, 160, 247),
         _ => MUTED,
     }
 }
@@ -1705,8 +1865,10 @@ mod tests {
         let payload = json!({"request_id":"r","data":{"questions":[{"id":"scope","question":"Which modules?","options":[{"label":"Core","description":"Runtime"}],"isOther":true}]}});
         let codex = request_questions(&payload, "codex");
         let kimi = request_questions(&payload, "kimi-cli");
+        let claude = request_questions(&payload, "claude");
         assert_eq!(codex[0].id, "scope");
         assert_eq!(kimi[0].id, "Which modules?");
+        assert_eq!(claude[0].id, "Which modules?");
         assert!(codex[0].allow_other);
         assert_eq!(codex[0].options[0].0, "Core");
     }

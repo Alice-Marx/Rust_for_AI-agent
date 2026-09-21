@@ -90,6 +90,17 @@ test("pricing status reads cache and refresh is an explicit POST", async () => {
   assert.deepEqual(refresh.requests, [{ path: "/api/v1/pricing/refresh", method: "POST", body: {} }]);
 });
 
+test("app diagnostics request a registered tool probe without a model call", async () => {
+  const diagnostic = { app_id: "claude", installed: true, authentication: { status: "unknown" } };
+  const result = await invoke(["apps", "--probe", "claude"], diagnostic);
+  assert.equal(result.code, 0, result.error);
+  assert.deepEqual(result.requests, [{ path: "/api/v1/apps/claude/probe", method: "POST", body: {} }]);
+  assert.deepEqual(JSON.parse(result.output), diagnostic);
+  const failure = await invoke(["apps", "--probe", "unknown"], { error: "application ID is not registered" }, 409);
+  assert.equal(failure.code, 1);
+  assert.match(failure.error, /application ID is not registered/);
+});
+
 test("pricing quote preserves exact identities and explicit subscription semantics", async () => {
   const blocked = { status: "blocked", reason: "subscription quota is not a zero-cost API price", quote: null };
   const result = await invoke(["pricing", "quote", "--app", "kimi-cli", "--model", "model+variant&reason=high", "--billing", "subscription"], blocked);

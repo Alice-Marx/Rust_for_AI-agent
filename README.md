@@ -1,12 +1,14 @@
 # Wonderland · Rust AI Agent
 
-Wonderland 是支持多模型 API 与订阅账号的 Rust 编码工作区，提供 Windows 桌面应用、原生 CLI、npm CLI 和本地 HTTP 服务。当前开发版本 **0.9.0（协作执行预览版）**。
+Wonderland 是支持多模型 API 与订阅账号的 Rust 编码工作区，提供 Windows 桌面应用、原生 CLI、npm CLI 和本地 HTTP 服务。当前开发版本 **0.10.0（官方执行器扩展预览版）**。
 
-本版开始实现[多模型协作建设方案](docs/MULTI_MODEL_ORCHESTRATION_PLAN.md)与[桌面产品方案](docs/DESKTOP_PRODUCT_PLAN.md)。新增 Work/Chat、持久任务看板、项目、官方应用入口、Codex app-server 与 Kimi Wire 任务适配、权限往返及验收记录。模型执行由对应原生工具承担，原工具源码不作修改。
+本版继续实现[多模型协作建设方案](docs/MULTI_MODEL_ORCHESTRATION_PLAN.md)与[桌面产品方案](docs/DESKTOP_PRODUCT_PLAN.md)。Work/Chat、持久任务看板、项目与 Teams 共用官方执行器：Codex app-server、Kimi Wire，以及新增的 Claude Code 双向 stream-json、DeepSeek Harness ACP。模型执行由对应原生工具承担，原工具源码不作修改。
 
 **Teams 已支持固定官方执行器自动拆解任务，以及逐节点指定模型的 DAG 执行。** 节点在独立 Git 工作区运行，受依赖、写入范围、并发数、重试和总时限约束；集成后运行用户预先指定的验证命令。桌面、Rust CLI、npm CLI 共用持久状态与权限流程。
 
-**按模型质量和成本自动选择执行器尚未启用。** 每轮条件检查重新获取 LiveBench 与官方价格，无法核实的模型身份、计费渠道和订阅额度会阻止自动分配。预算账本已实现，但原生订阅调用暂不能可靠执行 USD 限额。其它应用当前通过交互终端使用；插件市场、定时任务、远程主机、PR 与网站面板仍属于后续范围。详见 [0.9.0 使用说明与边界](docs/RELEASE-0.9.0.md)。
+**按模型质量和成本自动选择执行器尚未启用。** 每轮条件检查重新获取 LiveBench 与官方价格，无法核实的模型身份、计费渠道和订阅额度会阻止自动分配。预算账本已实现，但原生订阅调用暂不能可靠执行 USD 限额。Kimi Node、MiniMax、MiMo 和 ZCode 当前通过交互终端使用；插件市场、定时任务、远程主机、PR 与网站面板仍属于后续范围。详见 [0.10.0 使用说明与边界](docs/RELEASE-0.10.0.md)。
+
+应用页新增“检测安装”，显示实际入口、版本、文件指纹与适配器能力。检测不会调用模型或把“已安装”当作“已登录”。Claude 受管适配验证版本为 2.1.193；DeepSeek 为 0.1.6-alpha.2。未知版本保持手动终端可用，受管调用会要求先验证协议。
 
 ![Wonderland 桌面工作区](docs/images/desktop-welcome.png)
 
@@ -28,8 +30,8 @@ Wonderland 是支持多模型 API 与订阅账号的 Rust 编码工作区，提�
 
 从 [GitHub Releases](https://github.com/Alice-Marx/Rust_for_AI-agent/releases) 下载：
 
-- `Wonderland-Setup-0.9.0-x64.exe`：当前用户安装程序，含桌面、服务、原生 CLI 和 CLIProxyAPI。
-- `Wonderland-0.9.0-windows-x64.zip`：便携包，解压后运行 `Start-Wonderland.ps1`。
+- `Wonderland-Setup-0.10.0-x64.exe`：当前用户安装程序，含桌面、服务、原生 CLI 和 CLIProxyAPI。
+- `Wonderland-0.10.0-windows-x64.zip`：便携包，解压后运行 `Start-Wonderland.ps1`。
 - `SHA256SUMS.txt`：产物 SHA-256 校验值。
 
 开始菜单的 Wonderland 快捷方式启动本地服务和桌面。默认服务地址为 `http://127.0.0.1:8080`，程序安装到 `%LOCALAPPDATA%\Programs\Wonderland`，数据保存在 `%LOCALAPPDATA%\WonderlandData`。升级和卸载保留用户数据。安装程序未进行代码签名。

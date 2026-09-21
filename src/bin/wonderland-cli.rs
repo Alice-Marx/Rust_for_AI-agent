@@ -78,7 +78,11 @@ fn parse_permission_mode(value: &str) -> Result<PermissionMode, String> {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// 官方应用目录与适配能力
-    Apps,
+    Apps {
+        /// Probe one registered local executable without a model call
+        #[arg(long)]
+        probe: Option<String>,
+    },
     /// 查看或操作由后端持有的任务
     Work {
         #[command(subcommand)]
@@ -757,9 +761,20 @@ async fn main() -> Result<()> {
     };
 
     match cli.command.unwrap_or(Command::Chat { prompt: None }) {
-        Command::Apps => println!(
+        Command::Apps { probe } => println!(
             "{}",
-            serde_json::to_string_pretty(&api.work_request("/api/v1/apps", None).await?)?
+            serde_json::to_string_pretty(&match probe {
+                Some(id) =>
+                    api.work_request(
+                        &format!(
+                            "/api/v1/apps/{}/probe",
+                            url::form_urlencoded::byte_serialize(id.as_bytes()).collect::<String>()
+                        ),
+                        Some(serde_json::json!({}))
+                    )
+                    .await?,
+                None => api.work_request("/api/v1/apps", None).await?,
+            })?
         ),
         Command::Intelligence { refresh } => {
             let (path, body) = if refresh {
@@ -788,6 +803,10 @@ async fn main() -> Result<()> {
         }
         Command::Work { action } => {
             use serde_json::json;
+            anyhow::ensure!(
+                cli.reasoning.is_none(),
+                "单个 Work 任务暂不接受 --reasoning；请在 Teams 计划的 executor.reasoning_effort 中指定，或不传此参数使用官方默认档位"
+            );
             let (path, body, start_after) = match action {
                 WorkAction::List => ("/api/v1/workflows".into(), None, false),
                 WorkAction::Create {

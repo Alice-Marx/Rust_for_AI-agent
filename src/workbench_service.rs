@@ -101,6 +101,12 @@ impl WorkbenchService {
         if request.mode == "chat" {
             request.read_only = true;
         }
+        native_executor::validate_binding(
+            &request.app_id,
+            &request.model,
+            None,
+            request.read_only,
+        )?;
         let cwd =
             std::fs::canonicalize(&request.cwd).context("project directory is unavailable")?;
         ensure!(cwd.is_dir(), "project must be a directory");
@@ -371,6 +377,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .merge(crate::team_service::routes())
         .route("/api/v1/apps", get(apps))
+        .route("/api/v1/apps/{id}/probe", post(probe_app))
         .route("/api/v1/intelligence", get(intelligence))
         .route("/api/v1/intelligence/refresh", post(refresh_intelligence))
         .route("/api/v1/workflows", get(list).post(create))
@@ -401,7 +408,20 @@ impl IntoResponse for ServiceError {
 }
 type ApiResult = std::result::Result<Json<Value>, ServiceError>;
 async fn apps() -> Json<Value> {
-    Json(json!(crate::desktop_bridge::official_apps()))
+    Json(Value::Array(
+        crate::desktop_bridge::official_apps()
+            .into_iter()
+            .map(|app| {
+                let capabilities = native_executor::capabilities(&app.id);
+                let mut value = json!(app);
+                value["native_controls"] = json!(capabilities);
+                value
+            })
+            .collect(),
+    ))
+}
+async fn probe_app(HttpPath(id): HttpPath<String>) -> ApiResult {
+    Ok(Json(crate::app_diagnostics::probe(&id).await?))
 }
 async fn intelligence(State(s): State<AppState>) -> Json<Value> {
     let mut status = s.workbench.intelligence.status();
@@ -538,7 +558,7 @@ mod tests {
             prompt: "test".into(),
             cwd: directory.to_string_lossy().into_owned(),
             app_id: "codex".into(),
-            model: "test-model".into(),
+            model: "gpt-test".into(),
             ..Default::default()
         }
     }
@@ -603,6 +623,22 @@ mod tests {
         assert!(s.create(request.clone()).unwrap().read_only);
         request.app_id = "wonderland".into();
         assert!(s.create(request).is_err());
+    }
+    #[test]
+    fn managed_drafts_reject_cross_provider_binding_before_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = WorkbenchService::open(dir.path()).unwrap();
+        for (app, model) in [
+            ("claude", "gpt-5"),
+            ("deepseek", "claude-sonnet-4-6"),
+            ("kimi-cli", "deepseek-v4-flash"),
+        ] {
+            let mut request = draft(dir.path());
+            request.app_id = app.into();
+            request.model = model.into();
+            assert!(service.create(request).is_err());
+        }
+        assert!(service.store.list().unwrap().is_empty());
     }
     #[tokio::test]
     async fn cancellation_waits_for_worker_cleanup_and_permissions_are_one_time() {

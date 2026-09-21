@@ -29,7 +29,7 @@ Usage:
   wonderland-cli [options] profile
   wonderland-cli [options] mcp-login <name> [--wait]
   wonderland-cli [options] mcp-reload
-  wonderland-cli [options] apps
+  wonderland-cli [options] apps [--probe <app>]
   wonderland-cli [options] intelligence [refresh]
   wonderland-cli [options] work list|get|events|start|cancel <id>
   wonderland-cli --model <id> --cwd <dir> work create <app> <prompt>
@@ -91,6 +91,7 @@ function parseArgs(argv) {
     "--billing": "billing",
     "--file": "file",
     "--after": "after",
+    "--probe": "probe",
   };
   let index = 0;
   while (index < argv.length) {
@@ -552,7 +553,7 @@ async function main() {
   }
   switch (options.command) {
     case "apps":
-      console.log(JSON.stringify(await request(options, "/api/v1/apps"), null, 2));
+      console.log(JSON.stringify(await request(options, options.probe ? `/api/v1/apps/${encodeURIComponent(options.probe)}/probe` : "/api/v1/apps", options.probe ? { method: "POST", body: "{}" } : {}), null, 2));
       break;
     case "intelligence": {
       const refresh = options.args[0] === "refresh";
@@ -570,6 +571,7 @@ async function main() {
       break;
     }
     case "work": {
+      if (options.reasoning !== null) throw new Error("Single Work tasks do not accept --reasoning yet; use executor.reasoning_effort in a Teams plan, or omit it for the official default");
       const [action = "list", id, requestId, ...tail] = options.args;
       let endpoint = "/api/v1/workflows";
       let body;

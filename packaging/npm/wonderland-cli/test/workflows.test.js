@@ -41,6 +41,12 @@ test("approval requires an explicit decision and sends scoped request identity",
   assert.equal(invalid.code, 1);
   assert.equal(invalid.requests.length, 0);
 });
+test("work never silently discards an explicit reasoning choice", async () => {
+  const result = await invoke(["--model", "claude-sonnet-4-6", "--reasoning", "high", "work", "create", "claude", "Review"]);
+  assert.equal(result.code, 1);
+  assert.equal(result.requests.length, 0);
+  assert.match(result.error, /reasoning_effort/);
+});
 test("accept sends human evidence and server conflicts fail the command", async () => {
   const result = await invoke(["work", "accept", "task-1", "Tests", "passed"], { error: "task is still running" }, 409);
   assert.equal(result.code, 1);

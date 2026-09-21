@@ -586,10 +586,11 @@ impl Teams {
                 });
                 if previous != self.app_id { self.model.clear(); self.effort.clear(); }
                 ui.add(TextEdit::singleline(&mut self.model).hint_text("精确模型 ID").desired_width(220.));
-                if self.app_id == "codex" {
+                let efforts = wonderland::native_executor::capabilities(&self.app_id).reasoning_efforts;
+                if !efforts.is_empty() {
                     egui::ComboBox::from_id_salt("team-effort").selected_text(if self.effort.is_empty() { "默认推理档位" } else { &self.effort }).show_ui(ui, |ui| {
                         ui.selectable_value(&mut self.effort, String::new(), "默认推理档位");
-                        for effort in ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] { ui.selectable_value(&mut self.effort, effort.into(), effort); }
+                        for effort in efforts { ui.selectable_value(&mut self.effort, effort.clone(), effort); }
                     });
                 }
             });
@@ -704,8 +705,7 @@ impl Teams {
             planner: ExecutorBinding {
                 app_id: self.app_id.clone(),
                 model: self.model.trim().into(),
-                reasoning_effort: (!self.effort.is_empty() && self.app_id == "codex")
-                    .then(|| self.effort.clone()),
+                reasoning_effort: (!self.effort.is_empty()).then(|| self.effort.clone()),
             },
             candidates,
             nodes,

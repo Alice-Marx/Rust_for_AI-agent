@@ -41,3 +41,7 @@ jobs:
         run: cargo test --locked --lib desktop_
       - name: Collaboration state, verification and Git isolation tests
         run: cargo test --locked --lib team_
+      - name: Official tool adapters and local installation diagnostics
+        run: |
+          cargo test --locked --lib native_executor
+          cargo test --locked --lib app_diagnostics

@@ -1,11 +1,12 @@
 # rust-ai-wonderland-cli
 
-Wonderland 0.9.0 工作台预览版的零依赖终端客户端。Node.js 18+，连接已启动的 Wonderland Rust 后端；后端来自桌面安装包、便携包或源码构建。npm 包不包含后端。
+Wonderland 0.10.0 工作台预览版的零依赖终端客户端。Node.js 18+，连接已启动的 Wonderland Rust 后端；后端来自桌面安装包、便携包或源码构建。npm 包不包含后端。
 
 新增官方应用任务命令：
 
 ```sh
 wonderland-cli apps
+wonderland-cli apps --probe claude
 wonderland-cli --cwd /path/to/project --model kimi-for-coding work create kimi-cli "修复测试"
 wonderland-cli work start <id>
 wonderland-cli work events <id>
@@ -15,7 +16,11 @@ wonderland-cli work accept <id> "独立检查变更和测试结果"
 wonderland-cli intelligence refresh
 ```
 
-受管任务目前支持官方 Codex 与 Kimi CLI（Python），沿用原工具登录；其余工具提供终端入口。任务完成执行后进入待验收。API 对话与官方工具任务是独立执行路径，实际可用能力以 `apps` 返回的后端信息为准。
+受管任务支持官方 Codex、Kimi CLI（Python）、Claude Code 和 DeepSeek Harness；其余工具提供终端入口。Claude 要求官方原生 npm 版 2.1.193，DeepSeek 要求官方 npm 版 0.1.6-alpha.2。Codex、Kimi、Claude 沿用官方登录，DeepSeek 继承 `DEEPSEEK_API_KEY`。工具需单独安装，未知版本可能阻止受管执行。任务完成执行后进入待验收。API 对话与官方工具任务是独立执行路径，实际可用能力以 `apps` 返回的后端信息为准。
+
+`apps --probe <id>` 只检测注册程序的版本、路径和 SHA-256，不调用模型或读取凭据。程序已安装不代表账号、模型或订阅可用；文件指纹也不是发行商签名认证。
+
+推理档位目前在 Teams 执行器绑定中使用 `reasoning_effort` 指定；单个 Work 任务使用官方默认档位，并明确拒绝 `--reasoning`，避免静默丢弃用户选择。
 
 团队任务使用 JSON 计划。以下命令在 npm CLI 和 Rust CLI 中相同，`create` 仅创建计划，`start` 明确启动执行：
 
@@ -63,7 +68,7 @@ wonderland-cli pricing quote --app codex --model gpt-5.6-sol --billing subscript
 `status` 和 `quote` 不会自动联网刷新。报价保留输入、缓存读取、缓存写入及输出的 USD/百万 token 单价和适用档位；应用、模型及计费渠道必须精确匹配。OpenAI 标准 API 与 Kimi 国际 API 已有官方来源解析，其余来源或未知档位会说明限制。订阅配额不会换算成零价 API token；`blocked` 是查询结果，不表示可以按零成本执行。每轮自动调度由后端重新核验来源，不能用历史报价或榜单历史成本代替当前计费证据。
 
 ```sh
-npm install -g rust-ai-wonderland-cli
+npm install -g rust-ai-wonderland-cli@next
 wonderland-cli --version
 wonderland-cli health
 wonderland-cli login kimi --wait

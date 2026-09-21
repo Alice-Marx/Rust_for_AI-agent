@@ -21,4 +21,6 @@ CodexHost 的主要目标是在 Codex Desktop 的交互环境内接入多个 Har
 
 新增只读评审节点返回结构化 `accepted/findings/summary`；有阻断问题的评审不能靠非空文本被当作完成。最终仍需要模型之外的主机检查命令通过。该设计是 Wonderland 自行实现，不是已导入 CodexHost 的全部适配器。
 
-下一阶段优先参考其 Claude Code SDK transport、DeepSeek 分版本协议与能力探测，逐项实现 Rust 适配和真实账号测试。模型列表、原生额度、resume/fork、远程主机和插件清单都应由适配器明确报告支持状态；无证据的能力保持不可用。
+0.10.0 已新增自有 Rust Claude Code 双向 stream-json transport 和 DeepSeek Harness ACP transport。分别固定经过验证的官方发行版，检查生效模型与推理档位，并区分原生用量、上下文占用和实际计费证据。应用目录使用结构化能力报告，新增安装版本/入口/指纹诊断；安装检查不推测认证或模型可用性。
+
+Claude 已完成官方 CLI 离线协议轨迹和本地合成响应测试，DeepSeek 已完成真实官方 CLI 无密钥握手，均未完成真实付费推理。两个适配器的恢复、分叉保持不可用。模型列表、原生额度、远程主机和插件清单仍需由适配器逐项实现及报告，不能从 CodexHost 的能力列表推断 Wonderland 已支持。

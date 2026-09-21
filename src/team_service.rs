@@ -207,6 +207,12 @@ fn short_error(error: &anyhow::Error) -> String {
 }
 fn validate_binding(binding: &ExecutorBinding) -> Result<()> {
     crate::team_store::validate_executor(binding)?;
+    native_executor::validate_binding(
+        &binding.app_id,
+        &binding.model,
+        binding.reasoning_effort.as_deref(),
+        false,
+    )?;
     ensure!(
         native_executor::supports_native(&binding.app_id),
         "{} has no managed native adapter; choose its direct terminal entry",

@@ -104,8 +104,8 @@ pub struct AppMetadata {
 }
 
 /// Catalog entries are candidates, not proof of local installation, authentication,
-/// model identity, or protocol compatibility. Only Codex and Python Kimi have
-/// native execution adapters; other tools remain available in manual terminals.
+/// model identity, or protocol compatibility. Implemented native controls are
+/// reported separately from interfaces merely inspected in upstream code.
 pub fn official_apps() -> Vec<AppMetadata> {
     [
         (
@@ -127,7 +127,7 @@ pub fn official_apps() -> Vec<AppMetadata> {
             "anthropics/claude-code",
             "https://code.claude.com",
             Some("@anthropic-ai/claude-code"),
-            false,
+            true,
             "stream-json;agent-sdk",
             "",
             "使用官方发行版；本地 claude-code-best 分支不属于官方候选",
@@ -187,10 +187,10 @@ pub fn official_apps() -> Vec<AppMetadata> {
             "deepseek-ai/deepseek-harness",
             "https://github.com/deepseek-ai/deepseek-harness",
             Some("@deepseek-ai/dsh"),
-            false,
+            true,
             "acp;headless-json;sdk-jsonrpc",
             "anytool/deepseek/deepseek-harness;deepseek-harness",
-            "手动使用 --profile agent；ACP 与简化 SDK 能力不同",
+            "受管任务使用已验证版本的 ACP；终端保留官方交互方式",
         ),
         (
             "zcode",
@@ -242,15 +242,15 @@ pub fn official_apps() -> Vec<AppMetadata> {
             },
             capabilities: IntegrationCapabilities {
                 manual_terminal: true,
-                structured_runner: native,
+                structured_runner: crate::native_executor::supports_native(id),
                 protocols: protocols
                     .split(';')
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned)
                     .collect(),
-                sessions: id != "wonderland",
-                cancellation: id != "wonderland",
-                permissions: id != "wonderland",
+                sessions: native,
+                cancellation: native,
+                permissions: native,
                 notes: if native {
                     "已提供结构化适配器，运行前仍须验证版本与身份"
                 } else {
@@ -1304,7 +1304,7 @@ mod tests {
             .filter(|app| app.capabilities.structured_runner)
             .map(|app| app.id.as_str())
             .collect();
-        assert_eq!(native, ["codex", "kimi-cli"]);
+        assert_eq!(native, ["codex", "claude", "kimi-cli", "deepseek"]);
         assert!(
             !apps
                 .iter()

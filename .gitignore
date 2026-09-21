@@ -3,6 +3,7 @@
 /.agent-data/
 *.log
 .env
+__pycache__/
 
 # 只读参考实现（上游项目检出，不参与编译与提交）
 claude-code/

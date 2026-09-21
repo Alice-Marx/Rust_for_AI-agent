@@ -9,6 +9,99 @@ use tokio::{
     sync::{mpsc, watch},
 };
 
+mod claude;
+mod deepseek;
+
+/// Implemented host controls. These describe our adapter, not account access.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeCapabilities {
+    pub managed: bool,
+    pub read_only: bool,
+    pub permissions: bool,
+    pub questions: bool,
+    pub reasoning_efforts: Vec<String>,
+    pub protocol: Option<String>,
+    pub resume: bool,
+    pub fork: bool,
+}
+
+pub fn capabilities(app_id: &str) -> NativeCapabilities {
+    let protocol = match app_id {
+        "codex" => Some("codex-app-server"),
+        "kimi-cli" => Some("kimi-wire"),
+        "claude" => Some("claude-stream-json"),
+        "deepseek" => Some("deepseek-acp"),
+        _ => None,
+    };
+    let managed = protocol.is_some();
+    NativeCapabilities {
+        managed,
+        read_only: managed,
+        permissions: managed,
+        questions: managed && app_id != "deepseek",
+        reasoning_efforts: match app_id {
+            "codex" => &[
+                "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+            ][..],
+            "claude" => &["low", "medium", "high", "xhigh", "max"][..],
+            "deepseek" => &["off", "low", "high", "max"][..],
+            _ => &[],
+        }
+        .iter()
+        .map(|value| (*value).into())
+        .collect(),
+        protocol: protocol.map(str::to_owned),
+        resume: false,
+        fork: false,
+    }
+}
+
+/// Structural validation is also used before storing a draft. Executable,
+/// account and protocol identity remain checks performed at execution time.
+pub fn validate_binding(
+    app_id: &str,
+    model: &str,
+    effort: Option<&str>,
+    read_only: bool,
+) -> Result<()> {
+    let caps = capabilities(app_id);
+    anyhow::ensure!(
+        caps.managed,
+        "this application has no managed native adapter"
+    );
+    anyhow::ensure!(
+        !read_only || caps.read_only,
+        "this adapter does not support read-only tasks"
+    );
+    anyhow::ensure!(
+        !model.is_empty() && model.len() <= 160 && !model.contains(['\0', '\r', '\n', ' ']),
+        "invalid exact model ID"
+    );
+    let matches_provider = match app_id {
+        "codex" => {
+            model.starts_with("gpt-")
+                || ["o1", "o3", "o4"]
+                    .iter()
+                    .any(|prefix| model == *prefix || model.starts_with(&format!("{prefix}-")))
+        }
+        "kimi-cli" => model.starts_with("kimi-"),
+        "claude" => model.starts_with("claude-"),
+        "deepseek" => model.starts_with("deepseek-"),
+        _ => false,
+    };
+    anyhow::ensure!(
+        matches_provider,
+        "requested model does not belong to this official tool's provider"
+    );
+    if let Some(effort) = effort {
+        anyhow::ensure!(
+            caps.reasoning_efforts.iter().any(|item| item == effort),
+            "reasoning effort is unsupported by this native adapter"
+        );
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NativeRequest {
     pub app_id: String,
@@ -106,7 +199,7 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(5);
 /// True means an adapter is implemented; account, executable and handshake
 /// validation still happen for each invocation before any prompt is submitted.
 pub fn supports_native(app_id: &str) -> bool {
-    matches!(app_id, "codex" | "kimi-cli")
+    capabilities(app_id).managed
 }
 
 /// Without a control channel all permission requests are denied. Use
@@ -128,6 +221,12 @@ pub async fn execute_with_control(
     controls: mpsc::Receiver<NativeControl>,
 ) -> Result<NativeResult> {
     validate_request(&req)?;
+    if req.app_id == "claude" {
+        return claude::execute(req, events, cancel, controls).await;
+    }
+    if req.app_id == "deepseek" {
+        return deepseek::execute_with_control(req, events, cancel, controls).await;
+    }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(req.max_duration_secs);
     if *cancel.borrow() {
         return Ok(empty_result(&req, "cancelled"));
@@ -270,6 +369,12 @@ fn empty_result(req: &NativeRequest, status: &str) -> NativeResult {
 }
 
 fn validate_request(req: &NativeRequest) -> Result<()> {
+    validate_binding(
+        &req.app_id,
+        &req.model,
+        req.reasoning_effort.as_deref(),
+        req.read_only,
+    )?;
     anyhow::ensure!(
         supports_native(&req.app_id),
         "native control is unavailable for {}; use its manual terminal",
@@ -288,39 +393,15 @@ fn validate_request(req: &NativeRequest) -> Result<()> {
         "duration must be 1-86400 seconds"
     );
     anyhow::ensure!(
-        req.model.len() <= 160 && !req.model.contains(['\0', '\r', '\n', ' ']),
-        "invalid model ID"
+        req.app_id == "kimi-cli" || req.config_path.is_none(),
+        "this tool uses its official account configuration; arbitrary config injection is unsupported"
     );
-    let model = req.model.to_ascii_lowercase();
-    let matches = match req.app_id.as_str() {
-        "codex" => {
-            model.starts_with("gpt-")
-                || ["o1", "o3", "o4"]
-                    .iter()
-                    .any(|p| model == *p || model.starts_with(&format!("{p}-")))
-        }
-        "kimi-cli" => model.starts_with("kimi-"),
-        _ => false,
-    };
-    anyhow::ensure!(
-        matches,
-        "requested model does not belong to this official tool's provider"
-    );
-    if let Some(effort) = &req.reasoning_effort {
-        anyhow::ensure!(
-            ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
-                .contains(&effort.as_str()),
-            "unsupported reasoning effort"
-        );
-        anyhow::ensure!(
-            req.app_id == "codex",
-            "Kimi Wire reasoning uses its official configuration; a generic effort is unsupported"
-        );
+    if req.app_id == "claude" {
+        claude::validate(&req)?;
     }
-    anyhow::ensure!(
-        req.app_id != "codex" || req.config_path.is_none(),
-        "Codex uses the official account configuration; arbitrary config injection is unsupported"
-    );
+    if req.app_id == "deepseek" {
+        deepseek::validate_request(&req)?;
+    }
     Ok(())
 }
 
