@@ -10,14 +10,28 @@ anytool/
 ├── ChatGPT/
 │   └── codex/
 ├── Claude/
+├── DeepSeek/
+│   └── deepseek-harness/
 ├── minimax/
 │   ├── minimax-code/
 │   └── cli/
 ├── mimo/
 │   └── MiMo-Code/
-└── zai/
-    ├── ZCode/
-    └── zcode-plugins/
+├── zai/
+│   ├── ZCode/
+│   └── zcode-plugins/
+├── Grok/
+│   └── grok-build/
+├── pi/
+│   └── pi/
+├── opencode/
+│   ├── opencode-ai/
+│   └── anomalyco/
+├── kiro/
+│   ├── Kiro/
+│   └── KiroCrew/
+└── Hermes/
+    └── hermes-agent/
 ```
 
 | 目录 | 上游仓库 |
@@ -26,11 +40,21 @@ anytool/
 | `kimi/kimi-code/` | [MoonshotAI/kimi-code](https://github.com/MoonshotAI/kimi-code) |
 | `ChatGPT/codex/` | [openai/codex](https://github.com/openai/codex) |
 | `Claude/` | [Alice-Marx/claudecode（Gitee，源码快照）](https://gitee.com/Alice-Marx/claudecode) |
+| `DeepSeek/deepseek-harness/` | [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) |
 | `minimax/minimax-code/` | [MiniMax-AI/minimax-code](https://github.com/MiniMax-AI/minimax-code) |
 | `minimax/cli/` | [MiniMax-AI/cli](https://github.com/MiniMax-AI/cli) |
 | `mimo/MiMo-Code/` | [XiaomiMiMo/MiMo-Code](https://github.com/XiaomiMiMo/MiMo-Code) |
 | `zai/ZCode/` | [zai-org/ZCode](https://github.com/zai-org/ZCode) |
 | `zai/zcode-plugins/` | [zai-org/zcode-plugins](https://github.com/zai-org/zcode-plugins) |
+| `Grok/grok-build/` | [xai-org/grok-build](https://github.com/xai-org/grok-build) |
+| `pi/pi/` | [earendil-works/pi](https://github.com/earendil-works/pi) |
+| `opencode/opencode-ai/` | [opencode-ai/opencode](https://github.com/opencode-ai/opencode) |
+| `opencode/anomalyco/` | [anomalyco/opencode](https://github.com/anomalyco/opencode) |
+| `kiro/Kiro/` | [kirodotdev/Kiro](https://github.com/kirodotdev/Kiro) |
+| `kiro/KiroCrew/` | [kirodotdev/KiroCrew](https://github.com/kirodotdev/KiroCrew) |
+| `Hermes/hermes-agent/` | [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) |
+
+两个上游仓库都名为 `opencode`，因此在 `opencode/` 下按组织名分别使用 `opencode-ai/` 和 `anomalyco/`，便于区分来源。
 
 ## Claude 项目快照
 

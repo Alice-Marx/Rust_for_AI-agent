@@ -22,3 +22,27 @@
 [submodule "anytool/zai/zcode-plugins"]
 	path = anytool/zai/zcode-plugins
 	url = https://github.com/zai-org/zcode-plugins.git
+[submodule "anytool/DeepSeek/deepseek-harness"]
+	path = anytool/DeepSeek/deepseek-harness
+	url = https://github.com/deepseek-ai/deepseek-harness.git
+[submodule "anytool/Grok/grok-build"]
+	path = anytool/Grok/grok-build
+	url = https://github.com/xai-org/grok-build.git
+[submodule "anytool/pi/pi"]
+	path = anytool/pi/pi
+	url = https://github.com/earendil-works/pi.git
+[submodule "anytool/opencode/opencode-ai"]
+	path = anytool/opencode/opencode-ai
+	url = https://github.com/opencode-ai/opencode.git
+[submodule "anytool/opencode/anomalyco"]
+	path = anytool/opencode/anomalyco
+	url = https://github.com/anomalyco/opencode.git
+[submodule "anytool/kiro/Kiro"]
+	path = anytool/kiro/Kiro
+	url = https://github.com/kirodotdev/Kiro.git
+[submodule "anytool/kiro/KiroCrew"]
+	path = anytool/kiro/KiroCrew
+	url = https://github.com/kirodotdev/KiroCrew.git
+[submodule "anytool/Hermes/hermes-agent"]
+	path = anytool/Hermes/hermes-agent
+	url = https://github.com/NousResearch/hermes-agent.git
