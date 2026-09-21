@@ -247,3 +247,4 @@
 - [VALIDATION-0.11.0.md](VALIDATION-0.11.0.md)：源提交/CI、release 构建、打包 npm 与真实 v1 副本迁移证据及限制。
 - [validation/0.11.0-smoke.json](validation/0.11.0-smoke.json)：不含私人目录、任务正文或凭据的结构化迁移结果。
 - [DEVELOPER_HANDOFF.md](DEVELOPER_HANDOFF.md)：新开发者的运行、测试、迁移、API/CLI 合同、模块约束、任务分解与验收指南。
+- [DELIVERY-0.11.0.md](DELIVERY-0.11.0.md)：产物构建之后的实际上传结果、散列、渠道阻塞及接手清单；通过 GitHub main 更新，不嵌回已构建安装包。

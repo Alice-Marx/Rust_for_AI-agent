@@ -8,6 +8,8 @@ Work/Chat 推理档位在创建时保存，并与 Teams 共用固定配置。升
 
 接手开发请先阅读[开发者交接指南](docs/DEVELOPER_HANDOFF.md)，再查阅[逐文件职责](docs/FILE_CATALOG-2026-09-21.md)和[已完成步骤与后续规划](docs/PROJECT_PROGRESS-2026-09-21.md)。
 
+本次分发结果见 [0.11.0 交付报告](docs/DELIVERY-0.11.0.md)。npm registry 的 0.11.0 尚待账号二次验证，`next` 当前仍为 0.10.0；可从 GitHub v0.11.0 附件安装同版 CLI，不能把安装包上传等同于 npm registry 已发布。
+
 **Teams 已支持固定官方执行器自动拆解任务，以及逐节点指定模型的 DAG 执行。** 节点在独立 Git 工作区运行，受依赖、写入范围、并发数、重试和总时限约束；集成后运行用户预先指定的验证命令。桌面、Rust CLI、npm CLI 共用持久状态与权限流程。
 
 **按模型质量和成本自动选择执行器尚未启用。** 每轮条件检查重新获取 LiveBench 与官方价格，当前 Automatic 刷新后仍转为 Blocked；模型身份、计费渠道和订阅额度尚待核验。预算账本已有实现，但带 USD 上限的原生任务当前不能执行。Kimi Node、MiniMax、MiMo 和 ZCode 当前通过交互终端使用；插件市场、定时任务、远程主机、PR 与网站面板仍属于后续范围。详见 [0.11.0 使用说明与边界](docs/RELEASE-0.11.0.md)。
@@ -94,6 +96,12 @@ wonderland-cli profile --model gpt-5.4
 ```
 
 也可安装本地发布包：`npm install -g ./dist/rust-ai-wonderland-cli-0.11.0.tgz`。`next` 对应预览版，`latest` 仍为 0.7.0 稳定频道。命令别名为 `wonderland`、`wonderland-cli`；原生 `wonderland.exe` 是后端服务，因此安装两种 CLI 后建议使用 `wonderland-cli` 并检查 PATH 顺序。
+
+npm registry 的 0.11.0 完成发布前，可使用 GitHub 同版附件：
+
+```powershell
+npm install -g https://github.com/Alice-Marx/Rust_for_AI-agent/releases/download/v0.11.0/rust-ai-wonderland-cli-0.11.0.tgz
+```
 
 原生 CLI 使用 `wonderland-cli --model gpt-5.4 profile`（全局参数放在子命令前）。`--no-stream` 等待完整回答，`--reasoning` 按模型能力选择档位。交互终端会询问需要批准的工具参数；重定向/非交互终端不会擅自批准。
 

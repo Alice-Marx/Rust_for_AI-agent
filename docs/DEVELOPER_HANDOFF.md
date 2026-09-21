@@ -1,6 +1,6 @@
 # Wonderland 开发者交接指南
 
-交接日期：2026-09-21。适用源码：0.11.0 系列；本次整理前的功能基线为 `6383c9a01df9612dce66dcd957f45b7634649a23`。仓库：[Alice-Marx/Rust_for_AI-agent](https://github.com/Alice-Marx/Rust_for_AI-agent)。**本次发布是否完成、最终提交、产物哈希、npm 标签和本轮测试结果，以 [RELEASE-0.11.0.md](RELEASE-0.11.0.md) 和本次交接结果记录为准。**本文件不把准备发布等同于已经发布。
+交接日期：2026-09-21。适用源码：0.11.0 系列；本次整理前的功能基线为 `6383c9a01df9612dce66dcd957f45b7634649a23`。仓库：[Alice-Marx/Rust_for_AI-agent](https://github.com/Alice-Marx/Rust_for_AI-agent)。**本次发布是否完成、最终提交、产物哈希、npm 标签和本轮测试结果，以 [RELEASE-0.11.0.md](RELEASE-0.11.0.md) 和 [交付报告](DELIVERY-0.11.0.md)为准。**本文件不把准备发布等同于已经发布。
 
 本指南面向没有参与此前对话的开发者。它说明如何运行现有系统、如何避免破坏数据与执行约束，以及接下来应在哪里继续编写。逐文件用途见 [文件职责目录](FILE_CATALOG-2026-09-21.md)，历史完成步骤和证据见 [项目进度报告](PROJECT_PROGRESS-2026-09-21.md)。后两份文档按其注明的代码基线阅读；其中的发布状态是当时快照。
 
