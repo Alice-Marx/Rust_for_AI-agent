@@ -1,0 +1,28 @@
+{
+  "source_commit": "6383c9a01df9612dce66dcd957f45b7634649a23",
+  "version": "0.11.0",
+  "platform": "windows-x64",
+  "success": true,
+  "migration": "v1 -> v2",
+  "legacy_successes_preserved": 5,
+  "rust_cli_effort": "high",
+  "npm_cli_effort": "off",
+  "old_client_default": null,
+  "restart_preserves_drafts": true,
+  "start_override_rejected": true,
+  "unsupported_effort_rejected": true,
+  "original_database_unchanged": true,
+  "model_calls": 0,
+  "build": "release",
+  "npm_client": "extracted 0.11.0 tarball",
+  "installation": {
+    "installer_exit_code": 0,
+    "three_installed_binaries_match_release_build": true,
+    "installed_backend_health": "ok",
+    "installed_cli_health": "ok",
+    "managed_apps": ["codex", "claude", "kimi-cli", "deepseek"],
+    "desktop_launch": "alive after 3 seconds",
+    "data_directory": "isolated temporary directory",
+    "model_calls": 0
+  }
+}

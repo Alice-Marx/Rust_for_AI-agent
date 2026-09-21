@@ -1,14 +1,16 @@
 # Wonderland · Rust AI Agent
 
-Wonderland 是支持多模型 API 与订阅账号的 Rust 编码工作区，提供 Windows 桌面应用、原生 CLI、npm CLI 和本地 HTTP 服务。最新已发布版本 **0.10.0（官方执行器扩展预览版）**；当前源码为 **0.11.0 开发中，尚未发布**，继续完善任务配置持久化。
+Wonderland 是支持多模型 API 与订阅账号的 Rust 编码工作区，提供 Windows 桌面应用、原生 CLI、npm CLI 和本地 HTTP 服务。本版 **0.11.0（配置持久化与开发交接预览版）**，发布包与源码均包含单任务推理配置持久化。版本分发见 [GitHub Releases](https://github.com/Alice-Marx/Rust_for_AI-agent/releases)，npm 预览频道使用 `next`。
 
 本版继续实现[多模型协作建设方案](docs/MULTI_MODEL_ORCHESTRATION_PLAN.md)与[桌面产品方案](docs/DESKTOP_PRODUCT_PLAN.md)。Work/Chat、持久任务看板、项目与 Teams 共用官方执行器：Codex app-server、Kimi Wire，以及新增的 Claude Code 双向 stream-json、DeepSeek Harness ACP。模型执行由对应原生工具承担，原工具源码不作修改。
 
-当前源码新增 Work/Chat 推理档位持久化，并与 Teams 共用固定配置。仓库布局、主分支整理和数据库迁移说明见[开发文档索引](docs/README.md)；已发布 0.10.0 安装包仍维持其发布时功能。
+Work/Chat 推理档位在创建时保存，并与 Teams 共用固定配置。升级会把工作流数据库迁移到 v2；旧 0.10.0 无法读取迁移后的库，升级前应停止服务并备份完整数据目录。仓库布局、开发交接和迁移说明见[开发文档索引](docs/README.md)。
+
+接手开发请先阅读[开发者交接指南](docs/DEVELOPER_HANDOFF.md)，再查阅[逐文件职责](docs/FILE_CATALOG-2026-09-21.md)和[已完成步骤与后续规划](docs/PROJECT_PROGRESS-2026-09-21.md)。
 
 **Teams 已支持固定官方执行器自动拆解任务，以及逐节点指定模型的 DAG 执行。** 节点在独立 Git 工作区运行，受依赖、写入范围、并发数、重试和总时限约束；集成后运行用户预先指定的验证命令。桌面、Rust CLI、npm CLI 共用持久状态与权限流程。
 
-**按模型质量和成本自动选择执行器尚未启用。** 每轮条件检查重新获取 LiveBench 与官方价格，无法核实的模型身份、计费渠道和订阅额度会阻止自动分配。预算账本已实现，但原生订阅调用暂不能可靠执行 USD 限额。Kimi Node、MiniMax、MiMo 和 ZCode 当前通过交互终端使用；插件市场、定时任务、远程主机、PR 与网站面板仍属于后续范围。详见 [0.10.0 使用说明与边界](docs/RELEASE-0.10.0.md)。
+**按模型质量和成本自动选择执行器尚未启用。** 每轮条件检查重新获取 LiveBench 与官方价格，当前 Automatic 刷新后仍转为 Blocked；模型身份、计费渠道和订阅额度尚待核验。预算账本已有实现，但带 USD 上限的原生任务当前不能执行。Kimi Node、MiniMax、MiMo 和 ZCode 当前通过交互终端使用；插件市场、定时任务、远程主机、PR 与网站面板仍属于后续范围。详见 [0.11.0 使用说明与边界](docs/RELEASE-0.11.0.md)。
 
 应用页新增“检测安装”，显示实际入口、版本、文件指纹与适配器能力。检测不会调用模型或把“已安装”当作“已登录”。Claude 受管适配验证版本为 2.1.193；DeepSeek 为 0.1.6-alpha.2。未知版本保持手动终端可用，受管调用会要求先验证协议。
 
@@ -26,14 +28,14 @@ Wonderland 是支持多模型 API 与订阅账号的 Rust 编码工作区，提�
 - **会话检索**：SQLite FTS5 trigram 索引，支持中文及子串查询、用户过滤、命中片段；短词回退 LIKE；会话 JSON 为原始记录，索引可重建。
 - **CLIProxyAPI 7.3.7**：分发原版 sidecar，复用订阅授权、账号刷新、额度与轮换能力；管理 API 可通过本服务完整转发，无须移植上游 Go 代码。
 
-协议适配不等于复现官方客户端的全部行为。模型效果还受模型版本、账号额度、提示词、工具和网络影响。Kimi 已使用订阅账号完成真实流式、读取、修改、再读取及推理续聊测试；OpenAI、Claude、DeepSeek 目前为模拟协议回归验证，未宣称与官方客户端效率相同。详见 [验证记录](docs/VALIDATION-0.7.0.md)。
+协议适配不等于复现官方客户端的全部行为。Kimi 已使用订阅账号完成真实工具循环和独立项目 Teams 协作，12 项主机验收通过；Codex 有握手/协议验证，Claude 有官方 CLI 本地合成响应验证，DeepSeek 有官方 CLI 无密钥握手，尚无后三者的成功完整团队实测或效率对照。详见 [Kimi 实测](docs/VALIDATION-0.9.0.md)、[官方程序验证](docs/VALIDATION-0.10.0.md)及 [0.11.0 验证记录](docs/VALIDATION-0.11.0.md)。
 
 ## Windows 桌面安装
 
 从 [GitHub Releases](https://github.com/Alice-Marx/Rust_for_AI-agent/releases) 下载：
 
-- `Wonderland-Setup-0.10.0-x64.exe`：当前用户安装程序，含桌面、服务、原生 CLI 和 CLIProxyAPI。
-- `Wonderland-0.10.0-windows-x64.zip`：便携包，解压后运行 `Start-Wonderland.ps1`。
+- `Wonderland-Setup-0.11.0-x64.exe`：当前用户安装程序，含桌面、服务、原生 CLI 和 CLIProxyAPI。
+- `Wonderland-0.11.0-windows-x64.zip`：便携包，解压后运行 `Start-Wonderland.ps1`。
 - `SHA256SUMS.txt`：产物 SHA-256 校验值。
 
 开始菜单的 Wonderland 快捷方式启动本地服务和桌面。默认服务地址为 `http://127.0.0.1:8080`，程序安装到 `%LOCALAPPDATA%\Programs\Wonderland`，数据保存在 `%LOCALAPPDATA%\WonderlandData`。升级和卸载保留用户数据。安装程序未进行代码签名。
@@ -91,7 +93,7 @@ wonderland-cli search "模型适配"
 wonderland-cli profile --model gpt-5.4
 ```
 
-也可安装本地发布包：`npm install -g ./dist/rust-ai-wonderland-cli-0.10.0.tgz`。`next` 对应已发布预览版，`latest` 仍为 0.7.0 稳定频道。命令别名为 `wonderland`、`wonderland-cli`；原生 `wonderland.exe` 是后端服务，因此安装两种 CLI 后建议使用 `wonderland-cli` 并检查 PATH 顺序。
+也可安装本地发布包：`npm install -g ./dist/rust-ai-wonderland-cli-0.11.0.tgz`。`next` 对应预览版，`latest` 仍为 0.7.0 稳定频道。命令别名为 `wonderland`、`wonderland-cli`；原生 `wonderland.exe` 是后端服务，因此安装两种 CLI 后建议使用 `wonderland-cli` 并检查 PATH 顺序。
 
 原生 CLI 使用 `wonderland-cli --model gpt-5.4 profile`（全局参数放在子命令前）。`--no-stream` 等待完整回答，`--reasoning` 按模型能力选择档位。交互终端会询问需要批准的工具参数；重定向/非交互终端不会擅自批准。
 
