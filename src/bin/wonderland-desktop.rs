@@ -20,6 +20,8 @@ use wonderland::model::{AgentRequest, AgentResponse};
 mod desktop_ui;
 #[path = "desktop/icons.rs"]
 mod icons;
+#[path = "desktop/studio.rs"]
+mod studio;
 #[path = "desktop/workbench.rs"]
 mod workbench;
 
@@ -158,6 +160,7 @@ struct DesktopApp {
     permission_mode: wonderland::permissions::PermissionMode,
     approvals: Vec<serde_json::Value>,
     workbench: workbench::Workbench,
+    studio: studio::Studio,
     closing_requested: bool,
     allow_close: bool,
 }
@@ -293,6 +296,7 @@ impl DesktopApp {
             permission_mode: wonderland::permissions::PermissionMode::Default,
             approvals: Vec::new(),
             workbench: workbench::Workbench::new(&working_dir),
+            studio: studio::Studio::new(&working_dir),
             closing_requested: false,
             allow_close: false,
         };
@@ -301,6 +305,7 @@ impl DesktopApp {
             app.reasoning_effort =
                 eframe::get_value(storage, "reasoning_effort").unwrap_or_else(|| "auto".into());
             app.workbench.restore(storage);
+            app.studio.restore(storage, &app.server_url);
         }
         spawn_json_request(
             app.event_tx.clone(),
@@ -1126,15 +1131,42 @@ impl eframe::App for DesktopApp {
             eframe::set_value(storage, "active_task_id", &task.id);
         }
         self.workbench.save(storage);
+        self.studio.save(storage);
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events();
         self.workbench.poll(ctx);
         self.sync_workspace_change();
+        self.studio.project_context(&self.working_dir);
+        self.studio.poll(ctx, &self.server_url);
+        if let Some(app_id) = self.studio.launch_cli.take() {
+            if let Some(profile) = self
+                .workbench
+                .profiles
+                .iter()
+                .find(|p| p.id == app_id)
+                .cloned()
+            {
+                self.workbench.show_terminal = true;
+                self.workbench.launch(Some(profile), false);
+            } else {
+                self.studio.notice =
+                    format!("应用 {app_id} 尚无本地终端配置，请在 CLI 工作台添加入口。");
+            }
+        }
+        if let Some(project) = self.studio.open_project.take() {
+            self.workbench
+                .request_root(std::path::PathBuf::from(project));
+        }
+        if std::mem::take(&mut self.studio.choose_project) {
+            self.workbench.choose_root();
+        }
         if let Some(context) = self.workbench.chat_context.take() {
             self.input = context;
             self.view = ViewMode::Planning;
+            self.studio.page = studio::Page::Api;
+            self.workbench.pane = workbench::Pane::Chat;
         }
         let snapshot =
             cfg!(feature = "ui-snapshots") && std::env::var_os("WONDERLAND_SNAPSHOT").is_some();
@@ -1159,6 +1191,7 @@ impl eframe::App for DesktopApp {
                     .inner_margin(egui::Margin::symmetric(24, 12)),
             )
             .show(ctx, |ui| self.render_header(ui));
+        let previous_pane = self.workbench.pane;
         egui::TopBottomPanel::top("workspace-toolbar")
             .frame(
                 Frame::new()
@@ -1166,6 +1199,9 @@ impl eframe::App for DesktopApp {
                     .inner_margin(egui::Margin::symmetric(16, 8)),
             )
             .show(ctx, |ui| self.workbench.toolbar(ui));
+        if self.workbench.pane != previous_pane {
+            self.studio.page = studio::Page::Api;
+        }
         self.workbench
             .terminal_panel(ctx, self.closing_requested || !self.approvals.is_empty());
         self.workbench.dialogs(ctx);
@@ -1174,7 +1210,7 @@ impl eframe::App for DesktopApp {
             egui::Modal::new(egui::Id::new("close-workspace-dialog")).show(ctx, |ui| {
                 ui.heading("关闭工作区");
                 ui.label(
-                    "存在未保存编辑或正在运行的会话。退出会丢弃未保存编辑，并停止终端和对话任务。",
+                    "存在未保存编辑或正在运行的会话。退出会丢弃未保存编辑，并停止本窗口的终端和 API 对话。后台任务会继续运行。",
                 );
                 ui.horizontal(|ui| {
                     if ui.button("继续工作").clicked() {
@@ -1189,8 +1225,17 @@ impl eframe::App for DesktopApp {
                 });
             });
         }
+        let studio_mode = matches!(
+            self.studio.page,
+            studio::Page::Work
+                | studio::Page::Chat
+                | studio::Page::Apps
+                | studio::Page::Projects
+                | studio::Page::Teams
+        );
         // Give the conversation room when settings are open on a small screen.
-        if self.workbench.pane == workbench::Pane::Chat
+        if !studio_mode
+            && self.workbench.pane == workbench::Pane::Chat
             && (!self.show_conn_panel || ctx.screen_rect().width() >= 1180.0)
         {
             egui::SidePanel::left("task-list")
@@ -1201,15 +1246,34 @@ impl eframe::App for DesktopApp {
                 .frame(Frame::new().fill(PANEL).inner_margin(16.0))
                 .show(ctx, |ui| self.render_task_list(ui));
         }
+        if studio_mode
+            && matches!(self.studio.page, studio::Page::Work | studio::Page::Chat)
+            && (!self.show_conn_panel || ctx.screen_rect().width() >= 1180.0)
+        {
+            egui::SidePanel::left("studio-task-list")
+                .default_width(236.0)
+                .min_width(210.0)
+                .max_width(320.0)
+                .resizable(true)
+                .frame(Frame::new().fill(PANEL).inner_margin(16.0))
+                .show(ctx, |ui| self.studio.sidebar(ui));
+        }
 
         self.render_connection_panel(ctx);
         self.render_approval(ctx);
         egui::CentralPanel::default()
             .frame(Frame::new().fill(BG).inner_margin(24.0))
             .show(ctx, |ui| {
-                if self.workbench.pane != workbench::Pane::Chat {
+                if studio_mode {
+                    self.studio.render(ui, &self.working_dir);
+                } else if self.workbench.pane != workbench::Pane::Chat {
                     self.workbench.render_pane(ui);
                 } else {
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut self.view, ViewMode::Planning, "对话");
+                        ui.selectable_value(&mut self.view, ViewMode::Parallel, "多任务");
+                    });
+                    ui.add_space(8.0);
                     match self.view {
                         ViewMode::Planning => self.render_planning(ui),
                         ViewMode::Parallel => self.render_parallel(ui),

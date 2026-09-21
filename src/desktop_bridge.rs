@@ -68,6 +68,375 @@ pub struct LaunchSpec {
     pub label: String,
 }
 
+/// Published upstream identity, not an attestation of an installed executable.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OfficialSource {
+    pub repository_url: String,
+    pub website_url: String,
+    pub package_name: Option<String>,
+    /// Whether this tool is published by the corresponding model vendor.
+    /// Wonderland remains available manually but is not a vendor harness.
+    pub model_vendor_official: bool,
+}
+
+/// Describes inspected upstream interfaces separately from implemented adapters.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IntegrationCapabilities {
+    pub manual_terminal: bool,
+    pub structured_runner: bool,
+    pub protocols: Vec<String>,
+    pub sessions: bool,
+    pub cancellation: bool,
+    pub permissions: bool,
+    pub notes: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppMetadata {
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    pub source: OfficialSource,
+    pub capabilities: IntegrationCapabilities,
+    /// Relative to the project containing the reference repositories.
+    pub checkout_paths: Vec<PathBuf>,
+    pub notes: String,
+}
+
+/// Catalog entries are candidates, not proof of local installation, authentication,
+/// model identity, or protocol compatibility. Implemented native controls are
+/// reported separately from interfaces merely inspected in upstream code.
+pub fn official_apps() -> Vec<AppMetadata> {
+    [
+        (
+            "codex",
+            "Codex",
+            "OpenAI",
+            "openai/codex",
+            "https://developers.openai.com/codex",
+            Some("@openai/codex"),
+            true,
+            "app-server;exec-json",
+            "anytool/ChatGPT/codex;codex",
+            "通过官方 Codex 执行；模型与账号能力以实际安装版本为准",
+        ),
+        (
+            "claude",
+            "Claude Code",
+            "Anthropic",
+            "anthropics/claude-code",
+            "https://code.claude.com",
+            Some("@anthropic-ai/claude-code"),
+            true,
+            "stream-json;agent-sdk",
+            "",
+            "使用官方发行版；本地 claude-code-best 分支不属于官方候选",
+        ),
+        (
+            "kimi-cli",
+            "Kimi CLI · Python",
+            "Moonshot AI",
+            "MoonshotAI/kimi-cli",
+            "https://moonshotai.github.io/kimi-cli",
+            Some("kimi-cli"),
+            true,
+            "wire;acp",
+            "anytool/kimi/kimi-cli;kimi-cli",
+            "优先 Wire；与 Node 版 kimi 命令区分身份",
+        ),
+        (
+            "kimi-code",
+            "Kimi Code · Node",
+            "Moonshot AI",
+            "MoonshotAI/kimi-code",
+            "https://github.com/MoonshotAI/kimi-code",
+            Some("@moonshot-ai/kimi-code"),
+            false,
+            "acp;harness-sdk",
+            "anytool/kimi/kimi-code;kimi-code",
+            "使用 ACP；print 模式会自动授权，不作为交互适配器",
+        ),
+        (
+            "minimax",
+            "MiniMax Code",
+            "MiniMax",
+            "MiniMax-AI/minimax-code",
+            "https://github.com/MiniMax-AI/minimax-code",
+            None,
+            false,
+            "acp",
+            "anytool/minimax/minimax-code;minimax-code",
+            "手动终端候选；MiniMax CLI 产品接口与 mcode 编程工具分别识别",
+        ),
+        (
+            "mimo",
+            "MiMo Code",
+            "Xiaomi MiMo",
+            "XiaomiMiMo/MiMo-Code",
+            "https://mimo.xiaomi.com/coder",
+            Some("@mimo-ai/cli"),
+            false,
+            "acp;http-sse",
+            "anytool/mimo/MiMo-Code;MiMo-Code",
+            "手动终端候选；SDK 默认启动 helper 仍含 opencode 名称，需单独适配",
+        ),
+        (
+            "deepseek",
+            "DeepSeek Harness",
+            "DeepSeek",
+            "deepseek-ai/deepseek-harness",
+            "https://github.com/deepseek-ai/deepseek-harness",
+            Some("@deepseek-ai/dsh"),
+            true,
+            "acp;headless-json;sdk-jsonrpc",
+            "anytool/deepseek/deepseek-harness;deepseek-harness",
+            "受管任务使用已验证版本的 ACP；终端保留官方交互方式",
+        ),
+        (
+            "zcode",
+            "ZCode",
+            "Z.ai",
+            "zai-org/ZCode",
+            "https://github.com/zai-org/ZCode",
+            None,
+            false,
+            "zcode-v4",
+            "anytool/zai/ZCode;ZCode",
+            "手动终端候选；Protocol V4 需独立适配及版本验证",
+        ),
+        (
+            "wonderland",
+            "Wonderland CLI",
+            "Wonderland",
+            "Alice-Marx/Rust_for_AI-agent",
+            "https://github.com/Alice-Marx/Rust_for_AI-agent",
+            Some("rust-ai-wonderland-cli"),
+            false,
+            "",
+            "",
+            "本项目 CLI；不代替模型厂商的官方执行工具",
+        ),
+    ]
+    .into_iter()
+    .map(
+        |(
+            id,
+            name,
+            provider,
+            repository,
+            website,
+            package,
+            native,
+            protocols,
+            checkouts,
+            notes,
+        )| AppMetadata {
+            id: id.into(),
+            name: name.into(),
+            provider: provider.into(),
+            source: OfficialSource {
+                repository_url: format!("https://github.com/{repository}.git"),
+                website_url: website.into(),
+                package_name: package.map(str::to_owned),
+                model_vendor_official: id != "wonderland",
+            },
+            capabilities: IntegrationCapabilities {
+                manual_terminal: true,
+                structured_runner: crate::native_executor::supports_native(id),
+                protocols: protocols
+                    .split(';')
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+                sessions: native,
+                cancellation: native,
+                permissions: native,
+                notes: if native {
+                    "已提供结构化适配器，运行前仍须验证版本与身份"
+                } else {
+                    "接口能力仅为上游检查结果；当前仅接入手动终端"
+                }
+                .into(),
+            },
+            checkout_paths: checkouts
+                .split(';')
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+                .collect(),
+            notes: notes.into(),
+        },
+    )
+    .collect()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourceEvidence {
+    pub checkout: PathBuf,
+    pub git_dir: PathBuf,
+    /// Normalized public repository URL only. Credentials are never returned.
+    pub configured_origin: Option<String>,
+    pub expected_origin: String,
+    pub origin_matches: bool,
+    pub head_commit: Option<String>,
+    pub limitations: String,
+}
+
+/// Read local Git metadata, including submodule/worktree gitdir indirection.
+/// This does not execute Git, contact upstream, or certify the working tree,
+/// build artifacts, package signatures, or the identity of a running model.
+pub fn verify_checkout_source(checkout: &Path, source: &OfficialSource) -> Result<SourceEvidence> {
+    let checkout = checkout.canonicalize().context("源码目录不存在")?;
+    let marker = checkout.join(".git");
+    let git_dir = if marker.is_dir() {
+        marker.canonicalize()?
+    } else {
+        let marker_text = read_git_metadata(&marker)?;
+        let directory = marker_text
+            .trim()
+            .strip_prefix("gitdir:")
+            .context("无法识别 .git 文件")?
+            .trim();
+        anyhow::ensure!(
+            !directory.is_empty() && !directory.contains(['\r', '\n', '\0']),
+            "无效 gitdir 路径"
+        );
+        checkout
+            .join(directory)
+            .canonicalize()
+            .context("gitdir 目录不存在")?
+    };
+    let common_file = git_dir.join("commondir");
+    let common_dir = if common_file.is_file() {
+        let directory = read_git_metadata(&common_file)?;
+        let directory = directory.trim();
+        anyhow::ensure!(
+            !directory.is_empty() && !directory.contains(['\r', '\n', '\0']),
+            "无效 commondir 路径"
+        );
+        git_dir
+            .join(directory)
+            .canonicalize()
+            .context("commondir 目录不存在")?
+    } else {
+        git_dir.clone()
+    };
+    let config = read_git_metadata(&common_dir.join("config"))?;
+    let mut in_origin = false;
+    let mut origins = Vec::new();
+    for line in config.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with(['#', ';']) {
+            continue;
+        }
+        if line.starts_with('[') {
+            in_origin = line.eq_ignore_ascii_case("[remote \"origin\"]")
+                || line.eq_ignore_ascii_case("[remote.origin]");
+            continue;
+        }
+        if in_origin {
+            if let Some((key, value)) = line.split_once('=') {
+                if key.trim().eq_ignore_ascii_case("url") {
+                    origins.push(value.trim().trim_matches('"'));
+                }
+            }
+        }
+    }
+    anyhow::ensure!(origins.len() <= 1, "origin 配置包含多个 URL，无法确定来源");
+    let configured_origin = origins.first().and_then(|url| public_github_origin(url));
+    let expected_origin = public_github_origin(&source.repository_url)
+        .context("官方来源需要明确的 GitHub 仓库 URL")?;
+    let origin_matches = configured_origin.as_ref() == Some(&expected_origin);
+    let head_commit = read_checkout_head(&git_dir, &common_dir)?;
+    Ok(SourceEvidence {
+        checkout,
+        git_dir,
+        configured_origin,
+        expected_origin,
+        origin_matches,
+        head_commit,
+        limitations: "仅比较本地 Git 配置和 HEAD；未验证远端、签名、工作区修改、构建产物或运行模型。未展开 include、URL rewrite、用户级或系统级 Git 配置。匹配不等于官方二进制认证。".into(),
+    })
+}
+
+fn read_git_metadata(path: &Path) -> Result<String> {
+    let mut text = String::new();
+    std::fs::File::open(path)
+        .with_context(|| format!("无法读取 Git 元数据：{}", path.display()))?
+        .take(1024 * 1024 + 1)
+        .read_to_string(&mut text)?;
+    anyhow::ensure!(text.len() <= 1024 * 1024, "Git 元数据过大");
+    Ok(text)
+}
+
+fn public_github_origin(value: &str) -> Option<String> {
+    let lower = value.trim().to_ascii_lowercase();
+    // Reject credential-bearing URLs rather than placing their contents in UI
+    // diagnostics. SSH's fixed git username contains no account credential.
+    let path = lower
+        .strip_prefix("https://github.com/")
+        .or_else(|| lower.strip_prefix("git@github.com:"))
+        .or_else(|| lower.strip_prefix("ssh://git@github.com/"))?;
+    let path = path
+        .trim_end_matches('/')
+        .strip_suffix(".git")
+        .unwrap_or(path.trim_end_matches('/'));
+    let parts: Vec<_> = path.split('/').collect();
+    if parts.len() != 2
+        || parts.iter().any(|part| {
+            part.is_empty()
+                || *part == "."
+                || *part == ".."
+                || !part
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        })
+    {
+        return None;
+    }
+    Some(format!("https://github.com/{path}.git"))
+}
+
+fn read_checkout_head(git_dir: &Path, common_dir: &Path) -> Result<Option<String>> {
+    let head = read_git_metadata(&git_dir.join("HEAD"))?;
+    let head = head.trim();
+    if is_git_object_id(head) {
+        return Ok(Some(head.to_ascii_lowercase()));
+    }
+    let Some(reference) = head.strip_prefix("ref: ") else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        reference.starts_with("refs/")
+            && reference.split('/').all(|p| !p.is_empty()
+                && p != "."
+                && p != ".."
+                && p.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))),
+        "无法识别 Git HEAD 引用"
+    );
+    for directory in [git_dir, common_dir] {
+        let loose = directory.join(reference);
+        if loose.is_file() {
+            let value = read_git_metadata(&loose)?;
+            return Ok(is_git_object_id(value.trim()).then(|| value.trim().to_ascii_lowercase()));
+        }
+        let packed = directory.join("packed-refs");
+        if packed.is_file() {
+            for line in read_git_metadata(&packed)?.lines() {
+                if let Some((id, name)) = line.split_once(' ') {
+                    if name == reference && is_git_object_id(id) {
+                        return Ok(Some(id.to_ascii_lowercase()));
+                    }
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn is_git_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|c| c.is_ascii_hexdigit())
+}
+
 pub fn default_cli_profiles() -> Vec<CliProfile> {
     [
         ("codex", "Codex", "codex", "npm install -g @openai/codex"),
@@ -90,10 +459,23 @@ pub fn default_cli_profiles() -> Vec<CliProfile> {
             "npm install -g @moonshot-ai/kimi-code；注意与 Python kimi 命令同名",
         ),
         (
+            "minimax",
+            "MiniMax Code",
+            "mcode",
+            "请按 MiniMax-AI/minimax-code 官方说明安装 mcode 或构建 dist/cli.js",
+        ),
+        ("mimo", "MiMo Code", "mimo", "npm install -g @mimo-ai/cli"),
+        (
             "deepseek",
             "DeepSeek Harness",
             "dsh",
             "安装 @deepseek-ai/dsh，或指定已构建 checkout 的 Node 入口",
+        ),
+        (
+            "zcode",
+            "ZCode",
+            "zcode",
+            "请按 zai-org/ZCode 官方说明安装或构建 ZCode CLI",
         ),
         (
             "wonderland",
@@ -200,6 +582,101 @@ pub fn checkout_cli_profiles(root: &Path) -> Vec<CliProfile> {
         install_hint: "请先按 Kimi CLI 仓库说明准备 .venv；桌面仅使用现有环境，uv 以 offline/no-sync/frozen 启动".into(),
         ..CliProfile::default()
     });
+    for (id, name, entry) in [
+        ("minimax", "MiniMax Code", "minimax-code/dist/cli.js"),
+        (
+            "zcode",
+            "ZCode",
+            "ZCode/apps/zcode-cli/packages/cli/dist/zcode.cjs",
+        ),
+    ] {
+        let entry = root.join(entry);
+        profiles.push(CliProfile {
+            id: format!("local-{id}"),
+            name: format!("本地 {name} · Node 构建"),
+            executable: "node".into(),
+            args: vec![entry.to_string_lossy().into_owned()],
+            required_paths: vec![entry],
+            install_hint: format!("请按 {name} 官方源码说明构建入口；桌面不会安装依赖或执行构建"),
+            ..CliProfile::default()
+        });
+    }
+    let os = if cfg!(target_os = "macos") {
+        "darwin"
+    } else if cfg!(windows) {
+        "windows"
+    } else {
+        "linux"
+    };
+    let arch = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "x64"
+    };
+    let abi = if cfg!(target_env = "musl") {
+        "-musl"
+    } else {
+        ""
+    };
+    let mimo = root.join(format!(
+        "MiMo-Code/packages/opencode/dist/mimocode-{os}-{arch}{abi}/bin/mimo{executable_suffix}"
+    ));
+    profiles.push(CliProfile {
+        id: "local-mimo".into(),
+        name: "本地 MiMo Code · 已构建程序".into(),
+        executable: mimo.to_string_lossy().into_owned(),
+        required_paths: vec![mimo],
+        install_hint: "请先按 MiMo Code 官方说明构建当前平台程序；baseline 构建请修改为实际路径"
+            .into(),
+        ..CliProfile::default()
+    });
+    // Preserve legacy ids and paths for saved settings. Add distinct presets for
+    // the submodule layout; do not silently redirect a configured executable.
+    for (id, legacy, upstream) in [
+        ("codex", "codex", "anytool/ChatGPT/codex"),
+        ("claude", "claude-code", "anytool/Claude/claude-code-best"),
+        ("kimi-cli", "kimi-cli", "anytool/kimi/kimi-cli"),
+        ("kimi-code", "kimi-code", "anytool/kimi/kimi-code"),
+        ("minimax", "minimax-code", "anytool/minimax/minimax-code"),
+        ("mimo", "MiMo-Code", "anytool/mimo/MiMo-Code"),
+        (
+            "deepseek",
+            "deepseek-harness",
+            "anytool/deepseek/deepseek-harness",
+        ),
+        ("zcode", "ZCode", "anytool/zai/ZCode"),
+    ] {
+        let Some(mut profile) = profiles
+            .iter()
+            .find(|p| p.id == format!("local-{id}"))
+            .cloned()
+        else {
+            continue;
+        };
+        let from = root.join(legacy);
+        let to = root.join(upstream);
+        let relocate = |path: &Path| {
+            path.strip_prefix(&from)
+                .map(|rest| to.join(rest))
+                .unwrap_or_else(|_| path.to_path_buf())
+        };
+        profile.id = format!("anytool-{id}");
+        profile.name = format!("{} · anytool", profile.name);
+        profile.executable = relocate(Path::new(&profile.executable))
+            .to_string_lossy()
+            .into_owned();
+        profile.args = profile
+            .args
+            .iter()
+            .map(|arg| relocate(Path::new(arg)).to_string_lossy().into_owned())
+            .collect();
+        profile.required_paths = profile
+            .required_paths
+            .iter()
+            .map(|path| relocate(path))
+            .collect();
+        profiles.push(profile);
+    }
     profiles
 }
 
@@ -264,6 +741,30 @@ pub fn detect_cli(profile: &CliProfile) -> CliStatus {
 }
 
 pub fn prepare_cli(profile: &CliProfile, workspace: &Path) -> Result<LaunchSpec> {
+    let args = if matches!(
+        profile.id.as_str(),
+        "deepseek" | "local-deepseek" | "anytool-deepseek"
+    ) && !profile
+        .args
+        .iter()
+        .any(|arg| arg == "--profile" || arg.starts_with("--profile="))
+    {
+        vec!["--profile".into(), "agent".into()]
+    } else {
+        Vec::new()
+    };
+    prepare_native_cli(profile, workspace, &args)
+}
+
+/// Compose the entire argv before Windows shim encoding. `profile.args` retains
+/// interpreter entrypoints and user configuration; `extra_args` follows it.
+/// Unlike prepare_cli, this does not inject an interactive DeepSeek profile.
+/// Callers must not append protocol arguments to the returned LaunchSpec.
+pub fn prepare_native_cli(
+    profile: &CliProfile,
+    workspace: &Path,
+    extra_args: &[String],
+) -> Result<LaunchSpec> {
     validate_profile(profile)?;
     let cwd = validated_workspace(workspace)?;
     let executable = find_executable(&profile.executable)
@@ -285,7 +786,9 @@ pub fn prepare_cli(profile: &CliProfile, workspace: &Path) -> Result<LaunchSpec>
             &probe_version(&version_spec, Duration::from_secs(5))?,
         )?;
     }
-    normalize_launch(executable, profile.args.clone(), cwd, profile.name.clone())
+    let mut args = profile.args.clone();
+    args.extend_from_slice(extra_args);
+    normalize_launch(executable, args, cwd, profile.name.clone())
 }
 
 fn validate_version_identity(profile: &CliProfile, version: &str) -> Result<()> {
@@ -788,6 +1291,192 @@ fn probe_version(spec: &LaunchSpec, timeout: Duration) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_separates_native_adapters_from_manual_candidates() {
+        let apps = official_apps();
+        assert_eq!(apps.len(), 9);
+        for profile in default_cli_profiles() {
+            assert!(apps.iter().any(|app| app.id == profile.id));
+        }
+        let native: Vec<_> = apps
+            .iter()
+            .filter(|app| app.capabilities.structured_runner)
+            .map(|app| app.id.as_str())
+            .collect();
+        assert_eq!(native, ["codex", "claude", "kimi-cli", "deepseek"]);
+        assert!(
+            !apps
+                .iter()
+                .find(|app| app.id == "wonderland")
+                .unwrap()
+                .source
+                .model_vendor_official
+        );
+        assert!(apps
+            .iter()
+            .find(|app| app.id == "claude")
+            .unwrap()
+            .checkout_paths
+            .is_empty());
+    }
+
+    #[test]
+    fn checkout_presets_preserve_legacy_and_submodule_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let profiles = checkout_cli_profiles(directory.path());
+        let kimi = profiles
+            .iter()
+            .find(|p| p.id == "anytool-kimi-code")
+            .unwrap();
+        assert_eq!(
+            kimi.required_paths,
+            [directory
+                .path()
+                .join("anytool/kimi/kimi-code/apps/kimi-code/dist/main.mjs")]
+        );
+        assert!(profiles.iter().any(|p| p.id == "local-kimi-code"));
+        assert!(profiles
+            .iter()
+            .find(|p| p.id == "anytool-claude")
+            .unwrap()
+            .name
+            .contains("分支"));
+    }
+
+    #[test]
+    fn source_evidence_reads_submodule_gitfile_and_rejects_fork_origin() {
+        let directory = tempfile::tempdir().unwrap();
+        let checkout = directory.path().join("checkout");
+        let git_dir = directory.path().join("metadata");
+        std::fs::create_dir_all(&checkout).unwrap();
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(checkout.join(".git"), "gitdir: ../metadata\n").unwrap();
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        std::fs::write(git_dir.join("HEAD"), format!("{revision}\n")).unwrap();
+        std::fs::write(
+            git_dir.join("config"),
+            "[remote \"origin\"]\n url = git@github.com:XiaomiMiMo/MiMo-Code.git\n",
+        )
+        .unwrap();
+        let source = official_apps()
+            .into_iter()
+            .find(|app| app.id == "mimo")
+            .unwrap()
+            .source;
+        let evidence = verify_checkout_source(&checkout, &source).unwrap();
+        assert!(evidence.origin_matches);
+        assert_eq!(evidence.head_commit.as_deref(), Some(revision));
+        assert!(evidence.limitations.contains("未验证远端"));
+        std::fs::write(
+            git_dir.join("config"),
+            "[remote \"origin\"]\n url = https://github.com/example/MiMo-Code.git\n",
+        )
+        .unwrap();
+        assert!(
+            !verify_checkout_source(&checkout, &source)
+                .unwrap()
+                .origin_matches
+        );
+    }
+
+    #[test]
+    fn source_evidence_handles_worktree_common_config_and_packed_refs() {
+        let directory = tempfile::tempdir().unwrap();
+        let git_dir = directory.path().join(".git");
+        let common = directory.path().join("common");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::create_dir_all(&common).unwrap();
+        std::fs::write(git_dir.join("commondir"), "../common\n").unwrap();
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(
+            common.join("config"),
+            "[remote \"origin\"]\n url = https://github.com/openai/codex.git\n",
+        )
+        .unwrap();
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        std::fs::write(
+            common.join("packed-refs"),
+            format!("# pack-refs\n{revision} refs/heads/main\n"),
+        )
+        .unwrap();
+        let source = official_apps()
+            .into_iter()
+            .find(|app| app.id == "codex")
+            .unwrap()
+            .source;
+        let evidence = verify_checkout_source(directory.path(), &source).unwrap();
+        assert!(evidence.origin_matches);
+        assert_eq!(evidence.head_commit.as_deref(), Some(revision));
+    }
+
+    #[test]
+    fn origin_normalization_rejects_credentials_and_deceptive_hosts() {
+        for url in [
+            "https://token@github.com/openai/codex.git",
+            "https://github.com.example/openai/codex.git",
+            "https://github.com/openai/codex.git?token=secret",
+            "https://github.com/openai/../codex.git",
+        ] {
+            assert!(public_github_origin(url).is_none());
+        }
+        assert_eq!(
+            public_github_origin("ssh://git@github.com/OpenAI/codex.git"),
+            Some("https://github.com/openai/codex.git".into())
+        );
+    }
+
+    #[test]
+    fn native_argv_keeps_extra_arguments_and_omits_manual_defaults() {
+        let directory = tempfile::tempdir().unwrap();
+        let profile = CliProfile {
+            id: "deepseek".into(),
+            executable: env::current_exe().unwrap().to_string_lossy().into_owned(),
+            args: vec!["entry.js".into()],
+            ..CliProfile::default()
+        };
+        assert_eq!(
+            prepare_cli(&profile, directory.path()).unwrap().args,
+            ["entry.js", "--profile", "agent"]
+        );
+        let spec = prepare_native_cli(
+            &profile,
+            directory.path(),
+            &["--profile".into(), "acp".into()],
+        )
+        .unwrap();
+        assert_eq!(spec.args, ["entry.js", "--profile", "acp"]);
+        assert!(prepare_native_cli(&profile, directory.path(), &["bad\0argument".into()]).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_argv_is_composed_before_powershell_encoding() {
+        let directory = tempfile::tempdir().unwrap();
+        let shim = directory.path().join("fixture.ps1");
+        std::fs::write(&shim, "# unused fixture").unwrap();
+        let profile = CliProfile {
+            executable: shim.to_string_lossy().into_owned(),
+            args: vec!["prefix".into()],
+            ..CliProfile::default()
+        };
+        let spec = prepare_native_cli(
+            &profile,
+            directory.path(),
+            &["acp".into(), "a' b $()".into()],
+        )
+        .unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(spec.args.last().unwrap())
+            .unwrap();
+        let words: Vec<_> = bytes
+            .chunks_exact(2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        let command = String::from_utf16(&words).unwrap();
+        assert!(command.contains("'prefix' 'acp' 'a'' b $()'"));
+        assert_eq!(spec.args[spec.args.len() - 2], "-EncodedCommand");
+    }
 
     #[test]
     fn shell_literals_preserve_unicode_quotes_and_metacharacters() {

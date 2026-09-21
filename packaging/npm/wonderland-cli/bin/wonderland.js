@@ -29,6 +29,18 @@ Usage:
   wonderland-cli [options] profile
   wonderland-cli [options] mcp-login <name> [--wait]
   wonderland-cli [options] mcp-reload
+  wonderland-cli [options] apps [--probe <app>]
+  wonderland-cli [options] intelligence [refresh]
+  wonderland-cli [options] work list|get|events|start|cancel <id>
+  wonderland-cli --model <id> --cwd <dir> work create <app> <prompt>
+  wonderland-cli [options] work approve <id> <request-id> allow|deny
+  wonderland-cli [options] work answer <id> <request-id> <answers-json>
+  wonderland-cli [options] work accept <id> <evidence>
+  wonderland-cli [options] team list|get|start|cancel <id>
+  wonderland-cli [options] team create --file <team.json>
+  wonderland-cli [options] team events <id> [--after <sequence>]
+  wonderland-cli [options] pricing status|refresh
+  wonderland-cli [options] pricing quote --app <app-id> --model <exact-id> --billing <channel>
 
 Options:
   --server <url>       Rust Agent URL (default: ${defaultServer})
@@ -62,6 +74,10 @@ function parseArgs(argv) {
     resume: false,
     stream: true,
     reasoning: process.env.AGENT_REASONING_EFFORT || null,
+    app: null,
+    billing: null,
+    file: null,
+    after: null,
   };
   const valueFlags = {
     "--server": "server",
@@ -71,6 +87,11 @@ function parseArgs(argv) {
     "--model": "model",
     "--mode": "mode",
     "--reasoning": "reasoning",
+    "--app": "app",
+    "--billing": "billing",
+    "--file": "file",
+    "--after": "after",
+    "--probe": "probe",
   };
   let index = 0;
   while (index < argv.length) {
@@ -120,6 +141,65 @@ async function request(options, pathname, init = {}) {
     throw new Error(body.error || `HTTP ${response.status}`);
   }
   return body;
+}
+
+function teamRequest(options) {
+  const [action, id, ...extra] = options.args;
+  if (!action) throw new Error("team requires list, create, get, start, cancel or events");
+  if (options.app !== null || options.billing !== null) throw new Error("team does not accept --app or --billing; set executors in the plan JSON");
+  if (action !== "create" && options.file !== null) throw new Error("--file is only valid for team create");
+  if (action !== "events" && options.after !== null) throw new Error("--after is only valid for team events");
+  let pathname = "/api/v1/teams";
+  let body;
+  if (action === "create") {
+    if (!options.file || id || extra.length) throw new Error("team create requires --file <team.json> without positional arguments");
+    const maxBytes = 8 * 1024 * 1024;
+    const descriptor = fs.openSync(options.file, "r");
+    try {
+      const stat = fs.fstatSync(descriptor);
+      if (!stat.isFile() || stat.size > maxBytes) throw new Error("Team plan must be a JSON file of at most 8 MiB");
+      const buffer = Buffer.alloc(Math.min(stat.size + 1, maxBytes + 1));
+      let size = 0;
+      while (size < buffer.length) {
+        const count = fs.readSync(descriptor, buffer, size, buffer.length - size, null);
+        if (!count) break;
+        size += count;
+      }
+      if (size > stat.size || size > maxBytes) throw new Error("Team plan changed while reading or exceeds 8 MiB");
+      body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, size)));
+    } finally { fs.closeSync(descriptor); }
+    if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Team plan must be a TeamCreate JSON object");
+  } else if (action === "list") {
+    if (id || extra.length) throw new Error("team list does not accept a team ID");
+  } else {
+    if (!["get", "start", "cancel", "events"].includes(action)) throw new Error(`Unknown team operation: ${action}`);
+    if (!id || id === "." || id === ".." || extra.length) throw new Error(`team ${action} requires exactly one team ID`);
+    pathname += `/${encodeURIComponent(id)}`;
+    if (action === "events") {
+      const after = options.after === null ? "0" : options.after;
+      if (!/^\d+$/.test(after) || !Number.isSafeInteger(Number(after))) throw new Error("--after requires a non-negative safe integer");
+      pathname += `/events?after=${Number(after)}`;
+    } else if (action !== "get") {
+      pathname += `/${action}`;
+      body = {};
+    }
+  }
+  return { pathname, init: body === undefined ? {} : { method: "POST", body: JSON.stringify(body) } };
+}
+
+function pricingRequest(options) {
+  const [action, ...extra] = options.args;
+  if (!action || extra.length) throw new Error("pricing requires status, refresh or quote without positional arguments");
+  if (options.file !== null || options.after !== null) throw new Error("pricing does not accept --file or --after");
+  if (action === "quote") {
+    if (![options.app, options.model, options.billing].every(value => typeof value === "string" && value.trim())) throw new Error("pricing quote requires --app, --model and explicit --billing");
+    const query = new URLSearchParams({ app_id: options.app, model: options.model, billing_channel: options.billing });
+    return { pathname: `/api/v1/pricing/quote?${query}`, init: {} };
+  }
+  if (options.app !== null || options.billing !== null) throw new Error("--app and --billing are only valid for pricing quote");
+  if (action === "status") return { pathname: "/api/v1/pricing", init: {} };
+  if (action === "refresh") return { pathname: "/api/v1/pricing/refresh", init: { method: "POST", body: "{}" } };
+  throw new Error(`Unknown pricing operation: ${action}`);
 }
 
 // 自定义斜杠命令：与 Rust 端 src/commands.rs 的语义保持一致。
@@ -463,14 +543,60 @@ async function main() {
     usage();
     return;
   }
-  const commands = loadCommands(options.cwd);
-  options.sessionId = await resolveSession(options);
+  const usesChat = !options.command || ["chat", "run"].includes(options.command);
+  const commands = usesChat || options.command === "commands" ? loadCommands(options.cwd) : [];
+  if (usesChat) options.sessionId = await resolveSession(options);
 
   if (!options.command) {
     await chat(options, null, commands);
     return;
   }
   switch (options.command) {
+    case "apps":
+      console.log(JSON.stringify(await request(options, options.probe ? `/api/v1/apps/${encodeURIComponent(options.probe)}/probe` : "/api/v1/apps", options.probe ? { method: "POST", body: "{}" } : {}), null, 2));
+      break;
+    case "intelligence": {
+      const refresh = options.args[0] === "refresh";
+      console.log(JSON.stringify(await request(options, `/api/v1/intelligence${refresh ? "/refresh" : ""}`, refresh ? {method:"POST",body:"{}"} : {}), null, 2));
+      break;
+    }
+    case "team": {
+      const { pathname, init } = teamRequest(options);
+      console.log(JSON.stringify(await request(options, pathname, init), null, 2));
+      break;
+    }
+    case "pricing": {
+      const { pathname, init } = pricingRequest(options);
+      console.log(JSON.stringify(await request(options, pathname, init), null, 2));
+      break;
+    }
+    case "work": {
+      const [action = "list", id, requestId, ...tail] = options.args;
+      if (options.reasoning !== null && action !== "create") throw new Error("--reasoning is only accepted by work create; starting a task uses the saved reasoning_effort");
+      let endpoint = "/api/v1/workflows";
+      let body;
+      if (action === "create") {
+        if (!id || !requestId || !options.model) throw new Error("work create requires an app, prompt and --model");
+        body = {app_id:id,model:options.model,...(options.reasoning === null ? {} : {reasoning_effort:options.reasoning}),prompt:[requestId,...tail].join(" "),cwd:options.cwd,mode:"work",read_only:options.mode === "plan"};
+      } else if (action !== "list") {
+        if (!id) throw new Error("work operation requires a task ID");
+        endpoint += `/${encodeURIComponent(id)}`;
+        if (action === "events") endpoint += "/events";
+        else if (["start","cancel"].includes(action)) { endpoint += `/${action}`; body = {}; }
+        else if (action === "approve") {
+          if (!requestId || !["allow","deny"].includes(tail[0])) throw new Error("approve requires request-id and allow|deny");
+          endpoint += "/approve"; body = {request_id:requestId,approve:tail[0] === "allow"};
+        } else if (action === "answer") {
+          if (!requestId || !tail.length) throw new Error("answer requires request-id and JSON answers");
+          endpoint += "/answer"; body = {request_id:requestId,answers:JSON.parse(tail.join(" "))};
+        } else if (action === "accept") {
+          if (!requestId) throw new Error("accept requires verification evidence");
+          endpoint += "/accept"; body = {evidence:[requestId,...tail].join(" ")};
+        } else if (action !== "get") throw new Error(`Unknown work operation: ${action}`);
+      }
+      console.log(JSON.stringify(await request(options, endpoint, body === undefined ? {} : {method:"POST",body:JSON.stringify(body)}), null, 2));
+      break;
+    }
     case "chat":
       await chat(options, options.args.join(" "), commands);
       break;

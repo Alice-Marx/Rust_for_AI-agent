@@ -31,6 +31,7 @@ pub struct AppState {
     pub runtime: Arc<AgentRuntime>,
     pub expenses: ExpenseStore,
     pub cliproxy: Option<Arc<CliProxyApiClient>>,
+    pub workbench: Arc<crate::workbench_service::WorkbenchService>,
 }
 
 impl AppState {
@@ -97,6 +98,7 @@ async fn set_connection(
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .merge(crate::workbench_service::routes())
         .route("/health", get(health))
         .route("/v1/agent/run", post(run_agent))
         .route("/v1/agent/stream", post(run_agent_stream))
