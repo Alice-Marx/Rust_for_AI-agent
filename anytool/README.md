@@ -12,8 +12,11 @@ anytool/
 ├── minimax/
 │   ├── minimax-code/
 │   └── cli/
-└── mimo/
-    └── MiMo-Code/
+├── mimo/
+│   └── MiMo-Code/
+└── zai/
+    ├── ZCode/
+    └── zcode-plugins/
 ```
 
 | 目录 | 上游仓库 |
@@ -24,6 +27,8 @@ anytool/
 | `minimax/minimax-code/` | [MiniMax-AI/minimax-code](https://github.com/MiniMax-AI/minimax-code) |
 | `minimax/cli/` | [MiniMax-AI/cli](https://github.com/MiniMax-AI/cli) |
 | `mimo/MiMo-Code/` | [XiaomiMiMo/MiMo-Code](https://github.com/XiaomiMiMo/MiMo-Code) |
+| `zai/ZCode/` | [zai-org/ZCode](https://github.com/zai-org/ZCode) |
+| `zai/zcode-plugins/` | [zai-org/zcode-plugins](https://github.com/zai-org/zcode-plugins) |
 
 ## 获取源码
 

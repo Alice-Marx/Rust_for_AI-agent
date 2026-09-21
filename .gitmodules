@@ -16,3 +16,9 @@
 [submodule "anytool/mimo/MiMo-Code"]
 	path = anytool/mimo/MiMo-Code
 	url = https://github.com/XiaomiMiMo/MiMo-Code.git
+[submodule "anytool/zai/ZCode"]
+	path = anytool/zai/ZCode
+	url = https://github.com/zai-org/ZCode.git
+[submodule "anytool/zai/zcode-plugins"]
+	path = anytool/zai/zcode-plugins
+	url = https://github.com/zai-org/zcode-plugins.git
