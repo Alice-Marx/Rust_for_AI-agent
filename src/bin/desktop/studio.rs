@@ -1303,6 +1303,7 @@ impl Studio {
                                     self.composing = true;
                                     if self.app_id != id {
                                         self.model.clear();
+                                        self.effort.clear();
                                     }
                                     self.app_id = id.clone();
                                     self.selected = None;
