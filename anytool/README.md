@@ -10,6 +10,8 @@ anytool/
 ├── ChatGPT/
 │   └── codex/
 ├── Claude/
+├── DeepSeek/
+│   └── deepseek-harness/
 ├── minimax/
 │   ├── minimax-code/
 │   └── cli/
@@ -26,6 +28,7 @@ anytool/
 | `kimi/kimi-code/` | [MoonshotAI/kimi-code](https://github.com/MoonshotAI/kimi-code) |
 | `ChatGPT/codex/` | [openai/codex](https://github.com/openai/codex) |
 | `Claude/` | [Alice-Marx/claudecode（Gitee，源码快照）](https://gitee.com/Alice-Marx/claudecode) |
+| `DeepSeek/deepseek-harness/` | [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) |
 | `minimax/minimax-code/` | [MiniMax-AI/minimax-code](https://github.com/MiniMax-AI/minimax-code) |
 | `minimax/cli/` | [MiniMax-AI/cli](https://github.com/MiniMax-AI/cli) |
 | `mimo/MiMo-Code/` | [XiaomiMiMo/MiMo-Code](https://github.com/XiaomiMiMo/MiMo-Code) |

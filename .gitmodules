@@ -22,3 +22,6 @@
 [submodule "anytool/zai/zcode-plugins"]
 	path = anytool/zai/zcode-plugins
 	url = https://github.com/zai-org/zcode-plugins.git
+[submodule "anytool/DeepSeek/deepseek-harness"]
+	path = anytool/DeepSeek/deepseek-harness
+	url = https://github.com/deepseek-ai/deepseek-harness.git

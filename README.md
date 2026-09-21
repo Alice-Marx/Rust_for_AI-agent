@@ -136,7 +136,7 @@ npm 登录命令加 `--wait` 自动等待完成并重载。服务根据 MCP capa
 
 ## 源码运行
 
-需要 Rust stable、C/C++ 链接工具链；Windows 推荐 MSVC Build Tools 或 GCC/MinGW。Linux 桌面需要 X11/Wayland 开发依赖。上游 AI 编码工具收录在 [anytool/](anytool/)，按 Kimi、ChatGPT、Claude、MiniMax、MiMo 和 Z.ai 分组；其中 `Claude/` 保存从 Gitee 导入的完整项目文件，其余通过 Git 子模块收录，获取方式见目录内说明。这些工具不参与主项目编译。此前在根目录检出的本地参考仓库仍独立保留。
+需要 Rust stable、C/C++ 链接工具链；Windows 推荐 MSVC Build Tools 或 GCC/MinGW。Linux 桌面需要 X11/Wayland 开发依赖。上游 AI 编码工具收录在 [anytool/](anytool/)，按 Kimi、ChatGPT、Claude、DeepSeek、MiniMax、MiMo 和 Z.ai 分组；其中 `Claude/` 保存从 Gitee 导入的完整项目文件，其余通过 Git 子模块收录，获取方式见目录内说明。这些工具不参与主项目编译。此前在根目录检出的本地参考仓库仍独立保留。
 
 ```powershell
 cargo test --locked --all-targets
