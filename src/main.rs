@@ -121,16 +121,20 @@ async fn main() -> Result<()> {
         "binding outside loopback requires WONDERLAND_SERVER_TOKEN"
     );
     tracing::info!(%address, "Wonderland API started");
+    let workbench = wonderland::workbench_service::WorkbenchService::open(&data_dir)?;
+    let shutdown_workbench = workbench.clone();
     axum::serve(
         listener,
         router(AppState {
             runtime,
             expenses: ExpenseStore::seeded(),
             cliproxy,
+            workbench,
         }),
     )
-    .with_graceful_shutdown(async {
+    .with_graceful_shutdown(async move {
         let _ = tokio::signal::ctrl_c().await;
+        shutdown_workbench.shutdown().await;
     })
     .await?;
     wonderland::provider::stop_subscription().await;

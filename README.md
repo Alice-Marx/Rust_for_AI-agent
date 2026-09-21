@@ -1,10 +1,14 @@
 # Wonderland · Rust AI Agent
 
-Wonderland 是支持多模型 API 与订阅账号的 Rust 编码工作区，提供 Windows 桌面应用、原生 CLI、npm CLI 和本地 HTTP 服务。当前版本 **0.7.0**。
+Wonderland 是支持多模型 API 与订阅账号的 Rust 编码工作区，提供 Windows 桌面应用、原生 CLI、npm CLI 和本地 HTTP 服务。当前开发版本 **0.8.0（工作台预览版）**。
+
+本版开始实现[多模型协作建设方案](docs/MULTI_MODEL_ORCHESTRATION_PLAN.md)与[桌面产品方案](docs/DESKTOP_PRODUCT_PLAN.md)。新增 Work/Chat、持久任务看板、项目、官方应用入口、Codex app-server 与 Kimi Wire 任务适配、权限往返及验收记录。模型执行由对应原生工具承担，原工具源码不作修改。
+
+**自动多模型派工尚未启用。** LiveBench 每次在线刷新已实现，实时官方价格解析、模型身份到评分的映射、任务 DAG、预算账本、隔离工作树与自动集成还未完成。其它应用当前通过交互终端使用，不能视为已有受管适配器。插件市场、定时任务、远程主机、PR 与网站面板仍属于后续范围。详见 [0.8.0 实现边界与使用说明](docs/RELEASE-0.8.0.md)。
 
 ![Wonderland 桌面工作区](docs/images/desktop-welcome.png)
 
-## 本次升级
+## 已有基础能力
 
 - **项目工作台**：文件浏览与编辑、Git 变更、最近项目、内嵌终端和系统终端；按项目保留任务目录与运行中会话。
 - **官方 CLI 直连**：直接打开 Codex、Claude Code、Kimi CLI/Code、DeepSeek Harness 和自定义程序，保留原工具的登录、配置与升级方式。

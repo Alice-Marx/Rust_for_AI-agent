@@ -40,3 +40,7 @@ pub use model::{AgentRequest, AgentResponse};
 pub mod desktop_bridge;
 pub mod desktop_terminal;
 pub mod desktop_workspace;
+pub mod model_intelligence;
+pub mod native_executor;
+pub mod workbench_service;
+pub mod workflow;

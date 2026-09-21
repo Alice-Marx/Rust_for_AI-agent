@@ -10,7 +10,12 @@ impl DesktopApp {
         self.snapshot_frames += 1;
         if self.snapshot_frames == 1 {
             if let Ok(mode) = std::env::var("WONDERLAND_SNAPSHOT_PANE") {
-                self.workbench.prepare_snapshot(&mode);
+                if mode.starts_with("studio-") {
+                    self.studio.prepare_snapshot(&mode, &self.working_dir);
+                } else {
+                    self.studio.page = studio::Page::Api;
+                    self.workbench.prepare_snapshot(&mode);
+                }
             }
         }
         if self.snapshot_frames == 1 && std::env::var_os("WONDERLAND_SNAPSHOT_COMPACT").is_some() {
@@ -49,48 +54,44 @@ impl DesktopApp {
         }
     }
     pub(super) fn render_header(&mut self, ui: &mut Ui) {
-        use icons::{brand, button, Icon};
+        use icons::{brand, Icon};
         ui.horizontal(|ui| {
-            brand(ui, 32.0);
-            ui.add_space(2.0);
-            ui.label(RichText::new("Wonderland").size(20.0).strong());
-            ui.add_space(12.0);
-            ui.label(
-                RichText::new("/  你的 AI 编码工作区")
-                    .size(12.0)
-                    .color(MUTED),
-            );
+            brand(ui, 30.0);
+            ui.label(RichText::new("Wonderland").size(19.0).strong());
+            ui.add_space(18.0);
+            for (page, label) in [
+                (studio::Page::Work, "Work"),
+                (studio::Page::Chat, "Chat"),
+                (studio::Page::Apps, "应用"),
+                (studio::Page::Projects, "项目"),
+                (studio::Page::Api, "API 对话"),
+            ] {
+                let selected = self.studio.page == page;
+                let response = ui.add(
+                    egui::Button::new(RichText::new(label).size(13.0).color(if selected {
+                        ACCENT
+                    } else {
+                        MUTED
+                    }))
+                    .fill(if selected {
+                        Color32::from_rgb(34, 49, 46)
+                    } else {
+                        BG
+                    })
+                    .stroke(Stroke::NONE),
+                );
+                if response.clicked() {
+                    self.studio.set_page(page, &self.working_dir);
+                    self.workbench.pane = workbench::Pane::Chat;
+                }
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if button(ui, Icon::Settings, "设置", 88.0, self.show_conn_panel).clicked() {
+                if icons::button(ui, Icon::Settings, "设置", 78.0, self.show_conn_panel).clicked()
+                {
                     self.show_conn_panel = !self.show_conn_panel;
                     if self.show_conn_panel {
                         self.refresh_connection_panel();
                     }
-                }
-                ui.add_space(8.0);
-                if button(
-                    ui,
-                    Icon::Grid,
-                    "多任务",
-                    100.0,
-                    self.view == ViewMode::Parallel,
-                )
-                .clicked()
-                {
-                    self.view = ViewMode::Parallel;
-                    self.workbench.pane = workbench::Pane::Chat;
-                }
-                if button(
-                    ui,
-                    Icon::Chat,
-                    "对话",
-                    88.0,
-                    self.view == ViewMode::Planning,
-                )
-                .clicked()
-                {
-                    self.view = ViewMode::Planning;
-                    self.workbench.pane = workbench::Pane::Chat;
                 }
             });
         });
@@ -779,7 +780,7 @@ fn save_connection(
 }
 
 /// Readable Markdown with selectable text, fenced code and one-click code copying.
-fn markdown(ui: &mut Ui, text: &str) {
+pub(crate) fn markdown(ui: &mut Ui, text: &str) {
     let mut in_code = false;
     let mut code = String::new();
     let mut language = String::new();

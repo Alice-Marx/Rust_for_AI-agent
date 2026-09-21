@@ -29,6 +29,13 @@ Usage:
   wonderland-cli [options] profile
   wonderland-cli [options] mcp-login <name> [--wait]
   wonderland-cli [options] mcp-reload
+  wonderland-cli [options] apps
+  wonderland-cli [options] intelligence [refresh]
+  wonderland-cli [options] work list|get|events|start|cancel <id>
+  wonderland-cli --model <id> --cwd <dir> work create <app> <prompt>
+  wonderland-cli [options] work approve <id> <request-id> allow|deny
+  wonderland-cli [options] work answer <id> <request-id> <answers-json>
+  wonderland-cli [options] work accept <id> <evidence>
 
 Options:
   --server <url>       Rust Agent URL (default: ${defaultServer})
@@ -471,6 +478,40 @@ async function main() {
     return;
   }
   switch (options.command) {
+    case "apps":
+      console.log(JSON.stringify(await request(options, "/api/v1/apps"), null, 2));
+      break;
+    case "intelligence": {
+      const refresh = options.args[0] === "refresh";
+      console.log(JSON.stringify(await request(options, `/api/v1/intelligence${refresh ? "/refresh" : ""}`, refresh ? {method:"POST",body:"{}"} : {}), null, 2));
+      break;
+    }
+    case "work": {
+      const [action = "list", id, requestId, ...tail] = options.args;
+      let endpoint = "/api/v1/workflows";
+      let body;
+      if (action === "create") {
+        if (!id || !requestId || !options.model) throw new Error("work create requires an app, prompt and --model");
+        body = {app_id:id,model:options.model,prompt:[requestId,...tail].join(" "),cwd:options.cwd,mode:"work",read_only:options.mode === "plan"};
+      } else if (action !== "list") {
+        if (!id) throw new Error("work operation requires a task ID");
+        endpoint += `/${encodeURIComponent(id)}`;
+        if (action === "events") endpoint += "/events";
+        else if (["start","cancel"].includes(action)) { endpoint += `/${action}`; body = {}; }
+        else if (action === "approve") {
+          if (!requestId || !["allow","deny"].includes(tail[0])) throw new Error("approve requires request-id and allow|deny");
+          endpoint += "/approve"; body = {request_id:requestId,approve:tail[0] === "allow"};
+        } else if (action === "answer") {
+          if (!requestId || !tail.length) throw new Error("answer requires request-id and JSON answers");
+          endpoint += "/answer"; body = {request_id:requestId,answers:JSON.parse(tail.join(" "))};
+        } else if (action === "accept") {
+          if (!requestId) throw new Error("accept requires verification evidence");
+          endpoint += "/accept"; body = {evidence:[requestId,...tail].join(" ")};
+        } else if (action !== "get") throw new Error(`Unknown work operation: ${action}`);
+      }
+      console.log(JSON.stringify(await request(options, endpoint, body === undefined ? {} : {method:"POST",body:JSON.stringify(body)}), null, 2));
+      break;
+    }
     case "chat":
       await chat(options, options.args.join(" "), commands);
       break;

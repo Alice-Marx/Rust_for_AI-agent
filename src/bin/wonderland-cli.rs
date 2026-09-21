@@ -77,6 +77,18 @@ fn parse_permission_mode(value: &str) -> Result<PermissionMode, String> {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// 官方应用目录与适配能力
+    Apps,
+    /// 查看或操作由后端持有的任务
+    Work {
+        #[command(subcommand)]
+        action: WorkAction,
+    },
+    /// 查看模型数据来源；--refresh 每次在线刷新 LiveBench
+    Intelligence {
+        #[arg(long)]
+        refresh: bool,
+    },
     /// 进入连续聊天模式；传入 prompt 时执行一次后退出
     Chat { prompt: Option<String> },
     /// 执行一次 Agent 请求
@@ -129,6 +141,75 @@ enum Command {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum WorkAction {
+    List,
+    Get {
+        id: String,
+    },
+    Events {
+        id: String,
+        #[arg(long, default_value_t = 0)]
+        after: i64,
+    },
+    Create {
+        prompt: String,
+        #[arg(long)]
+        app: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        chat: bool,
+        #[arg(long)]
+        read_only: bool,
+        #[arg(long)]
+        start: bool,
+    },
+    Start {
+        id: String,
+    },
+    Cancel {
+        id: String,
+    },
+    Approve {
+        id: String,
+        request_id: String,
+        #[arg(long)]
+        allow: bool,
+    },
+    Answer {
+        id: String,
+        request_id: String,
+        answers_json: String,
+    },
+    Accept {
+        id: String,
+        evidence: String,
+    },
+}
+
+impl AgentApi {
+    async fn work_request(
+        &self,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value> {
+        let request = match body {
+            Some(body) => self.client.post(self.url(path)).json(&body),
+            None => self.client.get(self.url(path)),
+        };
+        let response = request.send().await.context("无法连接任务服务")?;
+        let status = response.status();
+        let value: serde_json::Value = response.json().await?;
+        anyhow::ensure!(
+            status.is_success(),
+            "{status}: {}",
+            value["error"].as_str().unwrap_or("请求失败")
+        );
+        Ok(value)
+    }
 }
 
 #[derive(Clone)]
@@ -554,6 +635,91 @@ async fn main() -> Result<()> {
     };
 
     match cli.command.unwrap_or(Command::Chat { prompt: None }) {
+        Command::Apps => println!(
+            "{}",
+            serde_json::to_string_pretty(&api.work_request("/api/v1/apps", None).await?)?
+        ),
+        Command::Intelligence { refresh } => {
+            let (path, body) = if refresh {
+                ("/api/v1/intelligence/refresh", Some(serde_json::json!({})))
+            } else {
+                ("/api/v1/intelligence", None)
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&api.work_request(path, body).await?)?
+            );
+        }
+        Command::Work { action } => {
+            use serde_json::json;
+            let (path, body, start_after) = match action {
+                WorkAction::List => ("/api/v1/workflows".into(), None, false),
+                WorkAction::Create {
+                    prompt,
+                    app,
+                    title,
+                    chat,
+                    read_only,
+                    start,
+                } => (
+                    "/api/v1/workflows".into(),
+                    Some(
+                        json!({"prompt":prompt,"title":title.unwrap_or_default(),"cwd":cwd.to_string_lossy(),"mode":if chat {"chat"} else {"work"},"app_id":app,"model":cli.model.context("请通过全局 --model 参数指定模型")?,"read_only":read_only}),
+                    ),
+                    start,
+                ),
+                WorkAction::Get { id } => (format!("/api/v1/workflows/{id}"), None, false),
+                WorkAction::Events { id, after } => (
+                    format!("/api/v1/workflows/{id}/events?after={after}"),
+                    None,
+                    false,
+                ),
+                WorkAction::Start { id } => (
+                    format!("/api/v1/workflows/{id}/start"),
+                    Some(json!({})),
+                    false,
+                ),
+                WorkAction::Cancel { id } => (
+                    format!("/api/v1/workflows/{id}/cancel"),
+                    Some(json!({})),
+                    false,
+                ),
+                WorkAction::Approve {
+                    id,
+                    request_id,
+                    allow,
+                } => (
+                    format!("/api/v1/workflows/{id}/approve"),
+                    Some(json!({"request_id":request_id,"approve":allow})),
+                    false,
+                ),
+                WorkAction::Answer {
+                    id,
+                    request_id,
+                    answers_json,
+                } => (
+                    format!("/api/v1/workflows/{id}/answer"),
+                    Some(
+                        json!({"request_id":request_id,"answers":serde_json::from_str::<serde_json::Value>(&answers_json)?}),
+                    ),
+                    false,
+                ),
+                WorkAction::Accept { id, evidence } => (
+                    format!("/api/v1/workflows/{id}/accept"),
+                    Some(json!({"evidence":evidence})),
+                    false,
+                ),
+            };
+            let mut value = api.work_request(&path, body).await?;
+            if start_after {
+                let id = value["id"].as_str().context("missing task ID")?;
+                eprintln!("任务草稿: {id}");
+                value = api
+                    .work_request(&format!("/api/v1/workflows/{id}/start"), Some(json!({})))
+                    .await?;
+            }
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
         Command::Chat {
             prompt: Some(prompt),
         } => {

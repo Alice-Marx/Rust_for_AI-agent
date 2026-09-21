@@ -1,6 +1,21 @@
 # rust-ai-wonderland-cli
 
-Wonderland 0.7.0 的零依赖终端客户端。Node.js 18+，连接已启动的 Wonderland Rust 后端；后端来自桌面安装包、便携包或源码构建。npm 包不包含后端。
+Wonderland 0.8.0 工作台预览版的零依赖终端客户端。Node.js 18+，连接已启动的 Wonderland Rust 后端；后端来自桌面安装包、便携包或源码构建。npm 包不包含后端。
+
+新增官方应用任务命令：
+
+```sh
+wonderland-cli apps
+wonderland-cli --cwd /path/to/project --model kimi-for-coding work create kimi-cli "修复测试"
+wonderland-cli work start <id>
+wonderland-cli work events <id>
+wonderland-cli work approve <id> <request-id> allow
+wonderland-cli work cancel <id>
+wonderland-cli work accept <id> "独立检查变更和测试结果"
+wonderland-cli intelligence refresh
+```
+
+受管任务目前支持官方 Codex 与 Kimi CLI（Python），沿用原工具登录；其余工具提供终端入口。任务完成执行后进入待验收。LiveBench 已支持在线刷新，实时价格解析及自动多模型调度尚未启用。API 对话与官方工具任务是独立执行路径。
 
 ```sh
 npm install -g rust-ai-wonderland-cli
