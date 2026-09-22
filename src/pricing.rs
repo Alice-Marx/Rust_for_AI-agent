@@ -1,7 +1,9 @@
 //! Source-backed, direct-API list prices. These are not subscription prices,
 //! provider availability guarantees, or an identity bridge for benchmark variants.
 //! Only bounded, recognized document schemas are decoded; changed schemas fail
-//! closed for that provider. Every refresh fetches all four official sources.
+//! closed for that provider. Every refresh fetches all five official sources:
+//! Anthropic quotes additionally require the same epoch's official model
+//! overview to join display names to attested exact API model IDs.
 
 use anyhow::{ensure, Context, Result};
 use chrono::{SecondsFormat, Utc};
@@ -11,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -27,10 +29,13 @@ const MAX_AGE_SECONDS: i64 = 60 * 60;
 const OPENAI_URL: &str = "https://developers.openai.com/api/docs/pricing.md";
 const KIMI_URL: &str = "https://platform.moonshot.ai/docs/pricing/chat.md";
 const ANTHROPIC_URL: &str = "https://platform.claude.com/docs/en/about-claude/pricing.md";
+const ANTHROPIC_MODELS_URL: &str = "https://platform.claude.com/docs/en/models/overview.md";
 const DEEPSEEK_URL: &str = "https://api-docs.deepseek.com/quick_start/pricing";
-const SOURCE_SPECS: [(&str, &str); 4] = [
+const SOURCE_SPECS: [(&str, &str); 5] = [
     ("openai", OPENAI_URL),
     ("kimi", KIMI_URL),
+    // The identity join source must decode before the pricing table.
+    ("anthropic-models", ANTHROPIC_MODELS_URL),
     ("anthropic", ANTHROPIC_URL),
     ("deepseek", DEEPSEEK_URL),
 ];
@@ -201,17 +206,15 @@ impl PriceService {
         )
         .await;
         let mut snapshot = PriceSnapshot {
-            parser_version: 1,
+            parser_version: 2,
             id: Uuid::new_v4().to_string(),
             checked_at: checked_at.clone(),
             sources: Vec::new(),
             quotes: Vec::new(),
         };
-        for source in results {
-            let (source, quotes) = decode_source(source);
-            snapshot.sources.push(source);
-            snapshot.quotes.extend(quotes);
-        }
+        let (sources, quotes) = decode_all(results);
+        snapshot.sources = sources;
+        snapshot.quotes = quotes;
         if snapshot.quotes.is_empty() {
             let error = anyhow::anyhow!(
                 "No official pricing source passed verification: {}",
@@ -260,7 +263,7 @@ impl PriceService {
             "refresh_required_each_dispatch_round":true,
             "subscription_pricing":"unknown; subscription quota is not zero-cost API tokens",
             "auto_dispatch_ready":false,
-            "note":"Cached snapshots are for display. Every dispatch round must refresh online and bind quotes to that snapshot ID. Exact direct-API routing also requires a verified endpoint, billing channel, model identity, benchmark variant and matching tier conditions."
+            "note":"Cached snapshots are for display. Every dispatch round must refresh online and bind quotes to that snapshot ID. Exact direct-API routing also requires a verified endpoint, billing channel, model identity, benchmark variant and matching tier conditions. Claude quotes are keyed by exact API model IDs joined from the same epoch's official model overview; DeepSeek quotes carry peak/off-peak UTC window conditions."
         })
     }
 
@@ -441,41 +444,85 @@ impl PriceService {
     }
 }
 
-fn decode_source(mut source: PriceSource) -> (PriceSource, Vec<ModelQuote>) {
-    let Some(raw) = source.raw.as_deref() else {
-        return (source, Vec::new());
-    };
-    let result=match source.provider.as_str() {
-        "openai"=>parse_openai(raw),
-        "kimi"=>parse_kimi(raw),
-        "anthropic"=>Err(anyhow::anyhow!("Official prices were fetched, but display names are not yet joined to a separately verified exact API model ID and context/residency tier; no Claude quote is inferred")),
-        "deepseek"=>Err(anyhow::anyhow!("Official prices were fetched, but peak/off-peak rates depend on UTC windows and Chinese public holidays; calendar/tier semantics are not verified, and retired aliases are not mapped")),
-        _=>Err(anyhow::anyhow!("unsupported official pricing source")),
-    };
-    match result {
-        Ok(mut quotes) => {
-            for quote in &mut quotes {
-                quote.source_url = source
-                    .final_url
-                    .clone()
-                    .unwrap_or_else(|| source.requested_url.clone());
-                quote.source_sha256 = source.sha256.clone().unwrap_or_default();
-                quote.checked_at = source.checked_at.clone();
+/// Identity of one Claude model as attested by the official model overview in
+/// the same refresh epoch. The map key is the exact display name shared with
+/// the pricing table; nothing is matched by prefix or fuzzy similarity.
+#[derive(Clone, Debug, PartialEq)]
+struct AnthropicIdentity {
+    api_id: String,
+    alias: Option<String>,
+    context_window_tokens: Option<u64>,
+}
+
+fn decode_all(sources: Vec<PriceSource>) -> (Vec<PriceSource>, Vec<ModelQuote>) {
+    let mut identities: Option<BTreeMap<String, AnthropicIdentity>> = None;
+    let mut join_error: Option<String> = None;
+    let mut decoded_sources = Vec::with_capacity(sources.len());
+    let mut quotes = Vec::new();
+    for mut source in sources {
+        let result = match source.provider.as_str() {
+            "openai" => source
+                .raw
+                .as_deref()
+                .map(parse_openai)
+                .unwrap_or_else(|| Err(anyhow::anyhow!("fetched source has no body"))),
+            "kimi" => source
+                .raw
+                .as_deref()
+                .map(parse_kimi)
+                .unwrap_or_else(|| Err(anyhow::anyhow!("fetched source has no body"))),
+            "anthropic-models" => match source.raw.as_deref().map(parse_anthropic_models) {
+                Some(Ok(map)) => {
+                    identities = Some(map);
+                    Ok(Vec::new())
+                }
+                Some(Err(error)) => {
+                    join_error = Some(bounded_error(&format!("{error:#}")));
+                    Err(error)
+                }
+                None => Err(anyhow::anyhow!("fetched source has no body")),
+            },
+            "anthropic" => match (&identities, source.raw.as_deref()) {
+                (Some(map), Some(raw)) => parse_anthropic(raw, map),
+                (None, Some(_)) => Err(anyhow::anyhow!(
+                    "the official Anthropic model overview did not verify in this epoch ({}); display names cannot be joined to attested exact API model IDs, so no Claude quote is inferred",
+                    join_error.as_deref().unwrap_or("not fetched")
+                )),
+                (_, None) => Err(anyhow::anyhow!("fetched source has no body")),
+            },
+            "deepseek" => source
+                .raw
+                .as_deref()
+                .map(parse_deepseek)
+                .unwrap_or_else(|| Err(anyhow::anyhow!("fetched source has no body"))),
+            _ => Err(anyhow::anyhow!("unsupported official pricing source")),
+        };
+        match result {
+            Ok(mut provider_quotes) => {
+                for quote in &mut provider_quotes {
+                    quote.source_url = source
+                        .final_url
+                        .clone()
+                        .unwrap_or_else(|| source.requested_url.clone());
+                    quote.source_sha256 = source.sha256.clone().unwrap_or_default();
+                    quote.checked_at = source.checked_at.clone();
+                }
+                source.status = "verified".into();
+                source.reason = None;
+                quotes.extend(provider_quotes);
             }
-            source.status = "verified".into();
-            source.reason = None;
-            (source, quotes)
+            Err(error) => {
+                source.status = "blocked".into();
+                source.reason = Some(bounded_error(&format!("{error:#}")));
+            }
         }
-        Err(error) => {
-            source.status = "blocked".into();
-            source.reason = Some(bounded_error(&format!("{error:#}")));
-            (source, Vec::new())
-        }
+        decoded_sources.push(source);
     }
+    (decoded_sources, quotes)
 }
 
 fn new_quote(provider: &str, model: &str, tiers: Vec<PriceTier>) -> ModelQuote {
-    ModelQuote {provider:provider.into(),app_ids:match provider {"openai"=>vec!["codex".into()],"kimi"=>vec!["kimi-cli".into(),"kimi-code".into()],_=>Vec::new()},model:model.into(),billing_channel:"api".into(),billing_scope:"first_party_direct_api_list_price".into(),currency:"USD".into(),unit:"per_1_000_000_tokens".into(),tiers,source_url:String::new(),source_sha256:String::new(),checked_at:String::new(),conditions:vec!["Direct provider API only; verify the actual endpoint and account billing channel before use".into(),"Public token list prices; taxes, account discounts, credits and non-token tool fees are excluded".into()],unknowns:vec!["Account access, negotiated rates and provider rate limits are not verified".into()]}
+    ModelQuote {provider:provider.into(),app_ids:match provider {"openai"=>vec!["codex".into()],"kimi"=>vec!["kimi-cli".into(),"kimi-code".into()],"anthropic"=>vec!["claude".into()],"deepseek"=>vec!["deepseek".into()],_=>Vec::new()},model:model.into(),billing_channel:"api".into(),billing_scope:"first_party_direct_api_list_price".into(),currency:"USD".into(),unit:"per_1_000_000_tokens".into(),tiers,source_url:String::new(),source_sha256:String::new(),checked_at:String::new(),conditions:vec!["Direct provider API only; verify the actual endpoint and account billing channel before use".into(),"Public token list prices; taxes, account discounts, credits and non-token tool fees are excluded".into()],unknowns:vec!["Account access, negotiated rates and provider rate limits are not verified".into()]}
 }
 
 fn parse_openai(raw: &str) -> Result<Vec<ModelQuote>> {
@@ -721,6 +768,586 @@ fn parse_kimi(raw: &str) -> Result<Vec<ModelQuote>> {
     Ok(quotes)
 }
 
+/// Strips markdown link syntax (`[label](url)`) and inline code backticks from
+/// a table cell, keeping the visible label only.
+fn cell_text(cell: &str) -> String {
+    let link = Regex::new(r"\[([^\]]+)\]\((?:[^)]+)\)").unwrap();
+    let code = Regex::new("`([^`]*)`").unwrap();
+    let linked = link.replace_all(cell.trim(), |caps: &regex::Captures| caps[1].to_owned());
+    code.replace_all(&linked, |caps: &regex::Captures| caps[1].to_owned())
+        .trim()
+        .to_owned()
+}
+
+fn parse_anthropic_models(raw: &str) -> Result<BTreeMap<String, AnthropicIdentity>> {
+    ensure!(
+        raw.len() <= MAX_SOURCE,
+        "Anthropic model overview too large"
+    );
+    let display = Regex::new(r"^Claude [A-Z][a-z]+ [0-9]+(?:\.[0-9]+)?$")?;
+    // Group consecutive markdown-table lines; only a group whose header starts
+    // with the literal Feature column is the capability table.
+    let mut groups: Vec<Vec<Vec<String>>> = Vec::new();
+    for line in raw
+        .lines()
+        .filter(|line| line.trim_start().starts_with('|'))
+    {
+        let row = markdown_cells(line)?;
+        match groups.last_mut() {
+            Some(group) => group.push(row),
+            None => groups.push(vec![row]),
+        }
+    }
+    let mut tables = groups.into_iter().filter(|group| {
+        group
+            .first()
+            .is_some_and(|row| row.first().is_some_and(|cell| cell_text(cell) == "Feature"))
+    });
+    let table = tables
+        .next()
+        .context("Anthropic model overview capability table missing")?;
+    ensure!(
+        tables.next().is_none(),
+        "Anthropic model overview has an ambiguous capability table"
+    );
+    let header = table
+        .first()
+        .context("capability table header row missing")?;
+    let mut names = Vec::new();
+    for cell in &header[1..] {
+        let name = cell_text(cell);
+        ensure!(
+            display.is_match(&name),
+            "Anthropic model overview display name is not a bounded identifier: {name}"
+        );
+        ensure!(
+            names.iter().all(|seen| seen != &name),
+            "duplicate Anthropic display name"
+        );
+        names.push(name);
+    }
+    ensure!(
+        names.len() >= 2,
+        "Anthropic model overview table has too few models"
+    );
+    let mut id_row = None;
+    let mut alias_row = None;
+    let mut context_row = None;
+    for row in &table[1..] {
+        let label = row.first().map(|cell| cell_text(cell)).unwrap_or_default();
+        match label.as_str() {
+            "Claude API ID" => id_row = Some(row),
+            "Claude API alias" => alias_row = Some(row),
+            "Context window" => context_row = Some(row),
+            _ => {}
+        }
+    }
+    let context_row = context_row.context("Anthropic model overview context-window row missing")?;
+    let id_row = id_row.context("Anthropic model overview Claude API ID row missing")?;
+    let alias_row = alias_row.context("Anthropic model overview Claude API alias row missing")?;
+    let window = Regex::new(r"^([0-9]+(?:\.[0-9]+)?)([KM]) tokens$")?;
+    let mut identities = BTreeMap::new();
+    for (index, name) in names.iter().enumerate() {
+        let id = cell_text(id_row.get(index + 1).context("API ID row is short")?);
+        validate_model(&id)?;
+        let alias = match alias_row.get(index + 1) {
+            Some(cell) if !cell_text(cell).is_empty() => {
+                let alias = cell_text(cell);
+                validate_model(&alias)?;
+                Some(alias)
+            }
+            _ => None,
+        };
+        let context = cell_text(context_row.get(index + 1).context("context row is short")?);
+        let capture = window
+            .captures(&context)
+            .context("Anthropic context-window format changed")?;
+        let multiplier = if &capture[2] == "K" { 1_000 } else { 1_000_000 };
+        let tokens = (capture[1].parse::<f64>()? * multiplier as f64) as u64;
+        ensure!(
+            (1024..=100_000_000).contains(&tokens),
+            "Anthropic context window out of range"
+        );
+        identities.insert(
+            name.clone(),
+            AnthropicIdentity {
+                api_id: id,
+                alias,
+                context_window_tokens: Some(tokens),
+            },
+        );
+    }
+    ensure!(!identities.is_empty(), "Anthropic model overview empty");
+    Ok(identities)
+}
+
+fn parse_anthropic(
+    raw: &str,
+    identities: &BTreeMap<String, AnthropicIdentity>,
+) -> Result<Vec<ModelQuote>> {
+    ensure!(
+        raw.len() <= MAX_SOURCE && raw.contains("## Model pricing"),
+        "Anthropic pricing structure changed"
+    );
+    for anchor in [
+        "1.25x base input price",
+        "2x base input price",
+        "0.1x base input price",
+        "0.025x on Claude Fable 5.1 and Claude Mythos 5.1",
+    ] {
+        ensure!(
+            raw.contains(anchor),
+            "Anthropic cache multiplier anchors changed: {anchor}"
+        );
+    }
+    let section = raw
+        .split_once("## Model pricing")
+        .unwrap()
+        .1
+        .split_once("## Cloud platform pricing")
+        .context("Anthropic pricing section is not bounded")?
+        .0;
+    let table = section
+        .lines()
+        .filter(|line| line.trim_start().starts_with('|'))
+        .map(markdown_cells)
+        .collect::<Result<Vec<_>>>()?;
+    let expected = [
+        "Model",
+        "Base input tokens",
+        "5m cache writes",
+        "1h cache writes",
+        "Cache hits and refreshes",
+        "Output tokens",
+    ];
+    ensure!(
+        table.len() > 2
+            && table.len() <= 62
+            && table[0] == expected
+            && table[1].len() == 6
+            && table[1].iter().all(|cell| {
+                !cell.is_empty() && cell.bytes().all(|byte| matches!(byte, b'-' | b':'))
+            }),
+        "Anthropic pricing table columns changed"
+    );
+    let display = Regex::new(
+        r"^(Claude [A-Z][a-z]+ [0-9]+(?:\.[0-9]+)?)(?:\s+\(\[([^\]]+)\]\((?:https?://[^)]+)\)\))?$",
+    )?;
+    let mut quotes = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut skipped_retired = 0;
+    for row in &table[2..] {
+        ensure!(
+            row.len() == 6,
+            "Anthropic pricing row has unexpected columns"
+        );
+        let capture = display
+            .captures(&row[0])
+            .context("Anthropic pricing model cell is not a bounded display name")?;
+        let name = capture[1].to_owned();
+        let annotation = capture.get(2).map(|value| value.as_str().to_owned());
+        if let Some(annotation) = &annotation {
+            ensure!(
+                annotation.starts_with("retired, except on ")
+                    || annotation == "limited availability",
+                "Anthropic pricing row carries an unrecognized availability annotation"
+            );
+        }
+        if annotation
+            .as_deref()
+            .is_some_and(|value| value.starts_with("retired"))
+        {
+            // First-party API no longer serves this model; cloud-platform-only
+            // pricing is a different billing channel and is never inferred here.
+            skipped_retired += 1;
+            continue;
+        }
+        let mut values = Vec::with_capacity(5);
+        for (index, cell) in row[1..].iter().enumerate() {
+            let (money, footnote) = match cell.strip_suffix("<sup>1</sup>") {
+                Some(rest) => (rest, true),
+                None => (cell.as_str(), false),
+            };
+            let money = money
+                .strip_suffix(" / MTok")
+                .context("Anthropic price cell is not per-MTok notation")?;
+            ensure!(
+                index == 3 || !footnote,
+                "Anthropic cache-hit footnote marker appears outside the cache-hit column"
+            );
+            values.push((required_money(money)?, footnote));
+        }
+        let [(input, _), (write_5m, _), (write_1h, _), (hits, footnote), (output, _)] =
+            values.try_into().unwrap();
+        let hit_multiplier = if footnote { 0.025 } else { 0.1 };
+        for (actual, expected_multiple) in
+            [(write_5m, 1.25), (write_1h, 2.0), (hits, hit_multiplier)]
+        {
+            ensure!(
+                (actual - input * expected_multiple).abs() <= 1e-6,
+                "Anthropic cache price no longer matches the documented multiplier for {name}"
+            );
+        }
+        let (family, major, minor) = {
+            let mut parts = name.rsplitn(2, ' ');
+            let version = parts.next().unwrap();
+            let family = parts.next().unwrap().strip_prefix("Claude ").unwrap();
+            let mut numbers = version.split('.');
+            let major = numbers
+                .next()
+                .unwrap()
+                .parse::<u32>()
+                .context("Anthropic model major version is not numeric")?;
+            let minor = numbers
+                .next()
+                .map(|value| value.parse::<u32>())
+                .transpose()?
+                .unwrap_or(0);
+            (family.to_ascii_lowercase(), major, minor)
+        };
+        let dateless = format!("claude-{family}-{major}-{}", minor)
+            .trim_end_matches("-0")
+            .to_owned();
+        let dateless_generation = major > 4 || (major == 4 && minor >= 6);
+        let mut emitted = Vec::new();
+        if let Some(identity) = identities.get(&name) {
+            if dateless_generation {
+                ensure!(
+                    identity.api_id == dateless,
+                    "attested Anthropic API ID disagrees with the documented dateless scheme for {name}"
+                );
+            } else {
+                ensure!(
+                    identity.alias.as_deref() == Some(dateless.as_str()),
+                    "attested Anthropic alias disagrees with the documented pre-4.6 alias scheme for {name}"
+                );
+            }
+            emitted.push((
+                identity.api_id.clone(),
+                identity.context_window_tokens,
+                None,
+            ));
+            if let Some(alias) = identity.alias.as_deref() {
+                if alias != identity.api_id {
+                    emitted.push((
+                        alias.to_owned(),
+                        identity.context_window_tokens,
+                        Some(format!(
+                            "Keyed by the official pre-4.6 convenience alias that resolves to the dated snapshot {api_id}; the alias is a pointer, not a pinned model ID",
+                            api_id = identity.api_id
+                        )),
+                    ));
+                }
+            }
+        } else if dateless_generation {
+            emitted.push((
+                dateless.clone(),
+                None,
+                Some(format!(
+                    "Model ID follows Anthropic's documented dateless naming scheme (claude-{{name}}-{{major}}[-{{minor}}]) for the 4.6 generation and later; it was not separately attested in this epoch's model overview, so verify the exact ID against the API before dispatch"
+                )),
+            ));
+        } else {
+            emitted.push((
+                dateless.clone(),
+                None,
+                Some(
+                    "Keyed by the documented pre-4.6 alias format claude-{name}-{major}-{minor}, which resolves to the most recent dated snapshot; the exact dated snapshot ID is not attested in this epoch's sources"
+                        .to_owned(),
+                ),
+            ));
+        }
+        for (model, context, derivation) in emitted {
+            ensure!(
+                seen.insert(model.clone()),
+                "duplicate Anthropic model price"
+            );
+            let mut quote_conditions = Vec::new();
+            if annotation.as_deref() == Some("limited availability") {
+                quote_conditions.push(
+                    "Officially listed as limited availability; account access to this model is not verified"
+                        .to_owned(),
+                );
+            }
+            if let Some(derivation) = derivation {
+                quote_conditions.push(derivation);
+            }
+            let mut conditions = vec![
+                "5m/1h cache writes follow the official prompt-caching multipliers (1.25x/2x of base input); cache hits read at the documented hit multiplier".to_owned(),
+                "Batch API (50% discount), fast-mode premiums, and data-residency multipliers are separate pricing paths".to_owned(),
+                "First-party Claude API USD list prices; Amazon Bedrock, Google Cloud, Microsoft Foundry, and Claude Platform on AWS bill through their own channels and IDs".to_owned(),
+            ];
+            if footnote {
+                conditions.push(
+                    "Cache hits for this model are priced at 0.025x base input per the official pricing footnote".to_owned(),
+                );
+            }
+            let tier = PriceTier {
+                name: "standard".into(),
+                input,
+                cached_input: Some(hits),
+                cache_write: None,
+                cache_write_5m: Some(write_5m),
+                cache_write_1h: Some(write_1h),
+                output,
+                context_window_tokens: context,
+                conditions,
+                unknowns: if context.is_some() {
+                    Vec::new()
+                } else {
+                    vec![
+                        "Context window is not attested for this model in this epoch's sources"
+                            .to_owned(),
+                    ]
+                },
+            };
+            let mut quote = new_quote("anthropic", &model, vec![tier]);
+            quote.conditions.extend(quote_conditions);
+            quotes.push(quote);
+        }
+    }
+    ensure!(
+        !quotes.is_empty(),
+        "Anthropic pricing produced no first-party quotes (retired rows skipped: {skipped_retired})"
+    );
+    Ok(quotes)
+}
+
+fn parse_deepseek(raw: &str) -> Result<Vec<ModelQuote>> {
+    ensure!(raw.len() <= MAX_SOURCE, "DeepSeek pricing page too large");
+    for anchor in [
+        "Off-peak rates are half of the peak rates.",
+        "Peak hours are 01:00 - 04:00 and 06:00 - 10:00 UTC, Monday through Friday, excluding Chinese public holidays.",
+        "All other hours are off-peak, including weekends and Chinese public holidays in full.",
+    ] {
+        ensure!(raw.contains(anchor), "DeepSeek peak/off-peak semantics changed: {anchor}");
+    }
+    ensure!(
+        raw.matches("<table").count() == 1,
+        "DeepSeek pricing table structure changed"
+    );
+    let table = raw
+        .split_once("<table")
+        .unwrap()
+        .1
+        .split_once("</table>")
+        .context("DeepSeek pricing table is unterminated")?
+        .0;
+    let row_pattern = Regex::new(r"(?s)<tr>(.*?)</tr>")?;
+    let cell_pattern = Regex::new(r"(?s)<td[^>]*>(.*?)</td>")?;
+    let tag = Regex::new(r"<[^>]+>")?;
+    let rows: Vec<Vec<(String, String)>> = row_pattern
+        .captures_iter(table)
+        .map(|row| {
+            cell_pattern
+                .captures_iter(&row[1])
+                .map(|cell| {
+                    let raw_cell = cell[1].replace("<br>", " ");
+                    let marker = raw_cell.contains("<sup>(1)</sup>");
+                    let text = tag
+                        .replace_all(raw_cell.replace("<sup>(1)</sup>", "").as_str(), " ")
+                        .trim()
+                        .to_owned();
+                    (text, if marker { "1" } else { "" }.to_owned())
+                })
+                .collect()
+        })
+        .collect();
+    fn row_text(row: &[(String, String)]) -> Vec<String> {
+        row.iter().map(|cell| cell.0.clone()).collect()
+    }
+    let model_row = rows
+        .iter()
+        .find(|row| row.first().is_some_and(|cell| cell.0 == "MODEL"))
+        .context("DeepSeek MODEL row missing")?;
+    let models: Vec<(String, bool)> = model_row[1..]
+        .iter()
+        .map(|cell| {
+            validate_model(&cell.0)?;
+            Ok((cell.0.clone(), !cell.1.is_empty()))
+        })
+        .collect::<Result<_>>()?;
+    ensure!(
+        models.len() >= 2 && models.len() <= 6,
+        "DeepSeek model column count is not bounded"
+    );
+    ensure!(
+        models.iter().any(|(_, marked)| *marked),
+        "DeepSeek footnote marker for the canonical model name is missing"
+    );
+    let mut context_tokens = None;
+    let mut hit = Vec::new();
+    let mut miss = Vec::new();
+    let mut output = Vec::new();
+    let mut label = None;
+    for row in &rows {
+        let cells = row_text(row);
+        if cells.first().is_some_and(|cell| *cell == "CONTEXT LENGTH") {
+            let value = cells.get(1).context("DeepSeek context length is missing")?;
+            let tokens = match value.trim() {
+                "1M" => 1_000_000,
+                "128K" => 128_000,
+                "64K" => 64_000,
+                other => other
+                    .trim_end_matches('K')
+                    .parse::<u64>()
+                    .ok()
+                    .map(|thousands| thousands * 1_000)
+                    .context("DeepSeek context length format changed")?,
+            };
+            ensure!(
+                (1024..=100_000_000).contains(&tokens),
+                "DeepSeek context window out of range"
+            );
+            context_tokens = Some(tokens);
+            continue;
+        }
+        // A pricing row either introduces a category (carrying the off-peak
+        // values in the same row) or continues it with the peak values; both
+        // shapes are recognized by scanning the row's cells.
+        if let Some(kind) = cells.iter().find_map(|cell| match cell.as_str() {
+            "1M INPUT TOKENS (CACHE HIT)" => Some("hit"),
+            "1M INPUT TOKENS (CACHE MISS)" => Some("miss"),
+            "1M OUTPUT TOKENS" => Some("output"),
+            _ => None,
+        }) {
+            label = Some(kind.to_owned());
+        }
+        let Some(kind) = &label else { continue };
+        let tier = if cells.iter().any(|cell| cell == "OFF-PEAK") {
+            "off_peak"
+        } else if cells.iter().any(|cell| cell == "PEAK") {
+            "peak"
+        } else {
+            continue;
+        };
+        let values = cells[cells.len() - models.len()..]
+            .iter()
+            .map(|cell| required_money(cell))
+            .collect::<Result<Vec<f64>>>()?;
+        ensure!(
+            values.len() == models.len(),
+            "DeepSeek price row width mismatch"
+        );
+        let bucket = match kind.as_str() {
+            "hit" => &mut hit,
+            "miss" => &mut miss,
+            "output" => &mut output,
+            _ => unreachable!(),
+        };
+        bucket.push((tier.to_owned(), values));
+    }
+    for (name, bucket) in [
+        ("cache-hit", &hit),
+        ("cache-miss", &miss),
+        ("output", &output),
+    ] {
+        ensure!(
+            bucket.len() == 2 && bucket[0].0 == "off_peak" && bucket[1].0 == "peak",
+            "DeepSeek {name} peak/off-peak rows are missing or out of order"
+        );
+        for model in 0..models.len() {
+            let (off, peak) = (bucket[0].1[model], bucket[1].1[model]);
+            ensure!(
+                (off - peak / 2.0).abs() <= 1e-9,
+                "DeepSeek off-peak price is no longer half of the peak price"
+            );
+        }
+    }
+    let canonical = models.iter().position(|(_, marked)| *marked).unwrap_or(0);
+    let footnote = Regex::new(
+        r#"(?s)\(1\) Use <code>([a-z0-9.-]+)</code> as the model name\. The legacy names .*?are still accepted, but the corresponding models have been retired, their requests are served by the DeepSeek-[A-Za-z0-9.-]+ model and billed at the Flash price\."#,
+    )?
+    .captures(raw);
+    let mut legacy_names = Vec::new();
+    if let Some(footnote) = &footnote {
+        ensure!(
+            &footnote[1] == models[canonical].0,
+            "DeepSeek footnote canonical name does not match the marked model column"
+        );
+        let sentence = footnote.get(0).unwrap().as_str();
+        let code = Regex::new(r"<code>([a-z0-9.-]+)</code>")?;
+        for capture in code.captures_iter(
+            sentence
+                .split_once("The legacy names ")
+                .and_then(|(_, rest)| rest.split_once(" are still accepted"))
+                .context("DeepSeek legacy-name footnote sentence changed")?
+                .0,
+        ) {
+            let name = capture[1].to_owned();
+            validate_model(&name)?;
+            ensure!(
+                models.iter().all(|(model, _)| model != &name),
+                "DeepSeek legacy footnote names a currently published model"
+            );
+            legacy_names.push(name);
+        }
+    }
+    let window = "Peak hours are 01:00 - 04:00 and 06:00 - 10:00 UTC, Monday through Friday, excluding Chinese public holidays; all other hours are off-peak, including weekends and Chinese public holidays in full".to_owned();
+    let mut quotes = Vec::new();
+    for (index, (model, _)) in models.iter().enumerate() {
+        let tier = |tier_name: &str, bucket_index: usize| -> PriceTier {
+            PriceTier {
+                name: tier_name.into(),
+                input: miss[bucket_index].1[index],
+                cached_input: Some(hit[bucket_index].1[index]),
+                cache_write: None,
+                cache_write_5m: None,
+                cache_write_1h: None,
+                output: output[bucket_index].1[index],
+                context_window_tokens: context_tokens,
+                conditions: vec![
+                    window.clone(),
+                    if tier_name == "off_peak" {
+                        "Off-peak tier applies outside the documented peak windows; off-peak rates are half of the peak rates (official footnote 2)".to_owned()
+                    } else {
+                        "Peak tier applies during the documented weekday UTC windows (official footnote 2)".to_owned()
+                    },
+                ],
+                unknowns: vec![
+                    "The Chinese public holiday calendar is not decoded from this page; a weekday peak-window request that falls on a Chinese public holiday is billed at off-peak rates".to_owned(),
+                    "The dispatching side must classify the request time against the UTC peak windows; this quote does not resolve which tier applies".to_owned(),
+                ],
+            }
+        };
+        let mut quote = new_quote(
+            "deepseek",
+            model,
+            vec![tier("off_peak", 0), tier("peak", 1)],
+        );
+        quote.conditions.push(
+            "Expense equals tokens multiplied by price, deducted from the topped-up or granted balance; DeepSeek may adjust prices (official deduction rules)".to_owned(),
+        );
+        quotes.push(quote);
+    }
+    for legacy in &legacy_names {
+        let mut quote = new_quote(
+            "deepseek",
+            legacy,
+            vec![
+                PriceTier {
+                    name: "off_peak".into(),
+                    ..{
+                        let quote = &quotes[canonical];
+                        quote.tiers[0].clone()
+                    }
+                },
+                PriceTier {
+                    name: "peak".into(),
+                    ..quotes[canonical].tiers[1].clone()
+                },
+            ],
+        );
+        quote.conditions.push(format!(
+            "Retired legacy name: requests are still accepted, served by the retired model's successor, and billed at the {} price per official footnote (1)",
+            models[canonical].0
+        ));
+        quotes.push(quote);
+    }
+    ensure!(!quotes.is_empty(), "DeepSeek pricing produced no quotes");
+    Ok(quotes)
+}
+
 fn required_money(raw: &str) -> Result<f64> {
     let digits = raw
         .strip_prefix('$')
@@ -810,7 +1437,7 @@ fn allowed_provider_url(provider: &str, url: &url::Url) -> bool {
                 url.host_str(),
                 Some("platform.moonshot.ai" | "platform.kimi.ai")
             ),
-            "anthropic" => url.host_str() == Some("platform.claude.com"),
+            "anthropic" | "anthropic-models" => url.host_str() == Some("platform.claude.com"),
             "deepseek" => url.host_str() == Some("api-docs.deepseek.com"),
             _ => false,
         }
@@ -843,12 +1470,11 @@ fn load_snapshot(directory: &Path, id: &str, expected: Option<&str>) -> Result<P
     let snapshot: PriceSnapshot = serde_json::from_slice(&bytes)?;
     ensure!(
         snapshot.id == id
-            && snapshot.parser_version == 1
+            && snapshot.parser_version == 2
             && snapshot.sources.len() == SOURCE_SPECS.len(),
         "cached pricing snapshot metadata invalid"
     );
     chrono::DateTime::parse_from_rfc3339(&snapshot.checked_at)?;
-    let mut reparsed = Vec::new();
     for (source, (provider, url)) in snapshot.sources.iter().zip(SOURCE_SPECS) {
         ensure!(
             source.provider == provider
@@ -870,16 +1496,10 @@ fn load_snapshot(directory: &Path, id: &str, expected: Option<&str>) -> Result<P
                             .final_url
                             .as_deref()
                             .context("cached source URL missing")?
-                    )?
+                    )?,
                 ),
                 "cached price origin invalid"
             );
-            let (decoded, quotes) = decode_source(source.clone());
-            ensure!(
-                decoded == *source,
-                "cached price source status mismatches parser"
-            );
-            reparsed.extend(quotes);
         } else {
             ensure!(
                 source.status == "failed" && source.reason.is_some(),
@@ -887,8 +1507,13 @@ fn load_snapshot(directory: &Path, id: &str, expected: Option<&str>) -> Result<P
             );
         }
     }
+    let (decoded, quotes) = decode_all(snapshot.sources.clone());
     ensure!(
-        reparsed == snapshot.quotes && !reparsed.is_empty(),
+        decoded == snapshot.sources,
+        "cached price source status mismatches parser"
+    );
+    ensure!(
+        quotes == snapshot.quotes && !quotes.is_empty(),
         "cached quotes do not match official raw sources"
     );
     Ok(snapshot)
@@ -963,23 +1588,67 @@ If no TTL is specified, the 5min tier applies by default. Cache hits refresh the
 />
 "#;
 
+    const ANTHROPIC_MODELS: &str = r#"
+## Current models
+
+| Feature | Claude Fable 5.1 | Claude Opus 5 | Claude Haiku 4.5 |
+| :--- | :--- | :--- | :--- |
+| Description | For demanding reasoning | For complex agentic coding | The fastest model |
+| [Pricing](https://platform.claude.com/docs/en/about-claude/pricing) | $10 / input MTok, $50 / output MTok | $5 / input MTok, $25 / output MTok | $1 / input MTok, $5 / output MTok |
+| Claude API ID | `claude-fable-5-1` | `claude-opus-5` | `claude-haiku-4-5-20251001` |
+| [Context window](https://platform.claude.com/docs/en/build-with-claude/context-windows) | 1M tokens | 1M tokens | 200K tokens |
+| Claude API alias | `claude-fable-5-1` | `claude-opus-5` | `claude-haiku-4-5` |
+
+* **Claude API ID:** Every Claude model ID is a pinned snapshot, including the dateless IDs used from the 4.6 generation on.
+* **Claude API alias:** For models before the 4.6 generation, the alias is a convenience pointer that resolves to the dated ID.
+"#;
+    const ANTHROPIC: &str = r#"
+## Model pricing
+
+| Model | Base input tokens | 5m cache writes | 1h cache writes | Cache hits and refreshes | Output tokens |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| Claude Fable 5.1 | $10 / MTok | $12.50 / MTok | $20 / MTok | $0.25 / MTok<sup>1</sup> | $50 / MTok |
+| Claude Opus 5 | $5 / MTok | $6.25 / MTok | $10 / MTok | $0.50 / MTok | $25 / MTok |
+| Claude Opus 4.6 | $5 / MTok | $6.25 / MTok | $10 / MTok | $0.50 / MTok | $25 / MTok |
+| Claude Sonnet 4.5 | $3 / MTok | $3.75 / MTok | $6 / MTok | $0.30 / MTok | $15 / MTok |
+| Claude Mythos 5.1 ([limited availability](https://anthropic.com/glasswing)) | $10 / MTok | $12.50 / MTok | $20 / MTok | $0.25 / MTok<sup>1</sup> | $50 / MTok |
+| Claude Opus 4.1 ([retired, except on Bedrock and Google Cloud](https://platform.claude.com/docs/en/about-claude/model-deprecations)) | $15 / MTok | $18.75 / MTok | $30 / MTok | $1.50 / MTok | $75 / MTok |
+| Claude Haiku 4.5 | $1 / MTok | $1.25 / MTok | $2 / MTok | $0.10 / MTok | $5 / MTok |
+
+*<sup>1 Cache hits and refreshes on Claude Fable 5.1 and Claude Mythos 5.1 are priced at 0.025x the base input price. All other models use the standard 0.1x multiplier.</sup>*
+
+## Cloud platform pricing
+
+Cloud platforms bill separately.
+
+### Prompt caching
+
+Prompt caching uses the following pricing multipliers relative to base input token rates:
+
+| Cache operation | Multiplier | Duration |
+| --- | --- | --- |
+| 5-minute cache write | 1.25x base input price | Cache valid for 5 minutes |
+| 1-hour cache write | 2x base input price | Cache valid for 1 hour |
+| Cache read (hit) | 0.1x base input price (0.025x on Claude Fable 5.1 and Claude Mythos 5.1) | Same duration as the preceding write |
+"#;
+    const DEEPSEEK: &str = r#"<html><body><div><b><table style="text-align:center"><tr><td colspan="3" style="text-align:center">MODEL</td><td>deepseek-flash<sup>(1)</sup></td><td>deepseek-v4-pro</td></tr><tr><td colspan="3">BASE URL (OpenAI Format)</td><td colspan="2"><a href="https://api.deepseek.com">https://api.deepseek.com</a></td></tr><tr><td colspan="3">CONTEXT LENGTH</td><td colspan="2">1M</td></tr><tr><td rowspan="7">FEATURES</td><td colspan="2"><a href="/guides/tool_calls">Tool Calls</a></td><td>✓</td><td>✓</td></tr><tr><td rowspan="6">PRICING<sup>(2)</sup></td><td rowspan="2">1M INPUT TOKENS<br>(CACHE HIT)</td><td>OFF-PEAK</td><td>$0.003</td><td>$0.022</td></tr><tr><td>PEAK</td><td>$0.006</td><td>$0.044</td></tr><tr><td rowspan="2">1M INPUT TOKENS<br>(CACHE MISS)</td><td>OFF-PEAK</td><td>$0.15</td><td>$0.66</td></tr><tr><td>PEAK</td><td>$0.3</td><td>$1.32</td></tr><tr><td rowspan="2">1M OUTPUT TOKENS</td><td>OFF-PEAK</td><td>$0.6</td><td>$1.98</td></tr><tr><td>PEAK</td><td>$1.2</td><td>$3.96</td></tr><tr><td colspan="3">Concurrency Limit<sup>(3)</sup></td><td>2500</td><td>500</td></tr></table></b></div>
+<div style="font-size:14px"><p>(1) Use <code>deepseek-flash</code> as the model name. The legacy names <code>deepseek-v4-flash</code> and <code>deepseek-v4-flash-vision-exp</code> are still accepted, but the corresponding models have been retired, their requests are served by the DeepSeek-V4.1-Flash model and billed at the Flash price.</p><p>(2) Off-peak rates are half of the peak rates. Peak hours are 01:00 - 04:00 and 06:00 - 10:00 UTC, Monday through Friday, excluding Chinese public holidays. All other hours are off-peak, including weekends and Chinese public holidays in full.</p></div>
+</body></html>"#;
+
     fn fixture() -> PriceSnapshot {
         let checked_at = now();
-        let mut snapshot = PriceSnapshot {
-            parser_version: 1,
-            id: Uuid::new_v4().to_string(),
-            checked_at: checked_at.clone(),
-            sources: Vec::new(),
-            quotes: Vec::new(),
-        };
+        let mut sources = Vec::new();
         for (provider, url) in SOURCE_SPECS {
             let raw = match provider {
                 "openai" => OPENAI,
                 "kimi" => KIMI,
-                _ => "official source with unverified pricing semantics",
+                "anthropic" => ANTHROPIC,
+                "anthropic-models" => ANTHROPIC_MODELS,
+                "deepseek" => DEEPSEEK,
+                _ => unreachable!("fixture covers every source spec"),
             }
             .to_owned();
-            let source = PriceSource {
+            sources.push(PriceSource {
                 provider: provider.into(),
                 requested_url: url.into(),
                 final_url: Some(url.into()),
@@ -988,12 +1657,16 @@ If no TTL is specified, the 5min tier applies by default. Cache hits refresh the
                 reason: None,
                 sha256: Some(hash(raw.as_bytes())),
                 raw: Some(raw),
-            };
-            let (source, quotes) = decode_source(source);
-            snapshot.sources.push(source);
-            snapshot.quotes.extend(quotes);
+            });
         }
-        snapshot
+        let (sources, quotes) = decode_all(sources);
+        PriceSnapshot {
+            parser_version: 2,
+            id: Uuid::new_v4().to_string(),
+            checked_at,
+            sources,
+            quotes,
+        }
     }
 
     #[test]
@@ -1033,6 +1706,165 @@ If no TTL is specified, the 5min tier applies by default. Cache hits refresh the
         assert!(parse_kimi(&KIMI.replace("\"1M tokens\"", "\"1000 tokens\"")).is_err());
         assert!(parse_kimi(&KIMI.replace("kimi-code-test", "kimi-test")).is_err());
         assert!(parse_kimi(&KIMI.replace("$\"}0.95", "$\"}-1")).is_err());
+    }
+
+    #[test]
+    fn anthropic_joins_attested_ids_and_derives_documented_schemes() {
+        let identities = parse_anthropic_models(ANTHROPIC_MODELS).unwrap();
+        let quotes = parse_anthropic(ANTHROPIC, &identities).unwrap();
+        let find = |model: &str| {
+            quotes
+                .iter()
+                .find(|quote| quote.model == model)
+                .unwrap_or_else(|| panic!("missing quote for {model}"))
+        };
+        // Attested in the same epoch's model overview.
+        assert_eq!(find("claude-fable-5-1").tiers[0].input, 10.0);
+        assert_eq!(
+            find("claude-fable-5-1").tiers[0].context_window_tokens,
+            Some(1_000_000)
+        );
+        assert_eq!(
+            find("claude-fable-5-1").tiers[0].cached_input,
+            Some(0.25),
+            "footnoted 0.025x cache-hit multiplier"
+        );
+        assert_eq!(find("claude-haiku-4-5-20251001").tiers[0].input, 1.0);
+        let alias = find("claude-haiku-4-5");
+        assert!(alias.conditions.iter().any(|condition| condition.contains(
+            "convenience alias that resolves to the dated snapshot claude-haiku-4-5-20251001"
+        )));
+        // Derived from the documented dateless scheme (4.6 generation and later).
+        let derived = find("claude-opus-4-6");
+        assert!(derived
+            .conditions
+            .iter()
+            .any(|condition| condition.contains("documented dateless naming scheme")));
+        assert!(derived.tiers[0].context_window_tokens.is_none());
+        assert!(derived.tiers[0]
+            .unknowns
+            .iter()
+            .any(|unknown| unknown.contains("Context window is not attested")));
+        // Pre-4.6 rows without attestation stay keyed by the documented alias.
+        let pointer = find("claude-sonnet-4-5");
+        assert!(pointer
+            .conditions
+            .iter()
+            .any(|condition| condition.contains("documented pre-4.6 alias format")));
+        // Limited availability is carried as a condition, never dropped.
+        assert!(find("claude-mythos-5-1")
+            .conditions
+            .iter()
+            .any(|condition| condition.contains("limited availability")));
+        // Retired first-party models produce no quote.
+        assert!(quotes
+            .iter()
+            .all(|quote| !quote.model.starts_with("claude-opus-4-1")));
+        assert_eq!(quotes.len(), 7);
+        assert_eq!(find("claude-opus-5").app_ids, vec!["claude".to_owned()]);
+        // Schema drift fails closed.
+        assert!(parse_anthropic(
+            &ANTHROPIC.replace("5m cache writes", "Cache writes"),
+            &identities
+        )
+        .is_err());
+        assert!(parse_anthropic(
+            &ANTHROPIC.replace("$12.50 / MTok", "$13.00 / MTok"),
+            &identities
+        )
+        .is_err());
+        assert!(parse_anthropic(
+            &ANTHROPIC.replace("1.25x base input price", "1.2x base input"),
+            &identities
+        )
+        .is_err());
+        // An attested ID that disagrees with the documented dateless scheme
+        // blocks the epoch instead of quoting a mismatched identity.
+        let tampered = parse_anthropic_models(
+            &ANTHROPIC_MODELS.replace("`claude-opus-5`", "`claude-opus-5-alt`"),
+        )
+        .unwrap();
+        assert!(parse_anthropic(ANTHROPIC, &tampered).is_err());
+        // A join source that stops attesting the current table blocks the epoch.
+        assert!(parse_anthropic_models("no table here").is_err());
+        let (sources, quotes) = decode_all(vec![
+            PriceSource {
+                provider: "anthropic-models".into(),
+                requested_url: ANTHROPIC_MODELS_URL.into(),
+                final_url: Some(ANTHROPIC_MODELS_URL.into()),
+                checked_at: now(),
+                status: "fetched".into(),
+                reason: None,
+                sha256: Some(hash(b"x")),
+                raw: Some("not an overview".into()),
+            },
+            PriceSource {
+                provider: "anthropic".into(),
+                requested_url: ANTHROPIC_URL.into(),
+                final_url: Some(ANTHROPIC_URL.into()),
+                checked_at: now(),
+                status: "fetched".into(),
+                reason: None,
+                sha256: Some(hash(b"y")),
+                raw: Some(ANTHROPIC.into()),
+            },
+        ]);
+        assert!(sources.iter().all(|source| source.status == "blocked"));
+        assert!(quotes.is_empty());
+    }
+
+    #[test]
+    fn deepseek_peak_offpeak_tiers_and_retired_alias_billing() {
+        let quotes = parse_deepseek(DEEPSEEK).unwrap();
+        let find = |model: &str| {
+            quotes
+                .iter()
+                .find(|quote| quote.model == model)
+                .unwrap_or_else(|| panic!("missing quote for {model}"))
+        };
+        let flash = find("deepseek-flash");
+        assert_eq!(flash.tiers.len(), 2);
+        assert_eq!(flash.tiers[0].name, "off_peak");
+        assert_eq!(flash.tiers[0].input, 0.15);
+        assert_eq!(flash.tiers[0].cached_input, Some(0.003));
+        assert_eq!(flash.tiers[0].output, 0.6);
+        assert_eq!(flash.tiers[1].name, "peak");
+        assert_eq!(flash.tiers[1].input, 0.3);
+        assert_eq!(
+            flash.tiers[0].context_window_tokens,
+            Some(1_000_000),
+            "context length row is joined"
+        );
+        assert!(flash.tiers[0]
+            .conditions
+            .iter()
+            .any(|condition| condition.starts_with("Peak hours are 01:00 - 04:00")));
+        assert!(flash.tiers[0]
+            .unknowns
+            .iter()
+            .any(|unknown| unknown.contains("Chinese public holiday calendar is not decoded")));
+        assert_eq!(flash.app_ids, vec!["deepseek".to_owned()]);
+        let pro = find("deepseek-v4-pro");
+        assert_eq!(pro.tiers[1].output, 3.96);
+        // Retired legacy names are billed at the flash price per the official footnote.
+        let legacy = find("deepseek-v4-flash-vision-exp");
+        assert_eq!(legacy.tiers[0].input, flash.tiers[0].input);
+        assert!(legacy.conditions.iter().any(|condition| condition
+            .contains("billed at the deepseek-flash price per official footnote (1)")));
+        assert_eq!(quotes.len(), 4);
+        // Schema and semantics drift fail closed.
+        assert!(parse_deepseek(&DEEPSEEK.replace("OFF-PEAK", "DISCOUNT")).is_err());
+        assert!(parse_deepseek(&DEEPSEEK.replace("$0.15</td>", "$0.16</td>"),).is_err());
+        assert!(parse_deepseek(&DEEPSEEK.replace(
+            "Peak hours are 01:00 - 04:00 and 06:00 - 10:00 UTC",
+            "Peak hours are 09:00 - 10:00 UTC"
+        ))
+        .is_err());
+        assert!(parse_deepseek(&DEEPSEEK.replace("</table>", "</tablex>")).is_err());
+        assert!(parse_deepseek(
+            &DEEPSEEK.replace("deepseek-v4-flash-vision-exp", "deepseek-v4-pro")
+        )
+        .is_err());
     }
 
     #[test]
@@ -1216,19 +2048,33 @@ If no TTL is specified, the 5min tier applies by default. Cache hits refresh the
     #[ignore = "explicit downloaded official-source parser smoke test"]
     fn downloaded_official_sources_parse() {
         let folder = std::env::var_os("WONDERLAND_PRICING_FIXTURE_DIR")
-            .expect("set fixture folder containing pricing-openai.md and pricing-kimi.md");
+            .expect("set fixture folder containing pricing-openai.md, pricing-kimi.md, pricing-anthropic.md, models-anthropic.md and pricing-deepseek.html");
         let folder = PathBuf::from(folder);
         let openai =
             parse_openai(&fs::read_to_string(folder.join("pricing-openai.md")).unwrap()).unwrap();
         let kimi =
             parse_kimi(&fs::read_to_string(folder.join("pricing-kimi.md")).unwrap()).unwrap();
+        let anthropic_models_raw = fs::read_to_string(folder.join("models-anthropic.md")).unwrap();
+        let anthropic_pricing_raw =
+            fs::read_to_string(folder.join("pricing-anthropic.md")).unwrap();
+        let identities = parse_anthropic_models(&anthropic_models_raw)
+            .expect("real Anthropic model overview must parse");
+        let anthropic = parse_anthropic(&anthropic_pricing_raw, &identities)
+            .expect("real Anthropic pricing must parse after the identity join");
+        let deepseek =
+            parse_deepseek(&fs::read_to_string(folder.join("pricing-deepseek.html")).unwrap())
+                .expect("real DeepSeek pricing must parse");
         println!(
-            "actual official documents parsed: OpenAI={} Kimi={}",
+            "actual official documents parsed: OpenAI={} Kimi={} Anthropic={} DeepSeek={}",
             openai.len(),
-            kimi.len()
+            kimi.len(),
+            anthropic.len(),
+            deepseek.len()
         );
         assert!(!openai.is_empty());
         assert!(!kimi.is_empty());
+        assert!(!anthropic.is_empty());
+        assert!(!deepseek.is_empty());
     }
 }
 #[cfg(windows)]
