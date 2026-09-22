@@ -254,6 +254,7 @@ impl PriceService {
             .state
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let blockers = crate::account_billing::dispatch_blockers();
         json!({
             "latest_snapshot":state.latest.as_ref().map(|snapshot| json!({"id":snapshot.id,"checked_at":snapshot.checked_at,"quote_count":snapshot.quotes.len(),"sources":snapshot.sources.iter().map(|source|json!({"provider":source.provider,"status":source.status,"reason":source.reason,"url":source.final_url,"sha256":source.sha256,"checked_at":source.checked_at})).collect::<Vec<_>>()})),
             "latest_failure":state.stored.latest_failure,
@@ -262,6 +263,12 @@ impl PriceService {
             "online_verified_in_this_process":state.live_snapshot_id.is_some() && state.stored.latest_failure.is_none(),
             "refresh_required_each_dispatch_round":true,
             "subscription_pricing":"unknown; subscription quota is not zero-cost API tokens",
+            "billing_channels":crate::account_billing::catalog_json(),
+            "dispatch_readiness":{
+                "ready":blockers.is_empty(),
+                "missing":blockers,
+                "scope":"billing dimensions only; model-identity and benchmark coverage are reported by /api/v1/intelligence"
+            },
             "auto_dispatch_ready":false,
             "note":"Cached snapshots are for display. Every dispatch round must refresh online and bind quotes to that snapshot ID. Exact direct-API routing also requires a verified endpoint, billing channel, model identity, benchmark variant and matching tier conditions. Claude quotes are keyed by exact API model IDs joined from the same epoch's official model overview; DeepSeek quotes carry peak/off-peak UTC window conditions."
         })
@@ -283,7 +290,9 @@ impl PriceService {
             quote: None,
         };
         let block = if billing_channel != "api" {
-            Some("Only direct API billing is verified; subscriptions, proxies, cloud resellers, credits, and unknown billing channels cannot inherit API token prices".to_owned())
+            Some(crate::account_billing::non_api_block_reason(
+                billing_channel,
+            ))
         } else if state.stored.latest_failure.is_some() {
             Some("The latest pricing refresh or cache verification failed; refresh online before cost comparison".to_owned())
         } else if let Some(snapshot) = state.latest.as_ref() {
@@ -1894,6 +1903,27 @@ Prompt caching uses the following pricing multipliers relative to base input tok
             assert!(result.quote.is_none());
         }
         assert_eq!(service.status()["auto_dispatch_ready"], false);
+        let status = service.status();
+        let channels = status["billing_channels"].as_array().unwrap();
+        assert_eq!(channels.len(), 7);
+        assert!(channels
+            .iter()
+            .any(|entry| entry["app_id"] == "deepseek" && entry["billing_channel"] == "api"));
+        assert!(!channels.iter().any(
+            |entry| entry["app_id"] == "deepseek" && entry["billing_channel"] == "subscription"
+        ));
+        assert_eq!(status["dispatch_readiness"]["ready"], false);
+        assert!(!status["dispatch_readiness"]["missing"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        let subscription = service.quote("kimi-cli", "kimi-test", "subscription");
+        assert_eq!(subscription.status, "blocked");
+        assert!(subscription
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("provider quota units"));
     }
 
     #[test]

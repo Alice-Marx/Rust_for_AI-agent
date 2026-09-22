@@ -367,7 +367,7 @@ npm test --prefix packaging/npm/wonderland-cli
 3. 明确定义 API 实付和订阅剩余额度、限速/重置周期及机会成本；没有可核验来源时继续 unknown，不把包月除以任意 token 数当作真实单价。
 4. 一次 routing epoch 引用同一批不可变数据；刷新失败保留历史展示和原时间，但拒绝把旧快照视为本轮已更新。
 
-已交付：`src/model_identity.rs` 注册表把精确 (app_id, model, reasoning_effort) 解析到 LiveBench 条目或显式 unknown（v1 种子仅 Kimi 有证据记录）。`src/pricing.rs` 现为五个官方源：Anthropic 定价经同 epoch 的官方 models overview join 到 attestation 的精确 API model ID/alias，退役/受限/派生路径与缓存乘数不变量显式化；DeepSeek 产出峰/谷两档（逐字 UTC 窗口条件）并按官方脚注为退役别名出报价。`parser_version=2`。真实在线刷新五源全部 verified（59 条报价）；细节见 [价格解析工作报告](WORK-REPORT-2026-09-22-PRICE-PARSERS.md)。订阅/账号额度语义（第 3 项）仍未实现，`auto_dispatch_ready` 保持 false。
+已交付：`src/model_identity.rs` 注册表把精确 (app_id, model, reasoning_effort) 解析到 LiveBench 条目或显式 unknown（v1 种子仅 Kimi 有证据记录）。`src/pricing.rs` 现为五个官方源：Anthropic 定价经同 epoch 的官方 models overview join 到 attestation 的精确 API model ID/alias，退役/受限/派生路径与缓存乘数不变量显式化；DeepSeek 产出峰/谷两档（逐字 UTC 窗口条件）并按官方脚注为退役别名出报价。`parser_version=2`。真实在线刷新五源全部 verified（59 条报价）；细节见 [价格解析工作报告](WORK-REPORT-2026-09-22-PRICE-PARSERS.md)。第 3 项已交付**数据合同**：`src/account_billing.rs` 定义每个受管应用各计费渠道的语义（api=USD/token 列价且列价≠实付；订阅=提供商额度单位、永不折算 token 单价），账号级字段（实付/剩余额度/限速/重置周期）在集成官方来源前一律显式 unknown 并带原因，`dispatch_blockers()` 给出 Automatic 解锁清单，经 `/api/v1/pricing` 状态的 `billing_channels` 与 `dispatch_readiness` 暴露。数值集成（真实账单/额度端点）仍待做，`auto_dispatch_ready` 保持 false；细节见 [账号计费合同工作报告](WORK-REPORT-2026-09-23-ACCOUNT-BILLING.md)。
 
 **验收门槛：** 过期、缺失、歧义、解析失败、缓存写入价未知、时段不符等均可重现阻塞；所有用于派工的字段可追溯官方证据；订阅与 API 的成本语义不混淆。
 
