@@ -3,6 +3,7 @@
 use crate::{
     api::AppState,
     native_executor,
+    routing::RoutingPreviewRequest,
     team_store::{
         ExecutorBinding, NodeSpec, NodeStatus, TeamCreate, TeamRecord, TeamStatus, TeamStore,
         TeamStrategy,
@@ -851,6 +852,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/teams/{id}/events", get(events))
         .route("/api/v1/teams/{id}/start", post(start))
         .route("/api/v1/teams/{id}/cancel", post(cancel))
+        .route("/api/v1/teams/{id}/routing/preview", post(routing_preview))
         .route("/api/v1/pricing", get(pricing))
         .route("/api/v1/pricing/refresh", post(refresh_pricing))
         .route("/api/v1/pricing/quote", get(quote))
@@ -893,6 +895,37 @@ async fn start(State(s): State<AppState>, HttpPath(id): HttpPath<String>) -> Api
 }
 async fn cancel(State(s): State<AppState>, HttpPath(id): HttpPath<String>) -> ApiResult {
     Ok(Json(json!(s.workbench.teams.cancel(&id).await?)))
+}
+async fn routing_preview(
+    State(s): State<AppState>,
+    HttpPath(id): HttpPath<String>,
+    Json(request): Json<RoutingPreviewRequest>,
+) -> ApiResult {
+    let team = s
+        .workbench
+        .teams
+        .store
+        .get(&id)?
+        .context("team not found")?;
+    if team.request.strategy != TeamStrategy::Automatic {
+        return Err(
+            anyhow::anyhow!("routing preview is only available for automatic teams").into(),
+        );
+    }
+    let routing_request = request.into_request(&team.request.candidates);
+    let (benchmark, pricing) = tokio::join!(
+        s.workbench.intelligence.refresh(),
+        s.workbench.pricing.refresh()
+    );
+    let benchmark = benchmark.context("LiveBench refresh failed")?;
+    let pricing = pricing.context("official pricing refresh failed")?;
+    let decision = crate::routing::decide(&routing_request, &benchmark, &pricing)?;
+    s.workbench.teams.store.append_event(
+        &id,
+        "routing_preview",
+        serde_json::to_value(&decision)?,
+    )?;
+    Ok(Json(serde_json::to_value(decision)?))
 }
 #[derive(Deserialize)]
 struct Cursor {

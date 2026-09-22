@@ -11,7 +11,7 @@
 | src/workflow.rs、workbench_service.rs | 单任务 SQLite 状态、配置与执行控制 |
 | src/team_*.rs | 团队 DAG、官方执行器绑定、独立工作区和验收 |
 | src/native_executor.rs、native_executor/ | Codex、Kimi、Claude、DeepSeek 原生协议 |
-| src/model_intelligence.rs、pricing.rs | LiveBench 与官方价格证据 |
+| src/model_intelligence.rs、pricing.rs、routing.rs | LiveBench、官方价格证据与快照绑定的可解释路由预览 |
 | src/bin/desktop/ | Rust egui 工作台、Teams、项目与终端界面 |
 | src/bin/wonderland-cli.rs | 原生 Rust 服务客户端 |
 | packaging/npm/wonderland-cli/ | npm 服务客户端及测试 |

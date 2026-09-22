@@ -26,6 +26,7 @@ pub mod process_tree;
 pub mod provider;
 pub mod responses;
 pub mod router;
+pub mod routing;
 pub mod sandbox;
 #[cfg(windows)]
 mod sandbox_windows;
