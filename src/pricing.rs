@@ -267,7 +267,11 @@ impl PriceService {
             "dispatch_readiness":{
                 "ready":blockers.is_empty(),
                 "missing":blockers,
-                "scope":"billing dimensions only; model-identity and benchmark coverage are reported by /api/v1/intelligence"
+                "scope":"hard-budget dispatch only; budget-less automatic dispatch runs on verified routing decisions with the same cost posture as fixed execution"
+            },
+            "automatic_dispatch":{
+                "no_budget":"enabled: an automatic team starts when a routing-v2 decision selects a candidate from fully attested identity, benchmark and quote evidence",
+                "hard_budget":"blocked until native billing settlement closes (H04); the decision is still recorded"
             },
             "auto_dispatch_ready":false,
             "note":"Cached snapshots are for display. Every dispatch round must refresh online and bind quotes to that snapshot ID. Exact direct-API routing also requires a verified endpoint, billing channel, model identity, benchmark variant and matching tier conditions. Claude quotes are keyed by exact API model IDs joined from the same epoch's official model overview; DeepSeek quotes carry peak/off-peak UTC window conditions."
@@ -1905,7 +1909,7 @@ Prompt caching uses the following pricing multipliers relative to base input tok
         assert_eq!(service.status()["auto_dispatch_ready"], false);
         let status = service.status();
         let channels = status["billing_channels"].as_array().unwrap();
-        assert_eq!(channels.len(), 7);
+        assert_eq!(channels.len(), 9);
         assert!(channels
             .iter()
             .any(|entry| entry["app_id"] == "deepseek" && entry["billing_channel"] == "api"));

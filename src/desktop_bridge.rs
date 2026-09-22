@@ -175,10 +175,10 @@ pub fn official_apps() -> Vec<AppMetadata> {
             "XiaomiMiMo/MiMo-Code",
             "https://mimo.xiaomi.com/coder",
             Some("@mimo-ai/cli"),
-            false,
+            true,
             "acp;http-sse",
             "anytool/mimo/MiMo-Code;MiMo-Code",
-            "手动终端候选；SDK 默认启动 helper 仍含 opencode 名称，需单独适配",
+            "受管 ACP 适配（mimo acp，固定 0.1.15）；ACP 上报身份为上游 fork 的 OpenCode 名称；真实握手与推理待账号验证",
         ),
         (
             "deepseek",
@@ -1304,7 +1304,7 @@ mod tests {
             .filter(|app| app.capabilities.structured_runner)
             .map(|app| app.id.as_str())
             .collect();
-        assert_eq!(native, ["codex", "claude", "kimi-cli", "deepseek"]);
+        assert_eq!(native, ["codex", "claude", "kimi-cli", "mimo", "deepseek"]);
         assert!(
             !apps
                 .iter()

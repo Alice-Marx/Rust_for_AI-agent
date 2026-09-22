@@ -53,6 +53,8 @@ Windows 全目标回归通过：404 项库测试、3 项 Rust CLI、18 项桌面
 - [0.11.0 验证](VALIDATION-0.11.0.md)、[0.10.0 官方程序验证](VALIDATION-0.10.0.md)、[0.9.0 Kimi 实测](VALIDATION-0.9.0.md)：不同层次的测试和真实调用记录。
 - [2026-09-22 本轮工作报告](WORK-REPORT-2026-09-22.md)：路由约束持久化、在线预览与决策重放的完成项和剩余项。
 - [2026-09-22 价格解析工作报告](WORK-REPORT-2026-09-22-PRICE-PARSERS.md)、[2026-09-23 账号计费合同](WORK-REPORT-2026-09-23-ACCOUNT-BILLING.md)、[2026-09-23 路由身份消费](WORK-REPORT-2026-09-23-ROUTING-IDENTITY.md)、[2026-09-23 身份种子 v1.1](WORK-REPORT-2026-09-23-IDENTITY-SEED-V1.1.md)：本轮四个增量的逐项报告。
+- [2026-09-23 ACP 框架/MiMo/Automatic 启动](WORK-REPORT-2026-09-23-MIMO-ACP-DISPATCH.md)：ACP 会话引擎泛化、MiMo 受管接入、Automatic 决策→绑定写回→执行路径。
+- [anytool 上游工具受管接入评估](ANYTOOL-ADAPTER-ASSESSMENT-2026-09-23.md)：各工具协议入口结论与后续接入路径。
 - [2026-09-22 源码获取工作报告](WORK-REPORT-2026-09-22-UPSTREAM-ACQUISITION.md)：Git Smart HTTP 不可达时的官方归档回退、验证结果与未解决网络限制。
 - [2026-09-22 最终交接整理报告](WORK-REPORT-2026-09-22-FINAL-HANDOFF.md)：文件分类、完成项、未完成项和交付前检查。
 

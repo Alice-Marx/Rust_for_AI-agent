@@ -863,6 +863,46 @@ impl TeamStore {
             Ok(json!({"nodes":record.nodes.iter().map(|n|n.spec.id.as_str()).collect::<Vec<_>>()}))
         })
     }
+    /// Persist a routing-selected binding as the planner (and therefore the
+    /// default executor for every node without an explicit binding). Only
+    /// legal while no attempt has begun, and only for a declared candidate.
+    pub fn set_planner(
+        &self,
+        id: &str,
+        expected_revision: u64,
+        binding: ExecutorBinding,
+    ) -> Result<TeamRecord> {
+        crate::native_executor::validate_binding(
+            &binding.app_id,
+            &binding.model,
+            binding.reasoning_effort.as_deref(),
+            false,
+        )?;
+        self.mutate(id, "planner_set", move |_, record| {
+            ensure!(
+                record.revision == expected_revision,
+                "planner revision changed"
+            );
+            ensure!(
+                record.status == TeamStatus::Running,
+                "a routing binding can only be applied while the team is starting"
+            );
+            ensure!(
+                record.nodes.iter().all(|n| n.attempts.is_empty()),
+                "the routing binding is immutable after execution begins"
+            );
+            ensure!(
+                record
+                    .request
+                    .candidates
+                    .iter()
+                    .any(|candidate| candidate == &binding),
+                "routing selected a binding that the team did not declare"
+            );
+            record.request.planner = binding.clone();
+            Ok(json!({"planner": binding}))
+        })
+    }
     pub fn set_workspace(
         &self,
         id: &str,

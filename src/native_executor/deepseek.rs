@@ -1,5 +1,6 @@
 //! Exact-release ACP adapter for the unmodified official DeepSeek Harness CLI.
 //! ACP v0.1.6 emits committed message blocks, not provider token deltas.
+use super::acp::{AcpDialect, AcpRunner};
 use super::{
     cancellation, emit, empty_result, executable_digest, read_frame, NativeControl, NativeEvent,
     NativeRequest, NativeResult, MAX_FRAME_BYTES, MAX_OUTPUT_BYTES,
@@ -7,13 +8,13 @@ use super::{
 use anyhow::{bail, ensure, Context, Result};
 use serde_json::{json, Value};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
 };
 use tokio::{
-    io::{AsyncWrite, AsyncWriteExt, BufReader},
+    io::BufReader,
     sync::{mpsc, watch},
 };
 
@@ -22,8 +23,6 @@ const PROVIDER: &str = "deepseek-official";
 const CLI_HASH: &str = "69c49c871735dc7ee81ec51f266bbec129f075fd5066e046374f4b13ab02a705";
 const BASE_HASH: &str = "a395d4e6b1b4de3694d354ab21901c174f59a30557d906f6324a474f486b2cc8";
 const ACP_HASH: &str = "3c559e8860348f1a878637a740bb11f80863f8e97b895060badda962a8a127fd";
-const MAX_PENDING: usize = 64;
-const MAX_INTERACTIONS: usize = 4096;
 
 pub(super) fn validate_request(req: &NativeRequest) -> Result<()> {
     ensure!(
@@ -477,7 +476,14 @@ pub(super) async fn execute_with_control(
             }
         }
     });
-    let mut runner = Runner::new(Box::new(stdin), rx, controls, events.clone(), &req);
+    let mut runner = AcpRunner::new(
+        Box::new(DeepSeekDialect),
+        Box::new(stdin),
+        rx,
+        controls,
+        events.clone(),
+        &req,
+    );
     let outcome = tokio::select! {
         result = runner.run(&req) => result,
         _ = cancellation(&mut cancel) => Ok("cancelled".into()),
@@ -487,7 +493,7 @@ pub(super) async fn execute_with_control(
     // Always close, including JSON-RPC errors, route drift and UI disconnect.
     // Cancel is only a notification; close and the process tree are the fences.
     let _ = tokio::time::timeout(Duration::from_millis(600), runner.shutdown()).await;
-    drop(runner.stdin);
+    let mut native_result = runner.into_result();
     let _ = tokio::time::timeout(Duration::from_millis(400), child.wait()).await;
     drop(tree);
     let _ = child.start_kill();
@@ -495,112 +501,29 @@ pub(super) async fn execute_with_control(
     reader.abort();
     let _ = reader.await;
     let status = outcome?;
-    runner.result.status = status.clone();
+    native_result.status = status.clone();
     emit(&events, NativeEvent::Completed { status }).await?;
-    Ok(runner.result)
+    Ok(native_result)
 }
 
-struct Pending {
-    id: Value,
-    tool_id: String,
-    allow: String,
-    reject: String,
-}
-struct Runner {
-    stdin: Box<dyn AsyncWrite + Unpin + Send>,
-    frames: mpsc::Receiver<Result<Value>>,
-    controls: mpsc::Receiver<NativeControl>,
-    controls_open: bool,
-    events: mpsc::Sender<NativeEvent>,
-    pending: HashMap<String, Pending>,
-    seen: HashSet<String>,
-    tools: HashMap<String, Value>,
-    next_id: u64,
-    result: NativeResult,
-    read_only: bool,
-    effort: Option<String>,
-    enforce_effort: bool,
-    streamed_bytes: usize,
-}
+/// DeepSeek Harness ACP dialect: strict identity, JSON-array model values,
+/// one-shot permissions with exactly two options.
+pub(super) struct DeepSeekDialect;
 
-impl Runner {
-    fn new(
-        stdin: Box<dyn AsyncWrite + Unpin + Send>,
-        frames: mpsc::Receiver<Result<Value>>,
-        controls: mpsc::Receiver<NativeControl>,
-        events: mpsc::Sender<NativeEvent>,
-        req: &NativeRequest,
-    ) -> Self {
-        Self {
-            stdin,
-            frames,
-            controls,
-            controls_open: true,
-            events,
-            pending: HashMap::new(),
-            seen: HashSet::new(),
-            tools: HashMap::new(),
-            next_id: 1,
-            result: empty_result(req, "running"),
-            read_only: req.read_only,
-            effort: req.reasoning_effort.clone(),
-            enforce_effort: false,
-            streamed_bytes: 0,
-        }
+impl AcpDialect for DeepSeekDialect {
+    fn label(&self) -> &'static str {
+        "DeepSeek"
     }
-
-    async fn write(&mut self, value: Value) -> Result<()> {
-        let mut bytes = serde_json::to_vec(&value)?;
-        ensure!(
-            bytes.len() < MAX_FRAME_BYTES,
-            "DeepSeek outgoing ACP frame exceeds limit"
-        );
-        bytes.push(b'\n');
-        tokio::time::timeout(Duration::from_secs(5), async {
-            self.stdin.write_all(&bytes).await?;
-            self.stdin.flush().await
-        })
-        .await
-        .context("DeepSeek ACP stdin stopped draining")??;
-        Ok(())
+    fn protocol(&self) -> &'static str {
+        "deepseek-acp"
     }
-
-    async fn rpc(&mut self, method: &str, params: Value) -> Result<Value> {
-        let id = self.next_id;
-        self.next_id += 1;
-        self.write(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
-            .await?;
-        loop {
-            tokio::select! {
-                frame = self.frames.recv() => {
-                    let frame = frame.context("DeepSeek ACP reader disconnected")??;
-                    ensure!(frame["jsonrpc"] == "2.0", "DeepSeek ACP envelope mismatch");
-                    if frame.get("method").is_some() { self.handle_server(frame).await?; continue; }
-                    ensure!(frame.get("id").and_then(Value::as_u64) == Some(id), "unexpected DeepSeek ACP response identity");
-                    // Provider error text may echo secret-bearing requests; retain
-                    // only the error code, never the arbitrary server message/data.
-                    if let Some(error) = frame.get("error") {
-                        bail!("DeepSeek ACP {method} failed (code {}); see the official CLI for account diagnostics", error["code"].as_i64().unwrap_or(-32603));
-                    }
-                    return frame.get("result").cloned().context("DeepSeek ACP result missing");
-                },
-                control = self.controls.recv(), if self.controls_open => {
-                    match control {
-                        Some(NativeControl::Permission{request_id, approve}) => self.resolve(&request_id, approve).await?,
-                        Some(NativeControl::Answer{..}) => emit(&self.events, NativeEvent::Status{message:"DeepSeek ACP does not expose question answers".into()}).await?,
-                        None => {
-                            self.controls_open = false;
-                            let keys: Vec<String> = self.pending.keys().cloned().collect();
-                            for key in keys { self.resolve(&key, false).await?; }
-                        }
-                    }
-                }
-            }
-        }
+    fn request_prefix(&self) -> &'static str {
+        "deepseek"
     }
-
-    async fn initialize(&mut self, req: &NativeRequest) -> Result<()> {
-        let init = self.rpc("initialize", json!({"protocolVersion":1,"clientInfo":{"name":"wonderland","version":env!("CARGO_PKG_VERSION")},"clientCapabilities":{}})).await?;
+    fn status_note(&self) -> String {
+        "DeepSeek official ACP: committed message blocks; usage reports context occupancy, not billed tokens. The official file sandbox applies; Windows confinement has upstream documented limitations.".into()
+    }
+    fn verify_initialize(&self, init: &Value) -> Result<()> {
         ensure!(
             init["protocolVersion"] == 1
                 && init.pointer("/agentInfo/name").and_then(Value::as_str)
@@ -611,79 +534,23 @@ impl Runner {
                     .is_some(),
             "DeepSeek ACP identity/capability handshake mismatch"
         );
-        let session = self
-            .rpc("session/new", json!({"cwd":req.cwd,"mcpServers":[]}))
-            .await?;
-        let session_id = session["sessionId"]
-            .as_str()
-            .context("DeepSeek ACP session ID missing")?;
-        ensure!(
-            uuid::Uuid::parse_str(session_id).is_ok(),
-            "invalid DeepSeek ACP session ID"
-        );
-        self.result.session_id = Some(session_id.into());
-        self.check_options(&session["configOptions"])?;
-        emit(
-            &self.events,
-            NativeEvent::SessionStarted {
-                session_id: session_id.into(),
-            },
-        )
-        .await?;
-        let selected = self
-            .rpc(
-                "session/set_config_option",
-                json!({"sessionId":session_id,"configId":"model","value":model_value(&req.model)}),
-            )
-            .await?;
-        self.check_options(&selected["configOptions"])?;
-        if let Some(effort) = req.reasoning_effort.as_ref() {
-            self.enforce_effort = true;
-            let selected = self
-                .rpc(
-                    "session/set_config_option",
-                    json!({"sessionId":session_id,"configId":"reasoning_effort","value":effort}),
-                )
-                .await?;
-            self.check_options(&selected["configOptions"])?;
-        }
         Ok(())
     }
-
-    async fn run(&mut self, req: &NativeRequest) -> Result<String> {
-        emit(
-            &self.events,
-            NativeEvent::Started {
-                app_id: req.app_id.clone(),
-                model: req.model.clone(),
-                protocol: "deepseek-acp".into(),
-            },
-        )
-        .await?;
-        self.initialize(req).await?;
-        emit(&self.events, NativeEvent::Status {message:"DeepSeek official ACP: committed message blocks; usage reports context occupancy, not billed tokens. The official file sandbox applies; Windows confinement has upstream documented limitations.".into()}).await?;
-        let result = self.rpc("session/prompt", json!({"sessionId":self.result.session_id,"prompt":[{"type":"text","text":req.prompt}]})).await?;
-        ensure!(
-            self.pending.is_empty(),
-            "DeepSeek prompt settled with unresolved permissions"
-        );
-        match result["stopReason"].as_str() {
-            Some("end_turn") => {
-                ensure!(
-                    self.tools.is_empty(),
-                    "DeepSeek prompt ended with active tools"
-                );
-                Ok("completed".into())
-            }
-            Some("cancelled") => Ok("cancelled".into()),
-            Some("max_tokens" | "max_turn_requests") => {
-                bail!("DeepSeek stopped at an execution limit; task remains incomplete")
-            }
-            _ => bail!("DeepSeek ACP returned an unsupported stop reason"),
-        }
+    fn model_config_id(&self) -> &'static str {
+        "model"
     }
-
-    fn check_options(&self, options: &Value) -> Result<()> {
+    fn model_value(&self, req: &NativeRequest) -> String {
+        json!([PROVIDER, req.model]).to_string()
+    }
+    fn effort_config_id(&self) -> Option<&'static str> {
+        Some("reasoning_effort")
+    }
+    fn verify_config_options(
+        &self,
+        options: &Value,
+        model: &str,
+        effort: Option<&str>,
+    ) -> Result<()> {
         let options = options
             .as_array()
             .context("DeepSeek ACP config options missing")?;
@@ -692,156 +559,25 @@ impl Runner {
             .filter(|item| item["id"] == "model")
             .collect();
         ensure!(
-            models.len() == 1 && models[0]["currentValue"] == model_value(&self.result.model),
+            models.len() == 1
+                && models[0]["currentValue"]
+                    .as_str()
+                    .is_some_and(|value| value == &json!([PROVIDER, model]).to_string()),
             "DeepSeek provider/model drift detected"
         );
-        if self.enforce_effort {
+        if let Some(effort) = effort {
             let efforts: Vec<_> = options
                 .iter()
                 .filter(|item| item["id"] == "reasoning_effort")
                 .collect();
             ensure!(
-                efforts.len() == 1 && efforts[0]["currentValue"].as_str() == self.effort.as_deref(),
+                efforts.len() == 1 && efforts[0]["currentValue"].as_str() == Some(effort),
                 "DeepSeek reasoning effort drift detected"
             );
         }
         Ok(())
     }
-
-    fn check_session(&self, params: &Value) -> Result<()> {
-        ensure!(
-            self.result.session_id.is_some()
-                && params["sessionId"].as_str() == self.result.session_id.as_deref(),
-            "DeepSeek ACP session mismatch"
-        );
-        Ok(())
-    }
-
-    async fn handle_server(&mut self, frame: Value) -> Result<()> {
-        match frame["method"].as_str() {
-            Some("session/update") if frame.get("id").is_none() => {
-                self.check_session(&frame["params"])?;
-                self.update(&frame["params"]["update"]).await
-            }
-            Some("session/request_permission") if frame.get("id").is_some() => self.permission(frame).await,
-            _ if frame.get("id").is_some() => {
-                self.write(json!({"jsonrpc":"2.0","id":frame["id"],"error":{"code":-32601,"message":"Client method is unsupported"}})).await
-            }
-            _ => bail!("unsupported DeepSeek ACP notification"),
-        }
-    }
-
-    async fn update(&mut self, update: &Value) -> Result<()> {
-        self.streamed_bytes = self
-            .streamed_bytes
-            .checked_add(serde_json::to_vec(update)?.len())
-            .context("DeepSeek output length overflow")?;
-        ensure!(
-            self.streamed_bytes <= MAX_OUTPUT_BYTES,
-            "DeepSeek output exceeds limit"
-        );
-        match update["sessionUpdate"].as_str() {
-            Some("config_option_update") => self.check_options(&update["configOptions"]),
-            Some("agent_message_chunk" | "agent_thought_chunk") => {
-                ensure!(
-                    update["content"]["type"] == "text",
-                    "unsupported DeepSeek output content"
-                );
-                let text = update["content"]["text"]
-                    .as_str()
-                    .context("DeepSeek text chunk missing")?;
-                let event = if update["sessionUpdate"] == "agent_message_chunk" {
-                    self.result.output.push_str(text);
-                    NativeEvent::TextDelta { text: text.into() }
-                } else {
-                    NativeEvent::ReasoningDelta { text: text.into() }
-                };
-                emit(&self.events, event).await
-            }
-            Some("tool_call" | "tool_call_update") => {
-                let id = update["toolCallId"]
-                    .as_str()
-                    .context("DeepSeek tool identity missing")?;
-                ensure!(
-                    !id.is_empty() && id.len() <= 256,
-                    "invalid DeepSeek tool identity"
-                );
-                if update["sessionUpdate"] == "tool_call" {
-                    ensure!(
-                        update["status"] == "in_progress",
-                        "DeepSeek tool start has an invalid status"
-                    );
-                    ensure!(
-                        self.tools.len() < MAX_PENDING && !self.tools.contains_key(id),
-                        "duplicate or excessive DeepSeek tool calls"
-                    );
-                    // Keep only bounded attribution, never full tool result bodies.
-                    self.tools.insert(
-                        id.into(),
-                        json!({"title":update["title"],"rawInput":update["rawInput"]}),
-                    );
-                } else {
-                    ensure!(
-                        matches!(update["status"].as_str(), Some("completed" | "failed")),
-                        "DeepSeek tool result has an invalid status"
-                    );
-                    ensure!(
-                        self.tools.remove(id).is_some(),
-                        "unknown or repeated DeepSeek tool result"
-                    );
-                    let stale: Vec<_> = self
-                        .pending
-                        .iter()
-                        .filter(|(_, pending)| pending.tool_id == id)
-                        .map(|(key, _)| key.clone())
-                        .collect();
-                    for key in stale {
-                        self.resolve(&key, false).await?;
-                    }
-                }
-                emit(
-                    &self.events,
-                    NativeEvent::ToolActivity {
-                        data: update.clone(),
-                    },
-                )
-                .await
-            }
-            Some("usage_update") => {
-                ensure!(
-                    update["used"].as_u64().is_some() && update["size"].as_u64().is_some(),
-                    "invalid DeepSeek context usage"
-                );
-                let data =
-                    json!({"kind":"context_occupancy","used":update["used"],"size":update["size"]});
-                self.result.usage = Some(data.clone());
-                emit(&self.events, NativeEvent::Usage { data }).await
-            }
-            _ => bail!("unsupported DeepSeek ACP session update"),
-        }
-    }
-
-    async fn permission(&mut self, frame: Value) -> Result<()> {
-        let params = &frame["params"];
-        self.check_session(params)?;
-        let id = frame["id"].clone();
-        ensure!(
-            (id.is_string() && id.as_str().is_some_and(|s| !s.is_empty() && s.len() <= 256))
-                || id.is_i64()
-                || id.is_u64(),
-            "invalid DeepSeek permission request ID"
-        );
-        ensure!(
-            self.seen.len() < MAX_INTERACTIONS && self.seen.insert(id.to_string()),
-            "duplicate or excessive DeepSeek permission requests"
-        );
-        ensure!(
-            self.pending.len() < MAX_PENDING,
-            "too many pending DeepSeek permissions"
-        );
-        let options = params["options"]
-            .as_array()
-            .context("DeepSeek permission options missing")?;
+    fn permission_selection(&self, options: &[Value]) -> Result<(String, String)> {
         ensure!(options.len() == 2, "DeepSeek permission options changed");
         let allow = options
             .iter()
@@ -853,125 +589,28 @@ impl Runner {
             allow.is_some() && reject.is_some(),
             "DeepSeek permissions must remain one-shot"
         );
-        let tool = params["toolCall"]["toolCallId"]
-            .as_str()
-            .context("DeepSeek permission tool ID missing")?;
-        let attribution = self.tools.get(tool).cloned();
-        let request_id = format!("deepseek-{}", uuid::Uuid::new_v4());
-        self.pending.insert(
-            request_id.clone(),
-            Pending {
-                id,
-                tool_id: tool.into(),
-                allow: "allow-once".into(),
-                reject: "reject-once".into(),
-            },
-        );
-        // Missing attribution, a disconnected UI or read-only mode can never
-        // grant authority. A read-only approval button cannot widen the policy.
-        if self.read_only || !self.controls_open || attribution.is_none() {
-            return self.resolve(&request_id, false).await;
-        }
-        let data = attribution.unwrap_or(Value::Null);
-        let description = format!(
-            "DeepSeek requests one-time permission for {}",
-            data["title"].as_str().unwrap_or("a tool")
-        );
-        emit(
-            &self.events,
-            NativeEvent::PermissionRequested {
-                request_id,
-                description,
-                data,
-            },
-        )
-        .await
+        Ok(("allow-once".into(), "reject-once".into()))
     }
-
-    async fn resolve(&mut self, request_id: &str, approve: bool) -> Result<()> {
-        let Some(pending) = self.pending.remove(request_id) else {
-            return Ok(());
-        };
-        let approved = approve && !self.read_only && self.tools.contains_key(&pending.tool_id);
-        let option = if approved {
-            pending.allow
-        } else {
-            pending.reject
-        };
-        self.write(json!({"jsonrpc":"2.0","id":pending.id,"result":{"outcome":{"outcome":"selected","optionId":option}}})).await?;
-        emit(
-            &self.events,
-            NativeEvent::PermissionResolved {
-                request_id: request_id.into(),
-                approved,
-            },
-        )
-        .await
+    fn passthrough_updates(&self) -> &'static [&'static str] {
+        &[]
     }
-
-    async fn shutdown(&mut self) -> Result<()> {
-        // Do not depend on the event consumer during cleanup.
-        for (_, pending) in self.pending.drain().collect::<Vec<_>>() {
-            self.write(json!({"jsonrpc":"2.0","id":pending.id,"result":{"outcome":{"outcome":"cancelled"}}})).await?;
+    fn stop_status(&self, reason: Option<&str>) -> Result<String> {
+        match reason {
+            Some("end_turn") => Ok("completed".into()),
+            Some("cancelled") => Ok("cancelled".into()),
+            Some("max_tokens" | "max_turn_requests") => {
+                bail!("DeepSeek stopped at an execution limit; task remains incomplete")
+            }
+            _ => bail!("DeepSeek ACP returned an unsupported stop reason"),
         }
-        if let Some(session) = self.result.session_id.clone() {
-            self.write(
-                json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":session}}),
-            )
-            .await?;
-            self.write(json!({"jsonrpc":"2.0","id":self.next_id,"method":"session/close","params":{"sessionId":session}})).await?;
-        }
-        self.stdin.shutdown().await?;
-        Ok(())
     }
-}
-
-fn model_value(model: &str) -> String {
-    json!([PROVIDER, model]).to_string()
 }
 
 #[cfg(test)]
+
 mod tests {
     use super::*;
-    use std::{
-        pin::Pin,
-        sync::{Arc, Mutex},
-        task::{Context as TaskContext, Poll},
-    };
-    const SESSION: &str = "bec6941c-a1ce-4cfe-bb28-c1c396f9f1e5";
 
-    #[derive(Clone, Default)]
-    struct Recorded(Arc<Mutex<Vec<u8>>>);
-    impl AsyncWrite for Recorded {
-        fn poll_write(
-            self: Pin<&mut Self>,
-            _: &mut TaskContext<'_>,
-            data: &[u8],
-        ) -> Poll<std::io::Result<usize>> {
-            self.0.lock().unwrap().extend_from_slice(data);
-            Poll::Ready(Ok(data.len()))
-        }
-        fn poll_flush(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
-        fn poll_shutdown(
-            self: Pin<&mut Self>,
-            _: &mut TaskContext<'_>,
-        ) -> Poll<std::io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
-    }
-    impl Recorded {
-        fn frames(&self) -> Vec<Value> {
-            self.0
-                .lock()
-                .unwrap()
-                .split(|b| *b == b'\n')
-                .filter(|v| !v.is_empty())
-                .map(|v| serde_json::from_slice(v).unwrap())
-                .collect()
-        }
-    }
     fn request(read_only: bool) -> NativeRequest {
         NativeRequest {
             app_id: "deepseek".into(),
@@ -983,43 +622,6 @@ mod tests {
             reasoning_effort: Some("low".into()),
             config_path: None,
         }
-    }
-    fn options(model: &str, effort: &str) -> Value {
-        json!([{"id":"model","currentValue":model_value(model)},{"id":"reasoning_effort","currentValue":effort}])
-    }
-    fn fixture(
-        req: &NativeRequest,
-    ) -> (
-        Runner,
-        Recorded,
-        mpsc::Sender<Result<Value>>,
-        mpsc::Sender<NativeControl>,
-        mpsc::Receiver<NativeEvent>,
-    ) {
-        let written = Recorded::default();
-        let (tx, rx) = mpsc::channel(32);
-        let (control_tx, control_rx) = mpsc::channel(32);
-        let (event_tx, event_rx) = mpsc::channel(32);
-        (
-            Runner::new(Box::new(written.clone()), rx, control_rx, event_tx, req),
-            written,
-            tx,
-            control_tx,
-            event_rx,
-        )
-    }
-    async fn handshake(tx: &mpsc::Sender<Result<Value>>, req: &NativeRequest) {
-        for value in [
-            json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentInfo":{"name":"deepseek-harness-acp","version":"0.0.1"},"agentCapabilities":{"sessionCapabilities":{"close":{}}}}}),
-            json!({"jsonrpc":"2.0","id":2,"result":{"sessionId":SESSION,"configOptions":options(&req.model,"high")}}),
-            json!({"jsonrpc":"2.0","id":3,"result":{"configOptions":options(&req.model,"high")}}),
-            json!({"jsonrpc":"2.0","id":4,"result":{"configOptions":options(&req.model,"low")}}),
-        ] {
-            tx.send(Ok(value)).await.unwrap();
-        }
-    }
-    fn permission(id: u64) -> Value {
-        json!({"jsonrpc":"2.0","id":id,"method":"session/request_permission","params":{"sessionId":SESSION,"toolCall":{"toolCallId":"call-1"},"options":[{"kind":"allow_once","optionId":"allow-once"},{"kind":"reject_once","optionId":"reject-once"}]}})
     }
 
     #[test]
@@ -1066,213 +668,80 @@ mod tests {
             assert_eq!(row(id)["disabled"], true);
         }
     }
+}
 
-    #[tokio::test]
-    async fn handshake_pins_provider_model_and_effort_before_prompt() {
-        let req = request(true);
-        let (mut runner, written, tx, _controls, mut events) = fixture(&req);
-        handshake(&tx, &req).await;
-        tx.send(Ok(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":SESSION,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"checked"}}}}))).await.unwrap();
-        tx.send(Ok(
-            json!({"jsonrpc":"2.0","id":5,"result":{"stopReason":"end_turn"}}),
-        ))
-        .await
-        .unwrap();
-        assert_eq!(runner.run(&req).await.unwrap(), "completed");
-        assert_eq!(runner.result.output, "checked");
-        let frames = written.frames();
-        assert_eq!(frames[1]["params"]["mcpServers"], json!([]));
-        assert_eq!(frames[2]["params"]["value"], model_value(&req.model));
-        assert_eq!(frames[3]["params"]["value"], "low");
-        assert_eq!(frames[4]["method"], "session/prompt");
-        let mut text = false;
-        while let Ok(event) = events.try_recv() {
-            if matches!(event, NativeEvent::TextDelta { .. }) {
-                text = true;
-            }
+mod recorded {
+    use super::super::read_frame;
+    use anyhow::Result;
+    use serde_json::Value;
+    use std::{
+        pin::Pin,
+        sync::{Arc, Mutex},
+        task::{Context as TaskContext, Poll},
+    };
+    use tokio::io::AsyncWrite;
+
+    #[derive(Clone, Default)]
+    pub(super) struct Recorded(pub Arc<Mutex<Vec<u8>>>);
+    impl AsyncWrite for Recorded {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut TaskContext<'_>,
+            data: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.0.lock().unwrap().extend_from_slice(data);
+            Poll::Ready(Ok(data.len()))
         }
-        assert!(text);
+        fn poll_flush(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _: &mut TaskContext<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
     }
-
-    #[tokio::test]
-    async fn config_drift_and_cross_session_updates_fail_closed() {
-        let req = request(true);
-        let (mut runner, _, _, _, _events) = fixture(&req);
-        runner.result.session_id = Some(SESSION.into());
-        let wrong_model = json!({"sessionUpdate":"config_option_update","configOptions":options("deepseek-flash","low")});
-        assert!(runner.update(&wrong_model).await.is_err());
-        assert!(runner.handle_server(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"another","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"wrong"}}}})).await.is_err());
-        assert!(runner.result.output.is_empty());
+    pub(super) async fn read_json_frames(
+        reader: &mut tokio::io::BufReader<impl tokio::io::AsyncRead + Unpin>,
+    ) -> Result<Vec<Value>> {
+        let mut frames = Vec::new();
+        let mut frame = Vec::new();
+        while read_frame(reader, &mut frame).await? {
+            frames.push(serde_json::from_slice(&frame)?);
+            frame.clear();
+        }
+        Ok(frames)
     }
+    pub(super) const SESSION: &str = "bec6941c-a1ce-4cfe-bb28-c1c396f9f1e5";
+}
 
-    #[tokio::test]
-    async fn readonly_never_grants_one_shot_and_rejects_replayed_request() {
-        let req = request(true);
-        let (mut runner, written, _, _, _events) = fixture(&req);
-        runner.result.session_id = Some(SESSION.into());
-        runner.tools.insert(
-            "call-1".into(),
-            json!({"title":"pwsh","rawInput":{"command":"write"}}),
-        );
-        runner.permission(permission(17)).await.unwrap();
-        assert_eq!(
-            written.frames()[0]["result"]["outcome"]["optionId"],
-            "reject-once"
-        );
-        assert!(runner.permission(permission(17)).await.is_err());
-        assert!(runner.pending.is_empty());
-    }
+#[cfg(test)]
+mod live_tests {
+    use super::recorded::{read_json_frames, Recorded, SESSION};
+    use super::*;
+    use anyhow::Result;
+    use serde_json::{json, Value};
+    use std::time::Duration;
+    use tokio::{io::BufReader, sync::mpsc};
 
-    #[tokio::test]
-    async fn grants_only_correlated_one_shot_and_ignores_reused_control() {
-        let req = request(false);
-        let (mut runner, written, _, _, mut events) = fixture(&req);
-        runner.result.session_id = Some(SESSION.into());
-        runner.tools.insert(
-            "call-1".into(),
-            json!({"title":"pwsh","rawInput":{"command":"build"}}),
-        );
-        runner.permission(permission(17)).await.unwrap();
-        let NativeEvent::PermissionRequested { request_id, .. } = events.recv().await.unwrap()
-        else {
-            panic!("missing permission event");
-        };
-        runner.resolve(&request_id, true).await.unwrap();
-        runner.resolve(&request_id, true).await.unwrap();
-        assert_eq!(written.frames().len(), 1);
-        assert_eq!(
-            written.frames()[0]["result"]["outcome"]["optionId"],
-            "allow-once"
-        );
-    }
-
-    #[tokio::test]
-    async fn missing_attribution_and_closed_control_channel_deny_permission() {
-        let req = request(false);
-        let (mut runner, written, _, _, _events) = fixture(&req);
-        runner.result.session_id = Some(SESSION.into());
-        runner.permission(permission(20)).await.unwrap();
-        runner.controls_open = false;
-        runner
-            .tools
-            .insert("call-1".into(), json!({"title":"pwsh"}));
-        runner.permission(permission(21)).await.unwrap();
-        let frames = written.frames();
-        assert_eq!(frames.len(), 2);
-        for frame in frames {
-            assert_eq!(frame["result"]["outcome"]["optionId"], "reject-once");
+    fn request() -> NativeRequest {
+        NativeRequest {
+            app_id: "deepseek".into(),
+            model: "deepseek-v4-pro".into(),
+            cwd: std::env::current_dir().unwrap(),
+            prompt: "Reply with the single word ok and stop.".into(),
+            read_only: true,
+            max_duration_secs: 120,
+            reasoning_effort: None,
+            config_path: None,
         }
     }
 
-    #[tokio::test]
-    async fn execution_limit_is_not_reported_as_completion() {
-        let req = request(true);
-        let (mut runner, _, tx, _controls, _events) = fixture(&req);
-        handshake(&tx, &req).await;
-        tx.send(Ok(
-            json!({"jsonrpc":"2.0","id":5,"result":{"stopReason":"max_tokens"}}),
-        ))
-        .await
-        .unwrap();
-        assert!(runner
-            .run(&req)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("incomplete"));
-    }
-
-    #[tokio::test]
-    async fn cleanup_cancels_permissions_then_closes_session() {
-        let req = request(false);
-        let (mut runner, written, _, _, _events) = fixture(&req);
-        runner.result.session_id = Some(SESSION.into());
-        runner.pending.insert(
-            "pending".into(),
-            Pending {
-                id: json!(71),
-                tool_id: "call-1".into(),
-                allow: "allow-once".into(),
-                reject: "reject-once".into(),
-            },
-        );
-        runner.shutdown().await.unwrap();
-        let frames = written.frames();
-        assert_eq!(frames[0]["result"]["outcome"]["outcome"], "cancelled");
-        assert_eq!(frames[1]["method"], "session/cancel");
-        assert_eq!(frames[2]["method"], "session/close");
-    }
-
-    #[tokio::test]
-    async fn tool_completion_revokes_stale_approval_and_rejects_duplicate_terminal() {
-        let (mut runner, written, _, _controls, _events) = fixture(&request(false));
-        runner.result.session_id = Some(SESSION.into());
-        runner.update(&json!({"sessionUpdate":"tool_call","toolCallId":"call-1","status":"in_progress","title":"pwsh"})).await.unwrap();
-        runner.permission(permission(33)).await.unwrap();
-        let key = runner.pending.keys().next().unwrap().clone();
-        let done =
-            json!({"sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"completed"});
-        runner.update(&done).await.unwrap();
-        runner.resolve(&key, true).await.unwrap();
-        assert!(runner.pending.is_empty());
-        assert!(runner.tools.is_empty());
-        assert_eq!(written.frames().len(), 1);
-        assert_eq!(
-            written.frames()[0]["result"]["outcome"]["optionId"],
-            "reject-once"
-        );
-        assert!(runner.update(&done).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn active_tools_prevent_successful_turn_completion() {
-        let req = request(false);
-        let (mut runner, _, tx, _controls, _events) = fixture(&req);
-        handshake(&tx, &req).await;
-        tx.send(Ok(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":SESSION,"update":{"sessionUpdate":"tool_call","toolCallId":"call-1","status":"in_progress","title":"pwsh"}}}))).await.unwrap();
-        tx.send(Ok(
-            json!({"jsonrpc":"2.0","id":5,"result":{"stopReason":"end_turn"}}),
-        ))
-        .await
-        .unwrap();
-        assert!(runner
-            .run(&req)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("active tools"));
-    }
-
-    #[tokio::test]
-    async fn context_usage_is_not_reported_as_billable_token_usage() {
-        let (mut runner, _, _, _, mut events) = fixture(&request(true));
-        runner
-            .update(&json!({"sessionUpdate":"usage_update","used":100,"size":128000}))
-            .await
-            .unwrap();
-        assert_eq!(
-            runner.result.usage.as_ref().unwrap()["kind"],
-            "context_occupancy"
-        );
-        assert!(matches!(
-            events.recv().await,
-            Some(NativeEvent::Usage { .. })
-        ));
-    }
-
-    #[tokio::test]
-    async fn tool_output_budget_is_bounded_too() {
-        let (mut runner, _, _, _, _events) = fixture(&request(true));
-        runner.streamed_bytes = MAX_OUTPUT_BYTES;
-        assert!(runner.update(&json!({"sessionUpdate":"tool_call_update","toolCallId":"a","status":"completed","content":[]})).await.is_err());
-    }
-
-    /// No prompt, no credentials and no paid provider request. Opt in with the
-    /// official exact-release CLI path; the test never inherits an API key.
     #[tokio::test]
     #[ignore = "requires WONDERLAND_DSH_CLI and the official exact npm release"]
     async fn official_keyless_initialize_configure_close() {
-        let req = request(true);
+        let req = request();
         let prepared = prepare().unwrap();
         let home = ManagedHome::create(&req).unwrap();
         verify_banner(&prepared, &home).await.unwrap();
@@ -1300,7 +769,14 @@ mod tests {
         });
         let (_control, controls) = mpsc::channel(8);
         let (events, _event_rx) = mpsc::channel(8);
-        let mut runner = Runner::new(Box::new(stdin), rx, controls, events, &req);
+        let mut runner = AcpRunner::new(
+            Box::new(DeepSeekDialect),
+            Box::new(stdin),
+            rx,
+            controls,
+            events,
+            &req,
+        );
         let result = tokio::time::timeout(Duration::from_secs(30), runner.initialize(&req)).await;
         let _ = tokio::time::timeout(Duration::from_secs(1), runner.shutdown()).await;
         drop(runner);

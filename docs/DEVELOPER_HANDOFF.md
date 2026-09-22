@@ -375,7 +375,7 @@ npm test --prefix packaging/npm/wonderland-cli
 
 **位置：** `src/team_service.rs`、`src/team_store.rs`、H02 的数据层；新增单独的路由策略模块比继续扩大 `team_service.rs` 更便于测试。
 
-本轮已先交付 `src/routing.rs` 的决策内核（现为 `routing-v2`）、可保存的 Team 路由约束、在线预览、保存约束预览和最近决策重放接口。它完成显式任务类别权重、精确榜单行/价格报价匹配、质量门槛、已知 token 成本预算过滤、确定性排序、候选排除理由和证据事件持久化；v2 起每个候选的榜单行必须由内嵌 `src/model_identity.rs` 注册表对该精确 (app, model, reasoning_effort) 元组 attestation，未映射、核验不在榜、attestation 条目不在当前快照、或调用方声明的榜单行与 attestation 不一致都会拒绝该候选，决策携带 `identity_mapping_version` 作为证据链。正式 Automatic 派工、账号/订阅身份核验和决策后原子预占仍未开启。
+已交付：`src/routing.rs` 决策内核（`routing-v2`）+ 预览/保存/重放三接口；**启动路径已接通**——Automatic 团队启动时走完整决策链（在线刷新、身份注册表、routing-v2 决策、`routing_decision`/`binding_applied` 事件、`team_store::set_planner` 把选中绑定写回为 planner/默认节点执行器），决策 selected 且无 `budget_usd` 即进入既有执行路径（与固定执行同等成本地位），决策 blocked 或刷新失败保持 Blocked 并携带候选级原因；带硬预算的派工仍等 H04。真实跨厂商实例与账号核验仍待做。本轮先期内容：它完成显式任务类别权重、精确榜单行/价格报价匹配、质量门槛、已知 token 成本预算过滤、确定性排序、候选排除理由和证据事件持久化；v2 起每个候选的榜单行必须由内嵌 `src/model_identity.rs` 注册表对该精确 (app, model, reasoning_effort) 元组 attestation，未映射、核验不在榜、attestation 条目不在当前快照、或调用方声明的榜单行与 attestation 不一致都会拒绝该候选，决策携带 `identity_mapping_version` 作为证据链。正式 Automatic 派工、账号/订阅身份核验和决策后原子预占仍未开启。
 
 1. 先定义每个节点所需能力、质量最低条件、候选模型/工具绑定及约束，不直接从总体榜单分数等同推断任务质量。
 2. 在每次开始计算模型权重时在线刷新两类来源，记录 `routing_epoch`、候选排除理由、评分输入和决策输出。
@@ -431,6 +431,8 @@ npm test --prefix packaging/npm/wonderland-cli
 **验收门槛：** 文件/网络/进程边界有真实系统测试；无可用隔离时拒绝；OAuth token 不进日志；服务重载不留下孤儿进程或旧授权。
 
 ### H09：官方工具升级与更多应用适配
+
+**已评估（2026-09-23，见 [anytool 接入评估](ANYTOOL-ADAPTER-ASSESSMENT-2026-09-23.md)）**：ACP 是 anytool 候选工具的收敛协议——MiMo（已接入，`src/native_executor/mimo.rs`，复用泛化的 `acp.rs` 框架）、grok-build（`xai-acp-lib`）、kimi-code（`kimi acp`）、minimax-code（tui ACP）全部可走 ACP 方言路径；ZCode 是自有 app-server 协议；opencode Go 主干无结构化入口暂不接。新增 ACP 工具 = 一个 dialect + 安装探测 + 注册。MiMo 的真实握手/推理与固定指纹待账号验证（H09 步骤 7–8）。
 
 **位置：** `src/desktop_bridge.rs`、`src/app_diagnostics.rs`、`src/native_executor/`、`anytool/`、`REFERENCES.md`。
 

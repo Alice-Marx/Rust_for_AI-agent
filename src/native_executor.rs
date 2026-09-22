@@ -9,8 +9,10 @@ use tokio::{
     sync::{mpsc, watch},
 };
 
+mod acp;
 mod claude;
 mod deepseek;
+mod mimo;
 
 /// Implemented host controls. These describe our adapter, not account access.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -31,6 +33,7 @@ pub fn capabilities(app_id: &str) -> NativeCapabilities {
         "kimi-cli" => Some("kimi-wire"),
         "claude" => Some("claude-stream-json"),
         "deepseek" => Some("deepseek-acp"),
+        "mimo" => Some("mimo-acp"),
         _ => None,
     };
     let managed = protocol.is_some();
@@ -38,7 +41,7 @@ pub fn capabilities(app_id: &str) -> NativeCapabilities {
         managed,
         read_only: managed,
         permissions: managed,
-        questions: managed && app_id != "deepseek",
+        questions: managed && !matches!(app_id, "deepseek" | "mimo"),
         reasoning_efforts: match app_id {
             "codex" => &[
                 "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
@@ -87,6 +90,9 @@ pub fn validate_binding(
         "kimi-cli" => model.starts_with("kimi-"),
         "claude" => model.starts_with("claude-"),
         "deepseek" => model.starts_with("deepseek-"),
+        // MiMo is a multi-provider harness: providerID/modelID with at least
+        // one variant segment allowed inside the modelID half.
+        "mimo" => model.split('/').count() >= 2 && model.split('/').count() <= 8,
         _ => false,
     };
     anyhow::ensure!(
@@ -226,6 +232,9 @@ pub async fn execute_with_control(
     }
     if req.app_id == "deepseek" {
         return deepseek::execute_with_control(req, events, cancel, controls).await;
+    }
+    if req.app_id == "mimo" {
+        return mimo::execute_with_control(req, events, cancel, controls).await;
     }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(req.max_duration_secs);
     if *cancel.borrow() {
@@ -401,6 +410,9 @@ fn validate_request(req: &NativeRequest) -> Result<()> {
     }
     if req.app_id == "deepseek" {
         deepseek::validate_request(&req)?;
+    }
+    if req.app_id == "mimo" {
+        mimo::validate_request(&req)?;
     }
     Ok(())
 }

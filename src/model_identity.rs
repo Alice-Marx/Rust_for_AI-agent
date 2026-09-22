@@ -481,7 +481,8 @@ mod tests {
         assert!(validate_value(duplicate).is_err());
 
         let mut unknown_app = embedded_value();
-        unknown_app["records"][0]["app_id"] = json!("mimo");
+        // mimo became a managed adapter; use a genuinely unmanaged id here.
+        unknown_app["records"][0]["app_id"] = json!("mcode");
         assert!(validate_value(unknown_app).is_err());
     }
 

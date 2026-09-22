@@ -247,27 +247,95 @@ async fn execute_team(
             _=cancelled.changed()=>bail!("team cancelled"),
             _=tokio::time::sleep_until(deadline)=>bail!("team deadline exceeded while refreshing routing evidence"),
         };
-        let evidence = json!({
-            "livebench_snapshot":bench.as_ref().ok().map(|s|s.id.clone()),
-            "livebench_error":bench.as_ref().err().map(short_error),
-            "price_snapshot":prices.as_ref().ok().map(|s|s.id.clone()),
-            "price_error":prices.as_ref().err().map(short_error),
-            "candidates":record.request.candidates,
-            "decision":"blocked",
-            "reason":"Official tool account billing channel, subscription quota and exact LiveBench model/effort mappings are not yet attested. API list prices cannot price native subscription usage. Choose fixed execution without a USD cap until these identities are verified."
-        });
-        service
+        active_check(&cancel, deadline)?;
+        let block_team = |reason: String| -> Result<()> {
+            service.teams.store.append_event(
+                id,
+                "routing_epoch",
+                json!({
+                    "livebench_snapshot":bench.as_ref().ok().map(|s|s.id.clone()),
+                    "livebench_error":bench.as_ref().err().map(short_error),
+                    "price_snapshot":prices.as_ref().ok().map(|s|s.id.clone()),
+                    "price_error":prices.as_ref().err().map(short_error),
+                    "candidates":record.request.candidates,
+                    "decision":"blocked",
+                    "reason":reason,
+                }),
+            )?;
+            service.teams.store.transition(
+                id,
+                &[TeamStatus::Running],
+                TeamStatus::Blocked,
+                Some(&reason),
+            )?;
+            Ok(())
+        };
+        // The full decision chain: fresh online evidence, identity attestation,
+        // exact quotes, then a routing-v2 decision whose candidates carry the
+        // exclusion reasons. Anything unverifiable blocks, exactly like the
+        // preview endpoint; the decision is never overridden here.
+        let decision = (|| -> Result<crate::routing::RoutingDecision> {
+            let bench = bench
+                .as_ref()
+                .map_err(|error| anyhow::anyhow!("{error:#}"))?;
+            let prices = prices
+                .as_ref()
+                .map_err(|error| anyhow::anyhow!("{error:#}"))?;
+            let policy = record.request.routing_policy.clone().ok_or_else(|| {
+                anyhow::anyhow!("automatic start requires a saved routing policy; save one through the routing preview endpoint first")
+            })?;
+            let identities = crate::model_identity::ModelIdentityRegistry::load()?;
+            let request = policy.into_request(&record.request.candidates);
+            Ok(crate::routing::decide(
+                &request,
+                bench,
+                prices,
+                &identities,
+            )?)
+        })();
+        let decision = match decision {
+            Ok(decision) => decision,
+            Err(error) => {
+                block_team(format!("routing decision could not be made: {error:#}"))?;
+                return Ok(());
+            }
+        };
+        service.teams.store.append_event(
+            id,
+            "routing_decision",
+            serde_json::to_value(&decision)?,
+        )?;
+        if decision.status != "selected" {
+            block_team(decision.explanation.clone())?;
+            return Ok(());
+        }
+        if record.request.budget_usd.is_some() {
+            block_team("a hard USD budget cannot be enforced on native tool accounts yet; the selected decision is recorded, but execution stays blocked until budget settlement closes (H04)".into())?;
+            return Ok(());
+        }
+        // Dispatch without a USD cap has the same cost posture as fixed
+        // execution (the user's own account runs the tool; Wonderland makes no
+        // budget promise), so a fully verified selection may start work.
+        let selected = decision
+            .selected
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("routing reported a selection without a binding"))?;
+        record = service
             .teams
             .store
-            .append_event(id, "routing_epoch", evidence.clone())?;
-        active_check(&cancel, deadline)?;
-        service.teams.store.transition(
+            .set_planner(id, record.revision, selected.binding.clone())?;
+        service.teams.store.append_event(
             id,
-            &[TeamStatus::Running],
-            TeamStatus::Blocked,
-            evidence["reason"].as_str(),
+            "binding_applied",
+            json!({
+                "planner": selected.binding,
+                "quality_score": decision.selected_quality_score,
+                "estimated_cost_usd": decision.selected_estimated_cost_usd,
+                "epoch_id": decision.epoch_id,
+                "identity_mapping_version": decision.identity_mapping_version,
+                "note":"selected binding applied as planner and default node executor"
+            }),
         )?;
-        return Ok(());
     }
     if record.request.budget_usd.is_some() {
         service.teams.store.transition(id,&[TeamStatus::Running],TeamStatus::Blocked,Some("The native tool's billing channel and spending limit cannot yet be verified. A USD budget cannot be enforced; choose fixed execution without a USD cap, or wait for billing attestation."))?;
