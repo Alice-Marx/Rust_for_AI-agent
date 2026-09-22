@@ -42,6 +42,10 @@ npm tarball 只有 5 个预期文件：许可证、README、package.json 和两�
 
 首次安装冒烟脚本误把“应用目录总数”当作“受管应用数”，断言未通过；按服务合同改为检查 managed 字段后通过，未因此改动产品代码。后续最终打包仅纳入完成的交接/验证文档，二进制保持以上身份。
 
+## npm registry 分发复核
+
+2026-09-22 补充 npm registry 分发验证：完成重新登录和本次发布二次验证，公开查询确认 0.11.0 与 `next=0.11.0`，`latest=0.7.0`。用全新缓存从 registry 下载，SHA-1、SHA-256 和 SHA-512 integrity 与本记录所述原包一致；随后从 registry 全局安装 `@next`，Windows PowerShell 的 `wonderland-cli.cmd --version` 返回 0.11.0。无模型调用，未改发布 tag 或安装包；最终结果见 [交付报告](DELIVERY-0.11.0.md)。
+
 ## 验证边界
 
 本轮没有新增真实模型调用。Kimi 官方订阅团队的 12 项真实验收见 [0.9.0 记录](VALIDATION-0.9.0.md)，Claude 官方 CLI 本地合成 turn 与 DeepSeek 无密钥握手见 [0.10.0 记录](VALIDATION-0.10.0.md)。没有真实双厂商协作、订阅额度与精确计费校验，未证明任何节省成本比例。

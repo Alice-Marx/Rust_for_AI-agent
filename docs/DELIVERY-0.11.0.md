@@ -2,6 +2,8 @@
 
 日期：2026-09-21。接手者先阅读 [开发者交接指南](DEVELOPER_HANDOFF.md)，再看 [逐文件职责](FILE_CATALOG-2026-09-21.md)和 [历史完成步骤与后续规划](PROJECT_PROGRESS-2026-09-21.md)。本报告记录这次“把未上传工作收尾并移交”的结果，不把长期计划写成已经交付。
 
+最终更新：2026-09-22，北京时间 12:53 完成 npm registry 下载与安装核验。GitHub 与 npm 两个发布渠道均已完成。
+
 ## 1. 本次收尾范围
 
 开始时，功能代码已经通过 PR #1 合入 main，本地和远端同为 `6383c9a`；不存在遗漏未推送的功能提交。尚未上传的是两份详细报告及文档入口，尚未分发的是已经进入源码的 0.11.0 配置持久化改动。
@@ -26,21 +28,29 @@
 | 对应 CI | [35613295180](https://github.com/Alice-Marx/Rust_for_AI-agent/actions/runs/35613295180)，success |
 | GitHub 0.11.0 | [v0.11.0 预览版](https://github.com/Alice-Marx/Rust_for_AI-agent/releases/tag/v0.11.0) 已公开发布，2026-09-21 23:16:11 北京时间；四个附件均 uploaded，远端 SHA-256 与本地一致 |
 | 发布 tag | `v0.11.0` 精确指向 `ef6e89595ed09186c65532e7ea3eaf769e095e1e`，已从 GitHub git ref API 核对 |
-| npm registry | 0.11.0 尚未发布；两次 web auth 会话均返回 404 失效，尚缺账号持有者完成本次二次验证。最后核对 `next=0.10.0`、`latest=0.7.0` |
+| npm registry | [rust-ai-wonderland-cli@0.11.0](https://www.npmjs.com/package/rust-ai-wonderland-cli/v/0.11.0) 已发布；2026-09-22 核对 `next=0.11.0`、`latest=0.7.0`，使用全新缓存下载与安装通过 |
 | 本机安装 | 0.11.0 当前用户安装成功，路径 `%LOCALAPPDATA%/Programs/Wonderland` |
 
 本报告写于产物构建之后，因此不包含在已经构建的 0.11.0 安装包中；最新发布结果由 GitHub main 上本报告提供。包内包含开发者交接指南、历史进度、文件目录和 0.11.0 验证说明。main 随后的交付结果提交仅更新文档，程序源码与发布 tag 相同，不移动既有 tag。
 
-npm registry 的登录仍有效（已通过 `npm whoami`），但登录不替代每次发布的二次验证。没有绕过认证或把旧版本的授权复用到本次发布。接手者应在账号持有者在线时重新执行 `npm publish ./dist/rust-ai-wonderland-cli-0.11.0.tgz --tag next --access public --auth-type=web`，完成新生成页面的验证后，核对 registry 的版本、SHA-1 和 dist-tags，再更新本报告。这里不保留已经失效的授权链接。
+历史认证过程：2026-09-21 登录有效，但两次发布 web auth 会话失效；2026-09-22 续办时 `npm whoami` 返回 E401，账号持有者重新登录并完成本次发布二次验证。npm 接受发布后短暂处于处理状态，待公开查询出现 0.11.0 后才进行下载和安装核验。认证步骤已完成，无需接手者再次发布相同版本，也没有绕过二次验证。
 
-CLI 现在可直接安装 GitHub 上同一份已校验 tarball，无须等 npm registry：
+CLI 优先从 npm registry 安装，可使用精确版本或预览频道：
+
+```powershell
+npm install -g rust-ai-wonderland-cli@0.11.0
+# 或：npm install -g rust-ai-wonderland-cli@next
+wonderland-cli.cmd --version
+```
+
+GitHub 上也保留同一份已校验 tarball：
 
 ```powershell
 npm install -g https://github.com/Alice-Marx/Rust_for_AI-agent/releases/download/v0.11.0/rust-ai-wonderland-cli-0.11.0.tgz
 wonderland-cli --version
 ```
 
-该方式使用 GitHub 附件，不表示 npm registry 已发布 0.11.0。后端仍需对应桌面安装包或源码构建。
+GitHub 附件域名 `release-assets.githubusercontent.com` 在部分网络会出现 DNS ENOTFOUND，此时使用 npm registry 安装。若在原开发机，也可从本地 `dist/rust-ai-wonderland-cli-0.11.0.tgz` 加 `--offline --no-audit --no-fund` 安装；本地包散列须与第 5 节一致。CLI 仍需要对应桌面安装包或源码构建提供后端。
 
 ## 3. 0.11.0 的实际功能变化
 
@@ -63,6 +73,7 @@ wonderland-cli --version
 | 安装后启动 | 隔离空数据、offline API provider、临时端口下后端/CLI 健康正常；四个受管执行器能力正确；桌面启动后观察 3 秒存活 |
 | 最终文件清单 | ZIP 45 个文件、npm 5 个文件；逐文件与 staging 比较；三个二进制与已测试 release 相同 |
 | GitHub CLI 附件复核 | 重新下载 npm tgz 与 SHA256SUMS，散列与本地一致；解包执行客户端报告 0.11.0 |
+| npm registry 复核（2026-09-22） | 公开版本/next 标签正确；全新缓存下载的 tarball SHA-1、SHA-256、SHA-512 integrity 与已测试包一致；从 registry 全局安装 @next，Windows PowerShell 报告 0.11.0 |
 | 模型调用 | 本轮 0 次；未消耗账号进行新推理测试 |
 
 桌面启动检查不是完整交互体验测试；Windows 安装成功不是 Linux/macOS 安装成功。既有 Kimi 订阅 Teams 真实项目 12 项测试仍见 [0.9.0 记录](VALIDATION-0.9.0.md)；Claude 的合成响应和 DeepSeek 的无密钥握手仍不算真实云端推理。
@@ -76,6 +87,8 @@ wonderland-cli --version
 | `rust-ai-wonderland-cli-0.11.0.tgz` | `b5a3b5e38e7d226b27a5d3c961fd7bce581d314d373c1486dcd203f2828eda04` |
 
 npm tarball 的 SHA-1 为 `2fd9e6ba84634179ead402f330c82dfef55dac73`。安装包未代码签名。二进制散列、迁移摘要与具体测试说明见 [VALIDATION-0.11.0.md](VALIDATION-0.11.0.md)。
+
+npm registry 返回的 integrity 为 `sha512-hghwYNOKIBO/Hv0+Aydy0ThH+H/8HC45YphHxjVwqlHZZvjChqysPx2OgufHq38gtgZB+3sKAh2tKNU0vdU1WQ==`，tarball 地址为 [registry.npmjs.org 下载](https://registry.npmjs.org/rust-ai-wonderland-cli/-/rust-ai-wonderland-cli-0.11.0.tgz)。仍是 5 个文件、36,979 字节解包内容，没有为补发布改包或移动 v0.11.0 tag。
 
 ## 6. 交给下一位开发者的阅读顺序
 
