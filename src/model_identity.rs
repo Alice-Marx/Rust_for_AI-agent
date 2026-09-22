@@ -329,7 +329,7 @@ mod tests {
     }
 
     fn full_snapshot() -> Snapshot {
-        snapshot_with(&["kimi-k2.7-code", "kimi-k3"])
+        snapshot_with(&["kimi-k2.7-code", "kimi-k3", "deepseek-v4-pro"])
     }
 
     fn validate_value(value: Value) -> Result<ModelIdentityRegistry> {
@@ -343,14 +343,56 @@ mod tests {
     #[test]
     fn embedded_registry_loads_and_seed_records_validate() {
         let registry = ModelIdentityRegistry::load().unwrap();
-        assert_eq!(registry.mapping_version, "1.0.0");
-        assert_eq!(registry.records.len(), 4);
+        assert_eq!(registry.mapping_version, "1.1.0");
+        assert_eq!(registry.records.len(), 6);
         let summary = registry.summary();
         assert_eq!(summary["status"], "loaded");
-        assert_eq!(summary["records_total"], 4);
-        assert_eq!(summary["attested"], 2);
-        assert_eq!(summary["not_listed"], 2);
-        assert_eq!(summary["mapping_version"], "1.0.0");
+        assert_eq!(summary["records_total"], 6);
+        assert_eq!(summary["attested"], 3);
+        assert_eq!(summary["not_listed"], 3);
+        assert_eq!(summary["mapping_version"], "1.1.0");
+    }
+
+    #[test]
+    fn deepseek_attestations_follow_the_same_exactness_rules() {
+        let registry = ModelIdentityRegistry::load().unwrap();
+        let snapshot = full_snapshot();
+        let resolution = registry.resolve("deepseek", "deepseek-v4-pro", None, &snapshot);
+        assert_eq!(resolution.outcome, MappingOutcome::Attested);
+        assert_eq!(
+            resolution.livebench_entry.as_deref(),
+            Some("deepseek-v4-pro")
+        );
+        // The version-suffixed row is a different leaderboard row and is never
+        // selected by the API name.
+        let with_version = registry.resolve(
+            "deepseek",
+            "deepseek-v4-pro-0813",
+            None,
+            &snapshot_with(&["deepseek-v4-pro", "deepseek-v4-pro-0813"]),
+        );
+        assert_eq!(with_version.outcome, MappingOutcome::Unknown);
+        // The canonical flash name is verified-not-listed, and retired legacy
+        // names stay unmapped even though byte-identical rows exist.
+        let flash = registry.resolve("deepseek", "deepseek-flash", None, &snapshot);
+        assert_eq!(flash.outcome, MappingOutcome::Unknown);
+        assert!(flash
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("不在 LiveBench 榜单"));
+        let retired = registry.resolve(
+            "deepseek",
+            "deepseek-v4-flash",
+            None,
+            &snapshot_with(&["deepseek-v4-flash"]),
+        );
+        assert_eq!(retired.outcome, MappingOutcome::Unknown);
+        assert!(retired
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("没有身份映射记录"));
     }
 
     #[test]
@@ -364,7 +406,7 @@ mod tests {
             Some("kimi-k2.7-code")
         );
         assert_eq!(resolution.reason, None);
-        assert_eq!(resolution.mapping_version, "1.0.0");
+        assert_eq!(resolution.mapping_version, "1.1.0");
         let resolution = registry.resolve("kimi-cli", "kimi-k3", None, &snapshot);
         assert_eq!(resolution.outcome, MappingOutcome::Attested);
         assert_eq!(resolution.livebench_entry.as_deref(), Some("kimi-k3"));
@@ -454,7 +496,7 @@ mod tests {
         assert!(validate_value(attested_without_evidence).is_err());
 
         let mut not_listed_with_entry = embedded_value();
-        not_listed_with_entry["records"][2]["livebench_entry"] = json!("kimi-k2.7-code");
+        not_listed_with_entry["records"][4]["livebench_entry"] = json!("kimi-k2.7-code");
         assert!(validate_value(not_listed_with_entry).is_err());
 
         let mut bad_status = embedded_value();

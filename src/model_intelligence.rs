@@ -1141,7 +1141,7 @@ mod tests {
         assert_eq!(status["auto_dispatch_ready"], false);
         assert_eq!(status["pricing"]["quotes"], json!([]));
         assert_eq!(status["identity_mapping"]["status"], "loaded");
-        assert_eq!(status["identity_mapping"]["mapping_version"], "1.0.0");
+        assert_eq!(status["identity_mapping"]["mapping_version"], "1.1.0");
     }
 
     #[tokio::test]
