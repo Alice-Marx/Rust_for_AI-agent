@@ -71,6 +71,14 @@ npm test --prefix packaging/npm/wonderland-cli
 cargo build --locked --bins
 ```
 
+如果 `git clone` 在 `github.com:443` 连接超时，但网络仍可访问 GitHub 的 `codeload.github.com`，可使用仓库内的 Git-first 获取脚本：
+
+```powershell
+.\tools\Get-UpstreamSource.ps1 -Destination F:\work\Rust_for_AI-agent
+```
+
+脚本先尝试浅克隆；失败时从官方 codeload 以完整、不可变提交 SHA 下载源码，并在目标目录写入 `.wonderland-source.json`，记录来源 URL、提交 SHA 与归档 SHA-256。默认 pin 为本交接基线 `24dbf549450c78681db231d9b5e6870f67202b41`；获取其他版本时必须显式传入完整 40 位 `-Commit`，不要以分支名替代。归档回退是可构建的源码副本，不含 Git 历史，不能用于 rebase、push 或依赖提交历史的工作；网络恢复后应重新普通克隆，再移植本地修改。
+
 主程序编译不依赖递归获取全部上游。只有研究或更新特定适配器时，才获取对应子模块，例如：
 
 ```powershell
