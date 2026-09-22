@@ -1,0 +1,50 @@
+{
+  "mapping_version": "1.0.0",
+  "created_at": "2026-09-22",
+  "records": [
+    {
+      "app_id": "kimi-cli",
+      "model": "kimi-k2.7-code",
+      "reasoning_effort": null,
+      "status": "attested",
+      "livebench_entry": "kimi-k2.7-code",
+      "evidence": [
+        "Official Kimi API pricing document (https://platform.moonshot.ai/docs/pricing/chat.md, fetched 2026-09-22) lists the exact model ID kimi-k2.7-code",
+        "LiveBench release 2026-06-25 (public/table_2026_06_25.csv, fetched 2026-09-22) contains a byte-identical row name kimi-k2.7-code"
+      ]
+    },
+    {
+      "app_id": "kimi-cli",
+      "model": "kimi-k3",
+      "reasoning_effort": null,
+      "status": "attested",
+      "livebench_entry": "kimi-k3",
+      "evidence": [
+        "Official Kimi API pricing document (https://platform.moonshot.ai/docs/pricing/chat.md, fetched 2026-09-22) lists the exact model ID kimi-k3",
+        "LiveBench release 2026-06-25 (public/table_2026_06_25.csv, fetched 2026-09-22) contains a byte-identical row name kimi-k3"
+      ]
+    },
+    {
+      "app_id": "kimi-cli",
+      "model": "kimi-k2.7-code-highspeed",
+      "reasoning_effort": null,
+      "status": "not_listed",
+      "livebench_entry": null,
+      "evidence": [
+        "Official Kimi API pricing document (https://platform.moonshot.ai/docs/pricing/chat.md, fetched 2026-09-22) lists the exact model ID kimi-k2.7-code-highspeed",
+        "LiveBench release 2026-06-25 (public/table_2026_06_25.csv, fetched 2026-09-22) contains no corresponding entry for this model"
+      ]
+    },
+    {
+      "app_id": "kimi-cli",
+      "model": "kimi-k2.6",
+      "reasoning_effort": null,
+      "status": "not_listed",
+      "livebench_entry": null,
+      "evidence": [
+        "Official Kimi API pricing document (https://platform.moonshot.ai/docs/pricing/chat.md, fetched 2026-09-22) lists the exact model ID kimi-k2.6",
+        "LiveBench release 2026-06-25 (public/table_2026_06_25.csv, fetched 2026-09-22) only contains a kimi-k2.6-thinking entry; the correspondence between that thinking variant and the API model ID is unverified, so no mapping is made"
+      ]
+    }
+  ]
+}

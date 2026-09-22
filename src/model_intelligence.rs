@@ -236,7 +236,7 @@ impl ModelIntelligence {
             "last_checked_at": state.persisted.last_checked_at,
             "cache_is_stale_after_failure": state.persisted.latest_failure.is_some(),
             "pricing": {"status":"unverified", "quotes":[], "official_sources":pricing_sources(), "note":"仅登记官方来源链接，尚未在线解析并核验适用渠道报价"},
-            "identity_mapping_status":"unverified",
+            "identity_mapping": crate::model_identity::ModelIdentityRegistry::load().map(|registry| registry.summary()).unwrap_or_else(|error| json!({"status":"error","reason":format!("{error:#}")})),
             "auto_dispatch_ready": false,
         })
     }
@@ -1140,6 +1140,8 @@ mod tests {
         assert_eq!(status["cache_is_stale_after_failure"], true);
         assert_eq!(status["auto_dispatch_ready"], false);
         assert_eq!(status["pricing"]["quotes"], json!([]));
+        assert_eq!(status["identity_mapping"]["status"], "loaded");
+        assert_eq!(status["identity_mapping"]["mapping_version"], "1.0.0");
     }
 
     #[tokio::test]
