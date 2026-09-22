@@ -14,7 +14,7 @@
 ## 验证结果
 
 - 单元测试：新增 2 项（Anthropic join/派生/退役/漂移负例；DeepSeek 峰谷/别名/漂移负例），pricing 套件 10 项全部通过。
-- 真实文档冒烟（`WONDERLAND_PRICING_FIXTURE_DIR` 指向 2026-09-22 经本机代理下载的官方原文）：OpenAI=37、Kimi=4、**Anthropic=14**（13 个在售显示名，Haiku 4.5 另有 alias 条目）、**DeepSeek=4**（2 个模型 + 2 个退役别名）。
+- 真实文档冒烟（`WONDERLAND_PRICING_FIXTURE_DIR` 指向 2026-09-22 经本机代理下载的官方原文）：OpenAI=37、Kimi=4、**Anthropic=14**（13 个在售显示名，Haiku 4.5 另有 alias 条目）、**DeepSeek=4**（2 个模型 + 2 个退役别名）。五份原文与 SHA-256 已存 `F:\everyAI\all\pricing-fixtures-20260922\`（仓库外，复验时把该目录设为 `WONDERLAND_PRICING_FIXTURE_DIR` 重跑被忽略的 `downloaded_official_sources_parse` 即可）。
 - 真实在线端到端（`HTTPS_PROXY` 指向本机代理运行被忽略的 live smoke 测试）：五个源全部 `verified`，一个 epoch 共 59 条报价，快照持久化并重开复验通过。本机直连 `platform.claude.com` 会被 Anthropic 区域屏蔽（307 到 app-unavailable-in-region），因此本机验证经代理完成；生产代码不变，未屏蔽网络下直接生效。
 - 全目标回归（含 `ui-snapshots`）：417 库测试 + 3 Rust CLI + 18 桌面 + 7 协议通过；`desktop_bridge`×4 / `desktop_terminal`×1 的失败在未改动基线上同样出现（本机 PowerShell CLIXML 污染与真实 kimi CLI 行为，见 H02 前一提交说明），与本轮无关。npm 14 项通过。`cargo fmt --all --check` 通过。
 
