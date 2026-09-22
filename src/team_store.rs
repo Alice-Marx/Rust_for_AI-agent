@@ -3,6 +3,7 @@
 //! Call `recover_interrupted` only after acquiring exclusive service ownership.
 //! All mutations are SQLite IMMEDIATE transactions; record revisions support optimistic
 //! plan editing, and state transitions / attempt claims prevent duplicate execution.
+use crate::routing::RoutingPolicy;
 use anyhow::{ensure, Context, Result};
 use chrono::{SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
@@ -86,6 +87,9 @@ pub struct TeamCreate {
     pub max_attempts: u32,
     #[serde(default)]
     pub budget_usd: Option<f64>,
+    /// Optional saved constraints for reproducible Automatic routing previews.
+    #[serde(default)]
+    pub routing_policy: Option<RoutingPolicy>,
 }
 fn default_parallel() -> usize {
     2
@@ -304,6 +308,12 @@ pub fn validate_create(request: &TeamCreate) -> Result<()> {
         ensure!(
             !request.candidates.is_empty(),
             "assigned or automatic routing requires explicit executor candidates"
+        );
+    }
+    if request.routing_policy.is_some() {
+        ensure!(
+            request.strategy == TeamStrategy::Automatic,
+            "routing_policy is only valid for automatic teams"
         );
     }
     ensure!(
@@ -735,6 +745,36 @@ impl TeamStore {
                 })
             })
             .collect()
+    }
+    pub fn latest_event(&self, id: &str, kind: &str) -> Result<Option<TeamEvent>> {
+        identifier(kind, "event kind", 80)?;
+        let conn = self.lock()?;
+        ensure!(read_record(&conn, id)?.is_some(), "team not found");
+        let row = conn
+            .query_row(
+                "SELECT seq,team_id,kind,data,created_at FROM team_events WHERE team_id=?1 AND kind=?2 ORDER BY seq DESC LIMIT 1",
+                params![id, kind],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        row.map(|(seq, team_id, kind, data, created_at)| {
+            Ok(TeamEvent {
+                seq,
+                team_id,
+                kind,
+                data: serde_json::from_str(&data)?,
+                created_at,
+            })
+        })
+        .transpose()
     }
     pub fn transition(
         &self,
@@ -1373,6 +1413,18 @@ mod tests {
             max_duration_secs: 3600,
             max_attempts: 2,
             budget_usd: None,
+            routing_policy: None,
+        }
+    }
+    fn routing_policy() -> crate::routing::RoutingPolicy {
+        crate::routing::RoutingPolicy {
+            required_categories: vec!["Coding".into()],
+            category_weights: std::collections::BTreeMap::new(),
+            minimum_quality: Some(80.0),
+            billing_channel: "api".into(),
+            estimated_input_tokens: Some(100_000),
+            estimated_output_tokens: Some(10_000),
+            budget_usd: Some(0.2),
         }
     }
     fn running(store: &TeamStore, request: TeamCreate) -> TeamRecord {
@@ -1441,6 +1493,52 @@ mod tests {
         assert_eq!(normalize_write_path("src\\module").unwrap(), "src/module");
         assert!(scopes_overlap(&["src".into()], &["src/a".into()]));
         assert!(!scopes_overlap(&["src/a".into()], &["src/ab".into()]));
+    }
+    #[test]
+    fn latest_event_replays_only_the_newest_event_of_requested_kind() {
+        let store = TeamStore::open_in_memory().unwrap();
+        let team = store.create(request()).unwrap();
+        store
+            .append_event(&team.id, "routing_preview", json!({"epoch":"old"}))
+            .unwrap();
+        let newest = store
+            .append_event(&team.id, "routing_preview", json!({"epoch":"new"}))
+            .unwrap();
+        store
+            .append_event(&team.id, "other", json!({"ignored":true}))
+            .unwrap();
+        let replay = store
+            .latest_event(&team.id, "routing_preview")
+            .unwrap()
+            .unwrap();
+        assert_eq!(replay.seq, newest.seq);
+        assert_eq!(replay.data["epoch"], "new");
+        assert!(store.latest_event(&team.id, "missing").unwrap().is_none());
+    }
+    #[test]
+    fn saved_routing_policy_survives_reopen_and_is_automatic_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("teams.db");
+        let policy = routing_policy();
+        let id;
+        {
+            let store = TeamStore::open(&path).unwrap();
+            let mut request = request();
+            request.strategy = TeamStrategy::Automatic;
+            request.candidates = vec![binding()];
+            request.routing_policy = Some(policy.clone());
+            id = store.create(request).unwrap().id;
+        }
+        {
+            let store = TeamStore::open(&path).unwrap();
+            assert_eq!(
+                store.get(&id).unwrap().unwrap().request.routing_policy,
+                Some(policy.clone())
+            );
+        }
+        let mut fixed = request();
+        fixed.routing_policy = Some(policy);
+        assert!(TeamStore::open_in_memory().unwrap().create(fixed).is_err());
     }
     #[test]
     fn requires_checks_and_bounded_finite_budget() {

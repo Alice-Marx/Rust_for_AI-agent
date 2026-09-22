@@ -852,7 +852,14 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/teams/{id}/events", get(events))
         .route("/api/v1/teams/{id}/start", post(start))
         .route("/api/v1/teams/{id}/cancel", post(cancel))
-        .route("/api/v1/teams/{id}/routing/preview", post(routing_preview))
+        .route(
+            "/api/v1/teams/{id}/routing/preview",
+            get(routing_preview_replay).post(routing_preview),
+        )
+        .route(
+            "/api/v1/teams/{id}/routing/preview/saved",
+            post(routing_preview_saved),
+        )
         .route("/api/v1/pricing", get(pricing))
         .route("/api/v1/pricing/refresh", post(refresh_pricing))
         .route("/api/v1/pricing/quote", get(quote))
@@ -901,18 +908,36 @@ async fn routing_preview(
     HttpPath(id): HttpPath<String>,
     Json(request): Json<RoutingPreviewRequest>,
 ) -> ApiResult {
+    routing_preview_with_policy(&s, &id, request).await
+}
+async fn routing_preview_saved(
+    State(s): State<AppState>,
+    HttpPath(id): HttpPath<String>,
+) -> ApiResult {
     let team = s
         .workbench
         .teams
         .store
         .get(&id)?
         .context("team not found")?;
+    let policy = team
+        .request
+        .routing_policy
+        .context("team has no saved routing policy")?;
+    routing_preview_with_policy(&s, &id, policy).await
+}
+async fn routing_preview_with_policy(
+    s: &AppState,
+    id: &str,
+    policy: RoutingPreviewRequest,
+) -> ApiResult {
+    let team = s.workbench.teams.store.get(id)?.context("team not found")?;
     if team.request.strategy != TeamStrategy::Automatic {
         return Err(
             anyhow::anyhow!("routing preview is only available for automatic teams").into(),
         );
     }
-    let routing_request = request.into_request(&team.request.candidates);
+    let routing_request = policy.into_request(&team.request.candidates);
     let (benchmark, pricing) = tokio::join!(
         s.workbench.intelligence.refresh(),
         s.workbench.pricing.refresh()
@@ -921,11 +946,27 @@ async fn routing_preview(
     let pricing = pricing.context("official pricing refresh failed")?;
     let decision = crate::routing::decide(&routing_request, &benchmark, &pricing)?;
     s.workbench.teams.store.append_event(
-        &id,
+        id,
         "routing_preview",
         serde_json::to_value(&decision)?,
     )?;
     Ok(Json(serde_json::to_value(decision)?))
+}
+async fn routing_preview_replay(
+    State(s): State<AppState>,
+    HttpPath(id): HttpPath<String>,
+) -> ApiResult {
+    let event = s
+        .workbench
+        .teams
+        .store
+        .latest_event(&id, "routing_preview")?
+        .context("no persisted routing preview for team")?;
+    Ok(Json(json!({
+        "status": "replayed",
+        "source_event_seq": event.seq,
+        "decision": event.data,
+    })))
 }
 #[derive(Deserialize)]
 struct Cursor {
@@ -1001,6 +1042,7 @@ mod tests {
             max_attempts: 2,
             max_duration_secs: 30,
             budget_usd: None,
+            routing_policy: None,
         }
     }
 

@@ -716,6 +716,7 @@ impl Teams {
             max_duration_secs: self.minutes * 60,
             max_attempts: self.attempts,
             budget_usd,
+            routing_policy: None,
         };
         if request.prompt.is_empty() {
             return Err("填写任务目标、精确模型 ID 和至少一项验证命令后即可创建。".into());

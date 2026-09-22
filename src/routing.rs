@@ -50,12 +50,12 @@ pub struct RoutingRequest {
     pub budget_usd: Option<f64>,
 }
 
-/// HTTP-facing input for a Team routing preview. Candidate bindings are read
-/// from the persisted Team record so a preview cannot evaluate models that the
-/// Team did not declare when it was created.
-#[derive(Clone, Debug, Deserialize)]
+/// Persistable routing constraints for a Team. Candidate bindings are always
+/// read from the Team record so a preview cannot evaluate models that the Team
+/// did not declare when it was created.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct RoutingPreviewRequest {
+pub struct RoutingPolicy {
     pub required_categories: Vec<String>,
     #[serde(default)]
     pub category_weights: BTreeMap<String, f64>,
@@ -71,7 +71,7 @@ pub struct RoutingPreviewRequest {
     pub budget_usd: Option<f64>,
 }
 
-impl RoutingPreviewRequest {
+impl RoutingPolicy {
     pub fn into_request(self, candidates: &[ExecutorBinding]) -> RoutingRequest {
         RoutingRequest {
             candidates: candidates
@@ -92,6 +92,9 @@ impl RoutingPreviewRequest {
         }
     }
 }
+
+/// HTTP-facing name retained for the explicit preview endpoint.
+pub type RoutingPreviewRequest = RoutingPolicy;
 
 fn default_billing_channel() -> String {
     "api".into()

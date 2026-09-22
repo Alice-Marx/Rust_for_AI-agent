@@ -47,5 +47,6 @@ Windows 全目标回归通过：404 项库测试、3 项 Rust CLI、18 项桌面
 - [CodexHost 技术参考](CODEX_HOST_REFERENCE.md)：来源、采用方式与能力边界。
 - [Claude 适配](CLAUDE_NATIVE_ADAPTER.md)、[DeepSeek 适配](DEEPSEEK_NATIVE_ADAPTER.md)：支持版本与协议证据。
 - [0.11.0 验证](VALIDATION-0.11.0.md)、[0.10.0 官方程序验证](VALIDATION-0.10.0.md)、[0.9.0 Kimi 实测](VALIDATION-0.9.0.md)：不同层次的测试和真实调用记录。
+- [2026-09-22 本轮工作报告](WORK-REPORT-2026-09-22.md)：路由约束持久化、在线预览与决策重放的完成项和剩余项。
 
 待完成的重点仍包括自动质量/成本选模、可执行预算限制、更多原生适配器、恢复/分叉、插件、定时任务、远程主机及 PR/网站面板。源码目录收录某工具不代表它已支持受管协作。
