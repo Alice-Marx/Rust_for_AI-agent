@@ -8,6 +8,8 @@ Work/Chat 推理档位在创建时保存，并与 Teams 共用固定配置。升
 
 接手开发请先阅读[开发者交接指南](docs/DEVELOPER_HANDOFF.md)，再查阅[逐文件职责](docs/FILE_CATALOG-2026-09-21.md)和[已完成步骤与后续规划](docs/PROJECT_PROGRESS-2026-09-21.md)。
 
+**本机最终交接入口：** [2026-09-22 最终交接包](docs/FINAL_HANDOFF-2026-09-22.md)。它指定唯一可交付副本、隔离相邻目录的未提交候选改动，并列出接手顺序、提交、验证结果和剩余工作。不要把 `F:/harness/Codex` 根目录整体打包或合并。
+
 本次分发结果见 [0.11.0 交付报告](docs/DELIVERY-0.11.0.md)。GitHub 安装包与 [npm registry 的 0.11.0](https://www.npmjs.com/package/rust-ai-wonderland-cli/v/0.11.0) 均已发布；`next=0.11.0`，`latest=0.7.0`。已从 registry 重新下载校验并安装验证。
 
 **Teams 已支持固定官方执行器自动拆解任务，以及逐节点指定模型的 DAG 执行。** 节点在独立 Git 工作区运行，受依赖、写入范围、并发数、重试和总时限约束；集成后运行用户预先指定的验证命令。桌面、Rust CLI、npm CLI 共用持久状态与权限流程。
