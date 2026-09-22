@@ -6,6 +6,7 @@
 //! record before dispatching a native workflow.
 
 use crate::{
+    model_identity::{MappingOutcome, ModelIdentityRegistry},
     model_intelligence::Snapshot,
     native_executor,
     pricing::{ModelQuote, PriceSnapshot},
@@ -16,7 +17,10 @@ use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const ROUTING_POLICY_VERSION: &str = "routing-v1";
+/// v2 requires every candidate's benchmark row to be attested by the embedded
+/// model-identity registry for the exact (app, model, reasoning effort) tuple;
+/// caller-declared rows that disagree with the attestation are rejected.
+pub const ROUTING_POLICY_VERSION: &str = "routing-v2";
 const MAX_TOKEN_ESTIMATE: u64 = 100_000_000;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -124,6 +128,10 @@ pub struct RoutingDecision {
     pub epoch_id: String,
     pub benchmark_snapshot_id: String,
     pub price_snapshot_id: String,
+    /// The model-identity mapping version whose attestations this decision
+    /// consumed; empty only for pre-v2 persisted decisions.
+    #[serde(default)]
+    pub identity_mapping_version: String,
     pub required_categories: Vec<String>,
     pub category_weights: BTreeMap<String, f64>,
     pub billing_channel: String,
@@ -137,12 +145,14 @@ pub struct RoutingDecision {
     pub explanation: String,
 }
 
-/// Decide from one immutable benchmark snapshot and one immutable price
-/// snapshot. The function is deterministic for the same inputs.
+/// Decide from one immutable benchmark snapshot, one immutable price snapshot,
+/// and the embedded model-identity registry. The function is deterministic for
+/// the same inputs.
 pub fn decide(
     request: &RoutingRequest,
     benchmark: &Snapshot,
     pricing: &PriceSnapshot,
+    identities: &ModelIdentityRegistry,
 ) -> Result<RoutingDecision> {
     validate_request(request)?;
     ensure!(
@@ -159,7 +169,9 @@ pub fn decide(
     let mut decisions = request
         .candidates
         .iter()
-        .map(|candidate| evaluate_candidate(request, candidate, &weights, benchmark, pricing))
+        .map(|candidate| {
+            evaluate_candidate(request, candidate, &weights, benchmark, pricing, identities)
+        })
         .collect::<Result<Vec<_>>>()?;
 
     decisions.sort_by(|left, right| candidate_key(left).cmp(&candidate_key(right)));
@@ -198,6 +210,7 @@ pub fn decide(
         epoch_id,
         benchmark_snapshot_id: benchmark.id.clone(),
         price_snapshot_id: pricing.id.clone(),
+        identity_mapping_version: identities.mapping_version().to_owned(),
         required_categories: request.required_categories.clone(),
         category_weights: weights,
         billing_channel: request.billing_channel.clone(),
@@ -324,6 +337,7 @@ fn evaluate_candidate(
     weights: &BTreeMap<String, f64>,
     benchmark: &Snapshot,
     pricing: &PriceSnapshot,
+    identities: &ModelIdentityRegistry,
 ) -> Result<CandidateDecision> {
     let mut reasons = Vec::new();
     let mut quality = None;
@@ -339,21 +353,42 @@ fn evaluate_candidate(
         reasons.push(format!("native binding rejected: {error:#}"));
     }
     if request.billing_channel != "api" {
-        reasons.push("only direct API billing has a verified token-price contract; subscription and proxy usage remain unknown".into());
+        reasons.push(crate::account_billing::non_api_block_reason(
+            &request.billing_channel,
+        ));
     }
 
-    match benchmark
-        .models
-        .iter()
-        .find(|model| model.model == candidate.benchmark_model)
-    {
-        Some(model) => match score_model(model, benchmark, weights) {
-            Ok(score) => quality = Some(score),
-            Err(error) => reasons.push(format!("benchmark evidence rejected: {error:#}")),
-        },
-        None => reasons.push(format!(
-            "exact benchmark model '{}' is not present; aliases and family scores are not substituted",
-            candidate.benchmark_model
+    // The benchmark row is not caller-asserted anymore: it must be attested by
+    // the embedded identity registry for this exact (app, model, effort) tuple,
+    // and the attested entry must still exist in this benchmark snapshot.
+    let resolution = identities.resolve(
+        &candidate.binding.app_id,
+        &candidate.binding.model,
+        candidate.binding.reasoning_effort.as_deref(),
+        benchmark,
+    );
+    match resolution.outcome {
+        MappingOutcome::Attested => {
+            let entry = resolution.livebench_entry.clone().unwrap_or_default();
+            if candidate.benchmark_model != entry {
+                reasons.push(format!(
+                    "declared benchmark model '{}' disagrees with the identity-attested LiveBench entry '{entry}'",
+                    candidate.benchmark_model
+                ));
+            }
+            match benchmark.models.iter().find(|model| model.model == entry) {
+                Some(model) => match score_model(model, benchmark, weights) {
+                    Ok(score) => quality = Some(score),
+                    Err(error) => reasons.push(format!("benchmark evidence rejected: {error:#}")),
+                },
+                None => reasons.push(format!(
+                    "attested LiveBench entry '{entry}' is not present in this snapshot"
+                )),
+            }
+        }
+        MappingOutcome::Unknown => reasons.push(format!(
+            "model identity is not attested: {}",
+            resolution.reason.as_deref().unwrap_or("no reason recorded")
         )),
     }
 
@@ -592,6 +627,38 @@ mod tests {
         }
     }
 
+    fn identities() -> crate::model_identity::ModelIdentityRegistry {
+        crate::model_identity::ModelIdentityRegistry::from_json(
+            r#"{
+                "mapping_version": "1.9.0",
+                "created_at": "2026-09-23",
+                "records": [
+                    {
+                        "app_id": "codex",
+                        "model": "gpt-4o",
+                        "status": "attested",
+                        "livebench_entry": "gpt-4o",
+                        "evidence": ["synthetic test record"]
+                    },
+                    {
+                        "app_id": "kimi-cli",
+                        "model": "kimi-for-coding",
+                        "status": "attested",
+                        "livebench_entry": "kimi-for-coding",
+                        "evidence": ["synthetic test record"]
+                    },
+                    {
+                        "app_id": "kimi-cli",
+                        "model": "kimi-not-listed",
+                        "status": "not_listed",
+                        "evidence": ["synthetic test record"]
+                    }
+                ]
+            }"#,
+        )
+        .unwrap()
+    }
+
     fn request() -> RoutingRequest {
         RoutingRequest {
             candidates: vec![
@@ -610,19 +677,97 @@ mod tests {
 
     #[test]
     fn chooses_highest_quality_and_keeps_evidence_ids() {
-        let decision = decide(&request(), &benchmark(), &prices()).unwrap();
+        let decision = decide(&request(), &benchmark(), &prices(), &identities()).unwrap();
         assert_eq!(decision.status, "selected");
         assert_eq!(decision.selected.unwrap().binding.app_id, "codex");
         assert_eq!(decision.epoch_id, "bench-1:price-1");
         assert_eq!(decision.selected_quality_score, Some(92.0));
         assert_eq!(decision.candidates.len(), 2);
+        assert_eq!(decision.policy_version, "routing-v2");
+        assert_eq!(decision.identity_mapping_version, "1.9.0");
+    }
+
+    #[test]
+    fn unmapped_identity_blocks_only_that_candidate() {
+        let mut request = request();
+        request.candidates[0] = candidate("codex", "gpt-4o-new");
+        let mut pricing = prices();
+        pricing.quotes.push(quote("gpt-4o-new", "codex", 1.0, 2.0));
+        let decision = decide(&request, &benchmark(), &pricing, &identities()).unwrap();
+        assert_eq!(decision.status, "selected");
+        let unmapped = decision
+            .candidates
+            .iter()
+            .find(|candidate| candidate.candidate.binding.model == "gpt-4o-new")
+            .unwrap();
+        assert_eq!(unmapped.status, CandidateStatus::Rejected);
+        assert!(unmapped
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("model identity is not attested")));
+        assert_eq!(decision.selected.unwrap().binding.app_id, "kimi-cli");
+    }
+
+    #[test]
+    fn not_listed_models_never_inherit_a_score() {
+        let mut request = request();
+        request.candidates[1] = candidate("kimi-cli", "kimi-not-listed");
+        let mut pricing = prices();
+        pricing
+            .quotes
+            .push(quote("kimi-not-listed", "kimi-cli", 0.5, 1.0));
+        let decision = decide(&request, &benchmark(), &pricing, &identities()).unwrap();
+        let not_listed = decision
+            .candidates
+            .iter()
+            .find(|candidate| candidate.candidate.binding.model == "kimi-not-listed")
+            .unwrap();
+        assert_eq!(not_listed.status, CandidateStatus::Rejected);
+        assert!(not_listed.quality_score.is_none());
+        assert!(not_listed
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("不在 LiveBench 榜单")));
+    }
+
+    #[test]
+    fn declared_benchmark_row_must_match_the_attestation() {
+        let mut request = request();
+        request.candidates[0].benchmark_model = "kimi-for-coding".into();
+        let decision = decide(&request, &benchmark(), &prices(), &identities()).unwrap();
+        let mismatched = decision
+            .candidates
+            .iter()
+            .find(|candidate| candidate.candidate.binding.app_id == "codex")
+            .unwrap();
+        assert_eq!(mismatched.status, CandidateStatus::Rejected);
+        assert!(mismatched.reasons.iter().any(|reason| reason
+            .contains("disagrees with the identity-attested LiveBench entry 'gpt-4o'")));
+        assert_eq!(decision.selected.unwrap().binding.app_id, "kimi-cli");
+    }
+
+    #[test]
+    fn stale_attested_entry_blocks_the_candidate() {
+        let mut snapshot = benchmark();
+        snapshot.models.truncate(1);
+        let decision = decide(&request(), &snapshot, &prices(), &identities()).unwrap();
+        let stale = decision
+            .candidates
+            .iter()
+            .find(|candidate| candidate.candidate.binding.app_id == "kimi-cli")
+            .unwrap();
+        assert_eq!(stale.status, CandidateStatus::Rejected);
+        assert!(stale
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("model identity is not attested")));
     }
 
     #[test]
     fn missing_category_score_blocks_only_that_candidate() {
         let mut snapshot = benchmark();
         snapshot.models[0].scores.clear();
-        let decision = decide(&request(), &snapshot, &prices()).unwrap();
+        let decision = decide(&request(), &snapshot, &prices(), &identities()).unwrap();
         assert_eq!(decision.status, "selected");
         let codex = decision
             .candidates
@@ -641,7 +786,7 @@ mod tests {
     fn subscription_pricing_never_inherits_api_quotes() {
         let mut request = request();
         request.billing_channel = "subscription".into();
-        let decision = decide(&request, &benchmark(), &prices()).unwrap();
+        let decision = decide(&request, &benchmark(), &prices(), &identities()).unwrap();
         assert_eq!(decision.status, "blocked");
         assert!(decision.selected.is_none());
         assert!(decision.candidates.iter().all(|candidate| candidate
@@ -655,7 +800,7 @@ mod tests {
         let mut request = request();
         request.budget_usd = Some(1.0);
         request.estimated_output_tokens = None;
-        let error = decide(&request, &benchmark(), &prices()).unwrap_err();
+        let error = decide(&request, &benchmark(), &prices(), &identities()).unwrap_err();
         assert!(error.to_string().contains("both input and output"));
     }
 
@@ -664,7 +809,7 @@ mod tests {
         let mut pricing = prices();
         let tier = pricing.quotes[0].tiers[0].clone();
         pricing.quotes[0].tiers.push(tier);
-        let decision = decide(&request(), &benchmark(), &pricing).unwrap();
+        let decision = decide(&request(), &benchmark(), &pricing, &identities()).unwrap();
         let codex = decision
             .candidates
             .iter()

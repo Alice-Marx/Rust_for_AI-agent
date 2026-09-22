@@ -198,7 +198,7 @@ Get-Item -LiteralPath $wonderlandBackupPath
 | `/api/v1/intelligence`、`/refresh` | LiveBench 证据状态/在线刷新 |
 | `/api/v1/pricing`、`/refresh`、`/quote` | 价格状态、在线刷新、精确报价；路由定义在 `team_service.rs`，数据与解析在 `pricing.rs` |
 
-路由预览约束接收显式 LiveBench 类别、可选类别权重、精确计费渠道和 token 估算；创建 Team 时可把同一对象放入可选的 `routing_policy`，候选绑定仍从已保存的 Automatic 团队读取。在线预览会在同一轮刷新榜单与价格，返回 `routing-v1` 决策、候选排除原因、质量分、估算成本以及 `benchmark_snapshot_id:price_snapshot_id` epoch，并将完整决策（其中包含约束）写入 `routing_preview` 事件。`/saved` 会读取 Team 配置后重新核验在线证据；无请求体的 GET 只读取最新事件，不刷新网络，也不代表新的派工授权。它不会启动模型，也不会解除 Automatic 当前的正式阻塞；订阅、代理、缺失榜单行、歧义价格阶梯和未解决价格条件仍会被排除。
+路由预览约束接收显式 LiveBench 类别、可选类别权重、精确计费渠道和 token 估算；创建 Team 时可把同一对象放入可选的 `routing_policy`，候选绑定仍从已保存的 Automatic 团队读取。在线预览会在同一轮刷新榜单与价格并加载内嵌身份注册表，返回 `routing-v2` 决策、候选排除原因、质量分、估算成本、`benchmark_snapshot_id:price_snapshot_id` epoch 与 `identity_mapping_version`，并将完整决策（其中包含约束）写入 `routing_preview` 事件。`/saved` 会读取 Team 配置后重新核验在线证据；无请求体的 GET 只读取最新事件，不刷新网络，也不代表新的派工授权。它不会启动模型，也不会解除 Automatic 当前的正式阻塞；订阅、代理、缺失榜单行、歧义价格阶梯和未解决价格条件仍会被排除。
 
 工作流创建的示意 JSON；`cwd` 必须改成服务机器上实际存在的绝对目录，model 必须是账号支持的精确 ID：
 
@@ -375,7 +375,7 @@ npm test --prefix packaging/npm/wonderland-cli
 
 **位置：** `src/team_service.rs`、`src/team_store.rs`、H02 的数据层；新增单独的路由策略模块比继续扩大 `team_service.rs` 更便于测试。
 
-本轮已先交付 `src/routing.rs` 的 `routing-v1` 决策内核、可保存的 Team 路由约束、在线预览、保存约束预览和最近决策重放接口。它完成显式任务类别权重、精确榜单行/价格报价匹配、质量门槛、已知 token 成本预算过滤、确定性排序、候选排除理由和证据事件持久化；正式 Automatic 派工、账号/订阅身份核验和决策后原子预占仍未开启。
+本轮已先交付 `src/routing.rs` 的决策内核（现为 `routing-v2`）、可保存的 Team 路由约束、在线预览、保存约束预览和最近决策重放接口。它完成显式任务类别权重、精确榜单行/价格报价匹配、质量门槛、已知 token 成本预算过滤、确定性排序、候选排除理由和证据事件持久化；v2 起每个候选的榜单行必须由内嵌 `src/model_identity.rs` 注册表对该精确 (app, model, reasoning_effort) 元组 attestation，未映射、核验不在榜、attestation 条目不在当前快照、或调用方声明的榜单行与 attestation 不一致都会拒绝该候选，决策携带 `identity_mapping_version` 作为证据链。正式 Automatic 派工、账号/订阅身份核验和决策后原子预占仍未开启。
 
 1. 先定义每个节点所需能力、质量最低条件、候选模型/工具绑定及约束，不直接从总体榜单分数等同推断任务质量。
 2. 在每次开始计算模型权重时在线刷新两类来源，记录 `routing_epoch`、候选排除理由、评分输入和决策输出。

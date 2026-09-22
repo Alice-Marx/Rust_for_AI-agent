@@ -944,7 +944,9 @@ async fn routing_preview_with_policy(
     );
     let benchmark = benchmark.context("LiveBench refresh failed")?;
     let pricing = pricing.context("official pricing refresh failed")?;
-    let decision = crate::routing::decide(&routing_request, &benchmark, &pricing)?;
+    let identities = crate::model_identity::ModelIdentityRegistry::load()
+        .context("model identity registry failed to load")?;
+    let decision = crate::routing::decide(&routing_request, &benchmark, &pricing, &identities)?;
     s.workbench.teams.store.append_event(
         id,
         "routing_preview",

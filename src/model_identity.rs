@@ -97,6 +97,20 @@ impl ModelIdentityRegistry {
         validate_mapping(raw)
     }
 
+    /// The mapping version that attests every resolution this registry makes;
+    /// consumers persist it with their decisions as an evidence trail.
+    pub fn mapping_version(&self) -> &str {
+        &self.mapping_version
+    }
+
+    /// Test-only constructor from arbitrary JSON so downstream modules can
+    /// exercise their identity-consumption logic against synthetic records.
+    #[cfg(test)]
+    pub(crate) fn from_json(json: &str) -> Result<Self> {
+        let raw: RawMapping = serde_json::from_str(json).context("测试映射数据不是有效 JSON")?;
+        validate_mapping(raw)
+    }
+
     /// Resolve an exact (app, model, reasoning effort) tuple against a LiveBench
     /// snapshot. Aliases, prefixes and fuzzy matches are never substituted.
     pub fn resolve(
