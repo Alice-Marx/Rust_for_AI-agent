@@ -6,7 +6,7 @@ Wonderland 是支持多模型 API 与订阅账号的 Rust 编码工作区，提�
 
 Work/Chat 推理档位在创建时保存，并与 Teams 共用固定配置。升级会把工作流数据库迁移到 v2；旧 0.10.0 无法读取迁移后的库，升级前应停止服务并备份完整数据目录。仓库布局、开发交接和迁移说明见[开发文档索引](docs/README.md)。
 
-接手开发请先阅读[开发者交接指南](docs/DEVELOPER_HANDOFF.md)与[文档指南](docs/DOCUMENT-GUIDE-2026-09-23.md)；当前进度见[2026-09-23 阶段工作报告](docs/STAGE-REPORT-2026-09-23.md)，未完成工作的推进路线见[后续路线图](docs/ROADMAP-2026-09-23.md)。
+接手开发请先阅读[开发者交接指南](docs/DEVELOPER_HANDOFF.md)与[文档指南](docs/DOCUMENT-GUIDE-2026-09-23.md)；项目级汇总见[总项目任务报告](docs/PROJECT-TASK-REPORT-2026-09-23.md)，阶段明细见[2026-09-23 阶段工作报告](docs/STAGE-REPORT-2026-09-23.md)，未完成工作的推进路线见[后续路线图](docs/ROADMAP-2026-09-23.md)。
 
 **历史交接归档：** [2026-09-22 最终交接包](docs/FINAL_HANDOFF-2026-09-22.md)记录了当时工作区的隔离与交付结论（其中 model_identity 候选已在 `85a0cd2` 评审入库）。当前开发工作区已迁移至 `F:/everyAI/all/Wonderland`（即本仓库检出）；旧 `F:/harness/Codex` 根目录仍不要整体打包或合并。
 
