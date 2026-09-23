@@ -10,7 +10,7 @@ Work/Chat 推理档位在创建时保存，并与 Teams 共用固定配置。升
 
 **历史交接归档：** [2026-09-22 最终交接包](docs/FINAL_HANDOFF-2026-09-22.md)记录了当时工作区的隔离与交付结论（其中 model_identity 候选已在 `85a0cd2` 评审入库）。当前开发工作区已迁移至 `F:/everyAI/all/Wonderland`（即本仓库检出）；旧 `F:/harness/Codex` 根目录仍不要整体打包或合并。
 
-0.11.0 的分发结果见 [0.11.0 交付报告](docs/DELIVERY-0.11.0.md)。当前 0.11.1 Windows 安装包在本地构建与校验后交付；npm CLI [0.11.1](https://www.npmjs.com/package/rust-ai-wonderland-cli/v/0.11.1) 已更新到预览频道 `next`，稳定频道 `latest` 保持 0.7.0。registry tarball 已重新下载并与发布前 SHA-256 一致。
+0.11.0 的分发结果见 [0.11.0 交付报告](docs/DELIVERY-0.11.0.md)。当前 [0.11.1 GitHub Release](https://github.com/Alice-Marx/Rust_for_AI-agent/releases/tag/v0.11.1) 已上传 Windows 安装器、便携 ZIP、npm tarball 和 SHA-256 清单；npm CLI [0.11.1](https://www.npmjs.com/package/rust-ai-wonderland-cli/v/0.11.1) 位于预览频道 `next`，稳定频道 `latest` 保持 0.7.0。远端 release 清单与本地 SHA-256 已核对。
 
 **Teams 已支持固定官方执行器自动拆解任务，以及逐节点指定模型的 DAG 执行。** 节点在独立 Git 工作区运行，受依赖、写入范围、并发数、重试和总时限约束；集成后运行用户预先指定的验证命令。桌面、Rust CLI、npm CLI 共用持久状态与权限流程。
 
@@ -42,7 +42,7 @@ Work/Chat 推理档位在创建时保存，并与 Teams 共用固定配置。升
 - `Wonderland-0.11.1-windows-x64.zip`：便携包，解压后运行 `Start-Wonderland.ps1`。
 - `SHA256SUMS.txt`：产物 SHA-256 校验值。
 
-[GitHub Releases](https://github.com/Alice-Marx/Rust_for_AI-agent/releases) 中的 0.11.0 资产是历史发布；本地 0.11.1 安装包尚未上传为 GitHub Release。
+[GitHub Releases](https://github.com/Alice-Marx/Rust_for_AI-agent/releases) 中的 [v0.11.1](https://github.com/Alice-Marx/Rust_for_AI-agent/releases/tag/v0.11.1) 含当前安装器、便携 ZIP、npm tarball 和 `SHA256SUMS.txt`；0.11.0 资产保留为历史发布。
 
 开始菜单的 Wonderland 快捷方式启动本地服务和桌面。默认服务地址为 `http://127.0.0.1:8080`，程序安装到 `%LOCALAPPDATA%\Programs\Wonderland`，数据保存在 `%LOCALAPPDATA%\WonderlandData`。升级和卸载保留用户数据。安装程序未进行代码签名。
 

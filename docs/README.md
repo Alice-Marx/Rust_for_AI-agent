@@ -1,8 +1,8 @@
 # 开发文档与仓库结构
 
-当前 Wonderland 源码与本地 Windows 发行候选版本为 0.11.1；[0.11.0](RELEASE-0.11.0.md) 保留 Work/Chat 推理配置持久化和开发交接的历史发布说明。npm CLI [0.11.1](https://www.npmjs.com/package/rust-ai-wonderland-cli/v/0.11.1) 已发布到 `next`，与 0.11.1 后端配套；稳定频道 `latest` 保持 0.7.0。历史发布记录按对应版本理解。
+当前 Wonderland 源码与 Windows 发行版本为 0.11.1；[GitHub v0.11.1 Release](https://github.com/Alice-Marx/Rust_for_AI-agent/releases/tag/v0.11.1) 含安装器、便携 ZIP、npm tarball 和 SHA-256 清单。[0.11.0](RELEASE-0.11.0.md) 保留 Work/Chat 推理配置持久化和开发交接的历史发布说明。npm CLI [0.11.1](https://www.npmjs.com/package/rust-ai-wonderland-cli/v/0.11.1) 已发布到 `next`，与 0.11.1 后端配套；稳定频道 `latest` 保持 0.7.0。历史发布记录按对应版本理解。
 
-**0.11.0 的最终远端核验见 [0.11.0 交付报告](DELIVERY-0.11.0.md)。** 当前 0.11.1 本地安装包的构建、校验、静默安装、离线后端健康检查和卸载结果见 [Windows 打包报告](WORK-REPORT-2026-09-23-WINDOWS-PACKAGE.md)。
+**0.11.0 的最终远端核验见 [0.11.0 交付报告](DELIVERY-0.11.0.md)。** 当前 0.11.1 的构建、校验、静默安装、离线后端健康检查、卸载、GitHub Release 资产和远端清单核验结果见 [Windows 打包报告](WORK-REPORT-2026-09-23-WINDOWS-PACKAGE.md)。
 
 ## 代码位置
 

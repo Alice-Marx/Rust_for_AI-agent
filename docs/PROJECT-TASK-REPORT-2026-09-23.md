@@ -56,7 +56,8 @@ API Agent 与 SSE、Rust egui 桌面、Rust/npm 双 CLI、官方工具 Work/Chat
 16. **H07 一次性定时草稿**：计划、触发审计、Draft 和 `scheduled_from` 事件迁入同一个 `workflows.sqlite` v3 事务；启动补触发/轮询只创建 Draft，HTTP 和 Rust CLI 提供管理接口。离线重启冒烟确认不触发模型。详见 [H07 定时草稿报告](WORK-REPORT-2026-09-23-H07-SCHEDULED-DRAFTS.md)。
 17. **H08 MCP discovery 加固**：tools/resources/prompts/resource templates 采用有界分页；重复/无限 cursor 和公开名称碰撞失败关闭。详见 [H08 MCP discovery 报告](WORK-REPORT-2026-09-23-H08-MCP-DISCOVERY.md)。
 18. **Windows 0.11.1 安装包交付**：release 二进制、Inno Setup 安装器、便携 ZIP 和本地 npm tarball 已构建；SHA-256、文件清单、独立静默安装、安装后 CLI、离线后端健康检查和静默卸载均已验证。安装包不含账号、OAuth token 或测试数据，交给你进行真实登录和窗口验收。详见 [Windows 打包报告](WORK-REPORT-2026-09-23-WINDOWS-PACKAGE.md)。
-19. **main 交付推送**：本轮三个本地提交已推送到 GitHub `main`，远端从 `8db113f` 更新到 `69f466a`；该提交包含 H05–H08、版本 0.11.1、报告和 Windows 打包配置。
+19. **main 交付推送**：本轮本地提交已推送到 GitHub `main`，远端从 `8db113f` 更新到 `c8882d3`；`69f466a` 包含 H05–H08、版本 0.11.1、报告和 Windows 打包配置，`c8882d3` 记录远端交付与 registry 核验。
+20. **GitHub v0.11.1 发布**：已创建 [v0.11.1 Release](https://github.com/Alice-Marx/Rust_for_AI-agent/releases/tag/v0.11.1)，目标提交 `c8882d3`；安装器、便携 ZIP、npm tarball 和 `SHA256SUMS.txt` 均处于 uploaded 状态，下载的远端清单与本地清单逐字一致。
 
 ### 本轮报告对账
 
@@ -142,7 +143,8 @@ API Agent 与 SSE、Rust egui 桌面、Rust/npm 双 CLI、官方工具 Work/Chat
 | `npm view rust-ai-wonderland-cli@0.11.1 version dist-tags --json` | 复核通过；远端版本为 0.11.1，`next=0.11.1`、`latest=0.7.0` |
 | `packaging/windows/build-windows-package.ps1` | 通过；生成 0.11.1 release 二进制、Inno Setup 安装器、便携 ZIP、本地 npm tarball 和 SHA-256 清单 |
 | 独立静默安装、安装后 CLI、离线 `GET /health`、静默卸载 | 通过；三项主程序版本均为 0.11.1，离线服务返回 `status=ok`，临时安装目录已删除 |
-| `git push origin main` | 通过；GitHub `main` 已更新至 `69f466a` |
+| `git push origin main` | 通过；GitHub `main` 已更新至 `c8882d3` |
+| `gh release view v0.11.1` + 下载远端 `SHA256SUMS.txt` | 通过；Release 非 draft、非 prerelease，四个资产 uploaded，目标为 `c8882d3`，远端清单与本地逐字一致 |
 | GitHub PR #2 / 合并后 CI | PR merged；main commit `aab1952` 的 Windows、Ubuntu、macOS CI 全部通过 |
 
 最终全目标回归通过。新增 H05/H06/H07/H08 离线用例覆盖终态复制边界、Teams routing 渲染、计划事务回滚/重启补触发、MCP 分页与名称冲突；真实 PTY/ConPTY 时序测试仍按其外部环境属性显式忽略。离线 HTTP 冒烟和安装后端健康检查均使用独立数据目录，没有登录或模型调用。
