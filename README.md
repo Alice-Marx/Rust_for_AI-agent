@@ -10,7 +10,7 @@ Work/Chat 推理档位在创建时保存，并与 Teams 共用固定配置。升
 
 **历史交接归档：** [2026-09-22 最终交接包](docs/FINAL_HANDOFF-2026-09-22.md)记录了当时工作区的隔离与交付结论（其中 model_identity 候选已在 `85a0cd2` 评审入库）。当前开发工作区已迁移至 `F:/everyAI/all/Wonderland`（即本仓库检出）；旧 `F:/harness/Codex` 根目录仍不要整体打包或合并。
 
-本次分发结果见 [0.11.0 交付报告](docs/DELIVERY-0.11.0.md)。GitHub 安装包与 [npm registry 的 0.11.0](https://www.npmjs.com/package/rust-ai-wonderland-cli/v/0.11.0) 均已发布；`next=0.11.0`，`latest=0.7.0`。已从 registry 重新下载校验并安装验证。
+本次分发结果见 [0.11.0 交付报告](docs/DELIVERY-0.11.0.md)。GitHub 0.11.0 安装包已发布；npm CLI [0.11.1](https://www.npmjs.com/package/rust-ai-wonderland-cli/v/0.11.1) 已更新到预览频道 `next`（兼容 0.11.0 后端），稳定频道 `latest` 保持 0.7.0。registry tarball 已重新下载并与发布前 SHA-256 一致。
 
 **Teams 已支持固定官方执行器自动拆解任务，以及逐节点指定模型的 DAG 执行。** 节点在独立 Git 工作区运行，受依赖、写入范围、并发数、重试和总时限约束；集成后运行用户预先指定的验证命令。桌面、Rust CLI、npm CLI 共用持久状态与权限流程。
 
@@ -97,7 +97,7 @@ wonderland-cli search "模型适配"
 wonderland-cli profile --model gpt-5.4
 ```
 
-也可安装本地发布包：`npm install -g ./dist/rust-ai-wonderland-cli-0.11.1.tgz`。当前 `next` 预览频道计划发布 npm CLI 0.11.1（兼容 Wonderland 0.11.0 后端）；`latest` 仍为 0.7.0 稳定频道。命令别名为 `wonderland`、`wonderland-cli`；原生 `wonderland.exe` 是后端服务，因此安装两种 CLI 后建议使用 `wonderland-cli` 并检查 PATH 顺序。
+也可安装本地发布包：`npm install -g ./dist/rust-ai-wonderland-cli-0.11.1.tgz`。当前 `next` 预览频道为 npm CLI 0.11.1（兼容 Wonderland 0.11.0 后端）；`latest` 仍为 0.7.0 稳定频道。命令别名为 `wonderland`、`wonderland-cli`；原生 `wonderland.exe` 是后端服务，因此安装两种 CLI 后建议使用 `wonderland-cli` 并检查 PATH 顺序。
 
 也可使用 GitHub 同版附件；若网络无法解析其下载域名，优先使用上面的 npm registry 安装命令：
 

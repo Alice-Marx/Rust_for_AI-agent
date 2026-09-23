@@ -1,6 +1,6 @@
 # 开发文档与仓库结构
 
-当前 Wonderland 后端版本为 [0.11.0](RELEASE-0.11.0.md)，包含 Work/Chat 推理配置持久化和完整开发交接资料。npm CLI 0.11.0 已发布；新 CLI 版本 0.11.1 正在准备发布到 `next`，稳定频道 `latest` 保持 0.7.0。历史发布记录按对应版本理解。
+当前 Wonderland 后端版本为 [0.11.0](RELEASE-0.11.0.md)，包含 Work/Chat 推理配置持久化和完整开发交接资料。npm CLI [0.11.1](https://www.npmjs.com/package/rust-ai-wonderland-cli/v/0.11.1) 已发布到 `next`（兼容 0.11.0 后端），稳定频道 `latest` 保持 0.7.0。历史发布记录按对应版本理解。
 
 **最终发布与远端核验结果见 [0.11.0 交付报告](DELIVERY-0.11.0.md)。** 安装包构建、GitHub 发布与 npm registry 发布已分别核对，包含实际下载与安装检查。
 
