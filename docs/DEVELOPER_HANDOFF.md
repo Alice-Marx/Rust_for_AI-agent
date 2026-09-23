@@ -347,7 +347,7 @@ npm test --prefix packaging/npm/wonderland-cli
 
 以下是建议的依赖顺序，均为待办，不是已完成承诺。H01/H02 可由两人并行，H03 依赖二者；H04 与 H03 共同决定何时能向用户开放成本控制。GUI 产品工作可以并行，但不得用前端状态掩盖后端阻塞。
 
-### H01：四个官方执行器的身份与真实模型闭环
+### H01：受管执行器的身份与真实模型闭环
 
 **位置：** `src/native_executor.rs`、`src/native_executor/claude.rs`、`src/native_executor/deepseek.rs`、`src/app_diagnostics.rs`、相关协议测试和适配文档。
 
@@ -436,7 +436,7 @@ npm test --prefix packaging/npm/wonderland-cli
 
 ### H09：官方工具升级与更多应用适配
 
-**已评估（2026-09-23，见 [anytool 接入评估](ANYTOOL-ADAPTER-ASSESSMENT-2026-09-23.md)）**：ACP 是 anytool 候选工具的收敛协议——MiMo（已接入，`src/native_executor/mimo.rs`，复用泛化的 `acp.rs` 框架）、grok-build（`xai-acp-lib`）、kimi-code（`kimi acp`）、minimax-code（tui ACP）全部可走 ACP 方言路径；ZCode 是自有 app-server 协议；opencode Go 主干无结构化入口暂不接。新增 ACP 工具 = 一个 dialect + 安装探测 + 注册。MiMo 的真实握手/推理与固定指纹待账号验证（H09 步骤 7–8）。
+**已评估并推进（2026-09-23，见 [anytool 接入评估](ANYTOOL-ADAPTER-ASSESSMENT-2026-09-23.md)）**：ACP 是 anytool 候选工具的收敛协议。MiMo、Kimi Code、MiniMax Code 与 Grok Build 均已通过独立 dialect 接入；Grok 另扩展了通用 ACP 的可选非交互 authenticate 生命周期，离线验证覆盖身份、模型/档位、权限、x.ai 扩展、usage 与取消，真实官方 1.0.38 安装和账号握手仍待 H01。ZCode 是自有 app-server 协议，下一步先核对 npm 发布物与固定源码提交；opencode Go 主干无结构化入口暂不接。所有新增工具的真实握手/推理与固定发布指纹仍须按 H09 步骤 7–8 验证。
 
 **位置：** `src/desktop_bridge.rs`、`src/app_diagnostics.rs`、`src/native_executor/`、`anytool/`、`REFERENCES.md`。
 

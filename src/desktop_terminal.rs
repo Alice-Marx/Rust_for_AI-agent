@@ -1208,6 +1208,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a stable interactive PTY/ConPTY host; run explicitly for terminal integration validation"]
     fn native_pty_shell_accepts_input_unicode_cwd_and_exits() {
         let directory = tempfile::Builder::new()
             .prefix("terminal workspace ")

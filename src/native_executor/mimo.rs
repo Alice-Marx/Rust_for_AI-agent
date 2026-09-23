@@ -13,7 +13,9 @@
 use super::acp::{AcpDialect, AcpRunner};
 use crate::native_executor::{emit, NativeControl, NativeEvent, NativeRequest, NativeResult};
 use anyhow::{bail, ensure, Context, Result};
-use serde_json::{json, Value};
+#[cfg(test)]
+use serde_json::json;
+use serde_json::Value;
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
@@ -278,7 +280,7 @@ impl AcpDialect for MimoDialect {
 }
 
 pub(super) async fn execute_with_control(
-    mut req: NativeRequest,
+    req: NativeRequest,
     events: mpsc::Sender<NativeEvent>,
     mut cancel: tokio::sync::watch::Receiver<bool>,
     controls: mpsc::Receiver<NativeControl>,

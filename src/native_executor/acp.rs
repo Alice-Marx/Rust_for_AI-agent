@@ -32,6 +32,17 @@ pub(super) trait AcpDialect: Send {
     fn status_note(&self) -> String;
     /// Verify the `initialize` result: agent identity and capabilities.
     fn verify_initialize(&self, init: &Value) -> Result<()>;
+    /// Optional authentication request made after a verified initialize and
+    /// before creating a session. The dialect may only select a method that
+    /// the initialize response advertised.
+    fn authenticate(&self, _init: &Value) -> Result<Option<Value>> {
+        Ok(None)
+    }
+    /// Billing channel proved by a successful auth method, when the protocol
+    /// contract is unambiguous. Session-token methods commonly remain unknown.
+    fn confirmed_billing_channel(&self, _auth: &Value) -> Option<String> {
+        None
+    }
     /// Config option id used to pin the exact model.
     fn model_config_id(&self) -> &'static str;
     /// Wire value for the model config option.
@@ -45,6 +56,17 @@ pub(super) trait AcpDialect: Send {
         model: &str,
         effort: Option<&str>,
     ) -> Result<()>;
+    /// Validate a newly created session before Wonderland applies its pinned
+    /// model and effort. Most harnesses already open on the requested values;
+    /// dialects with an independent default can validate structure only here.
+    fn verify_initial_config_options(
+        &self,
+        options: &Value,
+        model: &str,
+        _effort: Option<&str>,
+    ) -> Result<()> {
+        self.verify_config_options(options, model, None)
+    }
     /// Provider identity returned only after `verify_config_options` has
     /// confirmed the exact selected model. Dialects without an explicit
     /// provider value keep this unknown.
@@ -61,6 +83,35 @@ pub(super) trait AcpDialect: Send {
     fn permission_selection(&self, options: &[Value]) -> Result<(String, String)>;
     /// Session-update kinds forwarded as tool activity without interpretation.
     fn passthrough_updates(&self) -> &'static [&'static str];
+    /// Normalize a vendor extension notification into its session-scoped
+    /// params. Extension payloads are surfaced as tool activity and never as
+    /// model output.
+    fn extension_notification(&self, _method: &str, _params: &Value) -> Option<Value> {
+        None
+    }
+    /// Initial and incremental tool statuses differ slightly between ACP
+    /// implementations. Dialects must explicitly admit any non-default state.
+    fn tool_start_status(&self, status: Option<&str>) -> Result<()> {
+        ensure!(status == Some("in_progress"), "invalid tool start status");
+        Ok(())
+    }
+    /// Return true only for a terminal update that clears the active tool.
+    fn tool_update_terminal(&self, status: Option<&str>) -> Result<bool> {
+        ensure!(
+            matches!(status, Some("completed" | "failed")),
+            "invalid tool result status"
+        );
+        Ok(true)
+    }
+    /// Verify any vendor metadata on the settled prompt response.
+    fn verify_prompt_result(&self, _result: &Value, _req: &NativeRequest) -> Result<()> {
+        Ok(())
+    }
+    /// Normalize a settled prompt's usage metadata. Values remain tool
+    /// reported observations; this hook must not estimate missing costs.
+    fn prompt_usage(&self, _result: &Value) -> Result<Option<Value>> {
+        Ok(None)
+    }
     /// Map the prompt stop reason to a terminal status.
     fn stop_status(&self, reason: Option<&str>) -> Result<String>;
 }
@@ -182,10 +233,26 @@ impl AcpRunner {
         let init = self
             .rpc(
                 "initialize",
-                json!({"protocolVersion":1,"clientInfo":{"name":"wonderland","version":env!("CARGO_PKG_VERSION")},"clientCapabilities":{}}),
+                json!({
+                    "protocolVersion":1,
+                    "clientInfo":{"name":"wonderland","version":env!("CARGO_PKG_VERSION")},
+                    "clientCapabilities":{},
+                    "_meta":{
+                        "startupHints":{"nonInteractive":true},
+                        "clientType":"wonderland",
+                        "clientVersion":env!("CARGO_PKG_VERSION")
+                    }
+                }),
             )
             .await?;
         self.dialect.verify_initialize(&init)?;
+        if let Some(params) = self.dialect.authenticate(&init)? {
+            self.rpc("authenticate", params.clone()).await?;
+            if let Some(channel) = self.dialect.confirmed_billing_channel(&params) {
+                self.result.identity.billing_channel = Some(channel);
+                super::record_identity_evidence(&mut self.result.identity, "acp_authentication");
+            }
+        }
         let session = self
             .rpc("session/new", json!({"cwd":req.cwd,"mcpServers":[]}))
             .await?;
@@ -197,12 +264,11 @@ impl AcpRunner {
             "invalid ACP session ID"
         );
         self.result.session_id = Some(session_id.into());
-        self.dialect
-            .verify_config_options(&session["configOptions"], &req.model, None)?;
-        self.result.identity.configured_model = Some(req.model.clone());
-        self.result.identity.configured_reasoning_effort = self
-            .dialect
-            .confirmed_reasoning_effort(&session["configOptions"]);
+        self.dialect.verify_initial_config_options(
+            &session["configOptions"],
+            &req.model,
+            req.reasoning_effort.as_deref(),
+        )?;
         super::record_identity_evidence(&mut self.result.identity, "acp_session_config");
         emit(
             &self.events,
@@ -219,6 +285,7 @@ impl AcpRunner {
             .await?;
         self.dialect
             .verify_config_options(&selected["configOptions"], &req.model, None)?;
+        self.result.identity.configured_model = Some(req.model.clone());
         self.result.identity.effective_model = Some(req.model.clone());
         self.result.identity.effective_provider = self.dialect.confirmed_provider(req);
         let selected_effort = self
@@ -277,6 +344,11 @@ impl AcpRunner {
                 json!({"sessionId":self.result.session_id,"prompt":[{"type":"text","text":req.prompt}]}),
             )
             .await?;
+        self.dialect.verify_prompt_result(&result, req)?;
+        if let Some(data) = self.dialect.prompt_usage(&result)? {
+            self.result.usage = Some(data.clone());
+            emit(&self.events, NativeEvent::Usage { data }).await?;
+        }
         let label = self.dialect.label();
         ensure!(
             self.pending.is_empty(),
@@ -303,7 +375,17 @@ impl AcpRunner {
     }
 
     async fn handle_server(&mut self, frame: Value) -> Result<()> {
-        match frame["method"].as_str() {
+        let method = frame["method"].as_str();
+        if frame.get("id").is_none() {
+            if let Some(params) = method.and_then(|method| {
+                self.dialect
+                    .extension_notification(method, &frame["params"])
+            }) {
+                self.check_session(&params)?;
+                return self.extension_update(&params["update"]).await;
+            }
+        }
+        match method {
             Some("session/update") if frame.get("id").is_none() => {
                 self.check_session(&frame["params"])?;
                 self.update(&frame["params"]["update"]).await
@@ -316,6 +398,32 @@ impl AcpRunner {
             }
             _ => bail!("unsupported ACP notification"),
         }
+    }
+
+    async fn extension_update(&mut self, update: &Value) -> Result<()> {
+        let label = self.dialect.label();
+        self.streamed_bytes = self
+            .streamed_bytes
+            .checked_add(serde_json::to_vec(update)?.len())
+            .with_context(|| format!("{label} output length overflow"))?;
+        ensure!(
+            self.streamed_bytes <= MAX_OUTPUT_BYTES,
+            "{label} output exceeds limit"
+        );
+        ensure!(
+            update
+                .get("sessionUpdate")
+                .and_then(Value::as_str)
+                .is_some(),
+            "invalid {label} extension session update"
+        );
+        emit(
+            &self.events,
+            NativeEvent::ToolActivity {
+                data: update.clone(),
+            },
+        )
+        .await
     }
 
     async fn update(&mut self, update: &Value) -> Result<()> {
@@ -376,10 +484,7 @@ impl AcpRunner {
                     "invalid {label} tool identity"
                 );
                 if update["sessionUpdate"] == "tool_call" {
-                    ensure!(
-                        update["status"] == "in_progress",
-                        "{label} tool start has an invalid status"
-                    );
+                    self.dialect.tool_start_status(update["status"].as_str())?;
                     ensure!(
                         self.tools.len() < MAX_PENDING && !self.tools.contains_key(id),
                         "duplicate or excessive {label} tool calls"
@@ -391,21 +496,23 @@ impl AcpRunner {
                     );
                 } else {
                     ensure!(
-                        matches!(update["status"].as_str(), Some("completed" | "failed")),
-                        "{label} tool result has an invalid status"
+                        self.tools.contains_key(id),
+                        "unknown or repeated {label} tool update"
                     );
-                    ensure!(
-                        self.tools.remove(id).is_some(),
-                        "unknown or repeated {label} tool result"
-                    );
-                    let stale: Vec<_> = self
-                        .pending
-                        .iter()
-                        .filter(|(_, pending)| pending.tool_id == id)
-                        .map(|(key, _)| key.clone())
-                        .collect();
-                    for key in stale {
-                        self.resolve(&key, false).await?;
+                    if self
+                        .dialect
+                        .tool_update_terminal(update["status"].as_str())?
+                    {
+                        self.tools.remove(id);
+                        let stale: Vec<_> = self
+                            .pending
+                            .iter()
+                            .filter(|(_, pending)| pending.tool_id == id)
+                            .map(|(key, _)| key.clone())
+                            .collect();
+                        for key in stale {
+                            self.resolve(&key, false).await?;
+                        }
                     }
                 }
                 emit(

@@ -13,6 +13,7 @@ use tokio::{
 mod acp;
 mod claude;
 mod deepseek;
+mod grok;
 mod kimi_code;
 mod mimo;
 mod minimax;
@@ -36,6 +37,7 @@ pub fn capabilities(app_id: &str) -> NativeCapabilities {
         "kimi-cli" => Some("kimi-wire"),
         "claude" => Some("claude-stream-json"),
         "deepseek" => Some("deepseek-acp"),
+        "grok" => Some("grok-acp"),
         "mimo" => Some("mimo-acp"),
         "kimi-code" => Some("kimi-code-acp"),
         "minimax" => Some("minimax-acp"),
@@ -46,13 +48,14 @@ pub fn capabilities(app_id: &str) -> NativeCapabilities {
         managed,
         read_only: managed,
         permissions: managed,
-        questions: managed && !matches!(app_id, "deepseek" | "mimo"),
+        questions: managed && !matches!(app_id, "deepseek" | "mimo" | "grok"),
         reasoning_efforts: match app_id {
             "codex" => &[
                 "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
             ][..],
             "claude" => &["low", "medium", "high", "xhigh", "max"][..],
             "deepseek" => &["off", "low", "high", "max"][..],
+            "grok" => &["none", "minimal", "low", "medium", "high", "xhigh", "max"][..],
             _ => &[],
         }
         .iter()
@@ -95,6 +98,7 @@ pub fn validate_binding(
         "kimi-cli" => model.starts_with("kimi-"),
         "claude" => model.starts_with("claude-"),
         "deepseek" => model.starts_with("deepseek-"),
+        "grok" => model.starts_with("grok-"),
         // MiMo is a multi-provider harness: providerID/modelID with at least
         // one variant segment allowed inside the modelID half.
         "mimo" => model.split('/').count() >= 2 && model.split('/').count() <= 8,
@@ -266,6 +270,9 @@ pub async fn execute_with_control(
     }
     if req.app_id == "deepseek" {
         return deepseek::execute_with_control(req, events, cancel, controls).await;
+    }
+    if req.app_id == "grok" {
+        return grok::execute_with_control(req, events, cancel, controls).await;
     }
     if req.app_id == "mimo" {
         return mimo::execute_with_control(req, events, cancel, controls).await;
@@ -508,6 +515,9 @@ fn validate_request(req: &NativeRequest) -> Result<()> {
     }
     if req.app_id == "deepseek" {
         deepseek::validate_request(&req)?;
+    }
+    if req.app_id == "grok" {
+        grok::validate_request(&req)?;
     }
     if req.app_id == "mimo" {
         mimo::validate_request(&req)?;

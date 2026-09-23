@@ -10,7 +10,7 @@
 | --- | --- |
 | src/workflow.rs、workbench_service.rs | 单任务 SQLite 状态、配置与执行控制 |
 | src/team_*.rs | 团队 DAG、官方执行器绑定、独立工作区和验收 |
-| src/native_executor.rs、native_executor/ | Codex、Kimi、Claude、DeepSeek 原生协议 |
+| src/native_executor.rs、native_executor/ | 8 个受管执行器门面，以及 Codex/Kimi/Claude/ACP 方言原生协议 |
 | src/model_intelligence.rs、pricing.rs、routing.rs | LiveBench、官方价格证据与快照绑定的可解释路由预览 |
 | src/bin/desktop/ | Rust egui 工作台、Teams、项目与终端界面 |
 | src/bin/wonderland-cli.rs | 原生 Rust 服务客户端 |
@@ -57,6 +57,7 @@ Windows 全目标回归通过：404 项库测试、3 项 Rust CLI、18 项桌面
 - [2026-09-23 ACP 框架/MiMo/Automatic 启动](WORK-REPORT-2026-09-23-MIMO-ACP-DISPATCH.md)：ACP 会话引擎泛化、MiMo 受管接入、Automatic 决策→绑定写回→执行路径。
 - [anytool 上游工具受管接入评估](ANYTOOL-ADAPTER-ASSESSMENT-2026-09-23.md)：各工具协议入口结论与后续接入路径。
 - [2026-09-23 kimi-code/minimax 接入](WORK-REPORT-2026-09-23-KIMI-CODE-MINIMAX.md)：受管执行器扩至 7 个；含待做测试清单与剩余任务思路。
+- [2026-09-23 Grok Build ACP 接入](WORK-REPORT-2026-09-23-GROK-DIALECT.md)：受管执行器扩至 8 个；完成非交互认证、模型/档位回读、权限、usage 与离线完整生命周期，真实账号握手待做。
 - [2026-09-22 源码获取工作报告](WORK-REPORT-2026-09-22-UPSTREAM-ACQUISITION.md)：Git Smart HTTP 不可达时的官方归档回退、验证结果与未解决网络限制。
 - [2026-09-22 最终交接整理报告](WORK-REPORT-2026-09-22-FINAL-HANDOFF.md)：文件分类、完成项、未完成项和交付前检查。
 
