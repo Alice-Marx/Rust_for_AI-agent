@@ -48,6 +48,7 @@
 
 | 文档 | 说明 |
 | --- | --- |
+| [WORK-REPORT-2026-09-23-H05-NEW-DRAFT](WORK-REPORT-2026-09-23-H05-NEW-DRAFT.md) | H05 起步：终态独立任务复制为新草稿的 API/CLI、来源审计和原生恢复剩余边界。 |
 | [WORK-REPORT-2026-09-23-H04-USAGE](WORK-REPORT-2026-09-23-H04-USAGE.md) | H04 增量：Planner 与 node attempt 的原生 usage 观察归档、未确认金额语义、测试结果及硬预算剩余条件。 |
 | [WORK-REPORT-2026-09-23-IDENTITY-SEED-V1.1](WORK-REPORT-2026-09-23-IDENTITY-SEED-V1.1.md) | 身份种子 v1.1：59 报价模型 × 59 榜单行核验结论、deepseek-v4-pro attestation 依据。 |
 | [WORK-REPORT-2026-09-23-ROUTING-IDENTITY](WORK-REPORT-2026-09-23-ROUTING-IDENTITY.md) | routing-v2：决策消费身份注册表的语义与测试。 |

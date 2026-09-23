@@ -163,6 +163,10 @@ enum WorkAction {
     Get {
         id: String,
     },
+    /// Copy a terminal task into a fresh draft; does not reuse its session or start it
+    Duplicate {
+        id: String,
+    },
     Events {
         id: String,
         #[arg(long, default_value_t = 0)]
@@ -875,6 +879,11 @@ async fn main() -> Result<()> {
                     start,
                 ),
                 WorkAction::Get { id } => (format!("/api/v1/workflows/{id}"), None, false),
+                WorkAction::Duplicate { id } => (
+                    format!("/api/v1/workflows/{id}/duplicate"),
+                    Some(json!({})),
+                    false,
+                ),
                 WorkAction::Events { id, after } => (
                     format!("/api/v1/workflows/{id}/events?after={after}"),
                     None,

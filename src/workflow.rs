@@ -307,41 +307,47 @@ impl WorkflowStore {
 
     pub fn create(&self, request: WorkflowCreate) -> Result<WorkflowRecord> {
         let request = validate_request(request)?;
-        let now = timestamp();
-        let record = WorkflowRecord {
-            id: Uuid::new_v4().to_string(),
-            title: request.title,
-            prompt: request.prompt,
-            cwd: request.cwd,
-            mode: request.mode,
-            app_id: request.app_id,
-            model: request.model,
-            reasoning_effort: request.reasoning_effort,
-            read_only: request.read_only,
-            max_duration_secs: request.max_duration_secs,
-            acceptance: request.acceptance,
-            status: WorkflowStatus::Draft,
-            created_at: now.clone(),
-            updated_at: now.clone(),
-            output: String::new(),
-            error: None,
-            native_session_id: None,
-        };
         let mut connection = self.lock()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute(
-            "INSERT INTO workflows (id,title,prompt,cwd,mode,app_id,model,read_only,max_duration_secs,acceptance,status,created_at,updated_at,output,reasoning_effort)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'draft',?11,?11,'',?12)",
-            params![record.id,record.title,record.prompt,record.cwd,record.mode,record.app_id,record.model,record.read_only,record.max_duration_secs as i64,serde_json::to_string(&record.acceptance)?,now,record.reasoning_effort],
-        )?;
-        insert_event(
-            &transaction,
-            &record.id,
-            "created",
-            json!({"status":"draft","app_id":record.app_id,"mode":record.mode}),
-            &now,
-        )?;
-        touch_project(&transaction, &record.cwd, None, &now)?;
+        let record = insert_workflow_record(&transaction, request, None)?;
+        transaction.commit()?;
+        Ok(record)
+    }
+
+    /// Copy a terminal workflow into a fresh draft without reusing its native session,
+    /// output, or failure state. Starting remains a separate explicit operation.
+    pub fn duplicate_as_draft(&self, id: &str) -> Result<WorkflowRecord> {
+        validate_id(id)?;
+        let source = self.get(id)?.context("task not found")?;
+        ensure!(
+            source.status.is_terminal(),
+            "only a terminal task can be copied as a new draft"
+        );
+        let request = validate_request(WorkflowCreate {
+            title: source.title.clone(),
+            prompt: source.prompt.clone(),
+            cwd: source.cwd.clone(),
+            mode: source.mode.clone(),
+            app_id: source.app_id.clone(),
+            model: source.model.clone(),
+            reasoning_effort: source.reasoning_effort.clone(),
+            read_only: source.read_only,
+            max_duration_secs: source.max_duration_secs,
+            acceptance: source.acceptance.clone(),
+        })?;
+
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = required_record(&transaction, id)?;
+        ensure!(
+            current.status.is_terminal(),
+            "source task is no longer terminal"
+        );
+        ensure!(
+            current.updated_at == source.updated_at,
+            "source task changed while it was being copied; reload and retry"
+        );
+        let record = insert_workflow_record(&transaction, request, Some(&current))?;
         transaction.commit()?;
         Ok(record)
     }
@@ -700,6 +706,62 @@ fn validate_request(mut request: WorkflowCreate) -> Result<WorkflowCreate> {
     Ok(request)
 }
 
+fn insert_workflow_record(
+    connection: &Connection,
+    request: WorkflowCreate,
+    source: Option<&WorkflowRecord>,
+) -> Result<WorkflowRecord> {
+    let now = timestamp();
+    let record = WorkflowRecord {
+        id: Uuid::new_v4().to_string(),
+        title: request.title,
+        prompt: request.prompt,
+        cwd: request.cwd,
+        mode: request.mode,
+        app_id: request.app_id,
+        model: request.model,
+        reasoning_effort: request.reasoning_effort,
+        read_only: request.read_only,
+        max_duration_secs: request.max_duration_secs,
+        acceptance: request.acceptance,
+        status: WorkflowStatus::Draft,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+        output: String::new(),
+        error: None,
+        native_session_id: None,
+    };
+    connection.execute(
+        "INSERT INTO workflows (id,title,prompt,cwd,mode,app_id,model,read_only,max_duration_secs,acceptance,status,created_at,updated_at,output,reasoning_effort)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'draft',?11,?11,'',?12)",
+        params![record.id,record.title,record.prompt,record.cwd,record.mode,record.app_id,record.model,record.read_only,record.max_duration_secs as i64,serde_json::to_string(&record.acceptance)?,now,record.reasoning_effort],
+    )?;
+    insert_event(
+        connection,
+        &record.id,
+        "created",
+        json!({"status":"draft","app_id":record.app_id,"mode":record.mode}),
+        &now,
+    )?;
+    if let Some(source) = source {
+        insert_event(
+            connection,
+            &record.id,
+            "duplicated_from",
+            json!({
+                "source_workflow_id": source.id,
+                "source_status": source.status,
+                "native_session_reused": false,
+                "output_copied": false,
+                "started_automatically": false,
+            }),
+            &now,
+        )?;
+    }
+    touch_project(connection, &record.cwd, None, &now)?;
+    Ok(record)
+}
+
 fn utf8_prefix(value: &str, bytes: usize) -> &str {
     let mut end = bytes.min(value.len());
     while !value.is_char_boundary(end) {
@@ -992,6 +1054,56 @@ mod tests {
                 .as_deref(),
             Some("high")
         );
+    }
+
+    #[test]
+    fn terminal_task_duplicates_as_a_fresh_draft_without_reusing_session_or_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = WorkflowStore::open_in_memory().unwrap();
+        let original = start(&store, temp.path());
+        store
+            .set_session_id(&original.id, "native-session-original")
+            .unwrap();
+        store.append_output(&original.id, "partial output").unwrap();
+        store
+            .transition(
+                &original.id,
+                &[WorkflowStatus::Running],
+                WorkflowStatus::Failed,
+                Some("interrupted during work"),
+            )
+            .unwrap();
+
+        let copy = store.duplicate_as_draft(&original.id).unwrap();
+        assert_ne!(copy.id, original.id);
+        assert_eq!(copy.status, WorkflowStatus::Draft);
+        assert_eq!(copy.prompt, original.prompt);
+        assert_eq!(copy.cwd, original.cwd);
+        assert_eq!(copy.app_id, original.app_id);
+        assert_eq!(copy.model, original.model);
+        assert_eq!(copy.reasoning_effort, original.reasoning_effort);
+        assert!(copy.output.is_empty());
+        assert!(copy.error.is_none());
+        assert!(copy.native_session_id.is_none());
+
+        let events = store.events(&copy.id, 0, 10).unwrap();
+        let source = events
+            .iter()
+            .find(|event| event.kind == "duplicated_from")
+            .unwrap();
+        assert_eq!(source.data["source_workflow_id"], original.id);
+        assert_eq!(source.data["source_status"], "failed");
+        assert_eq!(source.data["native_session_reused"], false);
+        assert_eq!(source.data["output_copied"], false);
+        assert_eq!(source.data["started_automatically"], false);
+    }
+
+    #[test]
+    fn active_task_cannot_be_duplicated_as_a_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = WorkflowStore::open_in_memory().unwrap();
+        let active = start(&store, temp.path());
+        assert!(store.duplicate_as_draft(&active.id).is_err());
     }
 
     #[test]

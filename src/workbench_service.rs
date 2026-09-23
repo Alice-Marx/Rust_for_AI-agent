@@ -116,6 +116,33 @@ impl WorkbenchService {
         Ok(record)
     }
 
+    /// Copy a completed standalone task into a new draft. Team-owned children
+    /// must be retried through their parent collaboration, and starting the copy
+    /// remains an explicit user action.
+    pub fn duplicate_as_new_draft(&self, id: &str) -> Result<WorkflowRecord> {
+        ensure!(
+            !self.closing.load(Ordering::SeqCst),
+            "service is shutting down"
+        );
+        let source = self.store.get(id)?.context("task not found")?;
+        ensure!(
+            source.status.is_terminal(),
+            "only a terminal task can be copied as a new draft"
+        );
+        let events = self.store.events(id, 0, 10)?;
+        ensure!(
+            !events.iter().any(|event| event.kind == "team_owner"),
+            "team-owned child tasks must be retried through their parent collaboration"
+        );
+        native_executor::validate_binding(
+            &source.app_id,
+            &source.model,
+            source.reasoning_effort.as_deref(),
+            source.read_only,
+        )?;
+        self.store.duplicate_as_draft(id)
+    }
+
     pub async fn start(self: &Arc<Self>, id: &str) -> Result<WorkflowRecord> {
         self.start_stored(id, None).await
     }
@@ -428,6 +455,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/workflows", get(list).post(create))
         .route("/api/v1/workflows/{id}", get(detail))
         .route("/api/v1/workflows/{id}/events", get(events))
+        .route("/api/v1/workflows/{id}/duplicate", post(duplicate))
         .route("/api/v1/workflows/{id}/start", post(start))
         .route("/api/v1/workflows/{id}/cancel", post(cancel))
         .route("/api/v1/workflows/{id}/approve", post(approve))
@@ -489,6 +517,9 @@ async fn detail(State(s): State<AppState>, HttpPath(id): HttpPath<String>) -> Ap
         .store
         .get(&id)?
         .context("task not found")?)))
+}
+async fn duplicate(State(s): State<AppState>, HttpPath(id): HttpPath<String>) -> ApiResult {
+    Ok(Json(json!(s.workbench.duplicate_as_new_draft(&id)?)))
 }
 #[derive(Deserialize)]
 struct Cursor {
@@ -644,6 +675,55 @@ mod tests {
         assert_eq!(event.data["billing_channel"], "subscription");
         assert_eq!(event.data["account_plan"], "plus");
         assert!(event.data.get("email").is_none());
+    }
+    #[test]
+    fn duplicate_rejects_team_owned_children_and_creates_standalone_draft() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = WorkbenchService::open(dir.path()).unwrap();
+        let standalone = service.create(draft(dir.path())).unwrap();
+        service
+            .store
+            .transition(&standalone.id, &[Status::Draft], Status::Running, None)
+            .unwrap();
+        service
+            .store
+            .transition(
+                &standalone.id,
+                &[Status::Running],
+                Status::Failed,
+                Some("failed"),
+            )
+            .unwrap();
+        let copy = service.duplicate_as_new_draft(&standalone.id).unwrap();
+        assert_eq!(copy.status, Status::Draft);
+        assert_eq!(copy.prompt, standalone.prompt);
+        assert!(copy.native_session_id.is_none());
+        assert!(service
+            .store
+            .events(&copy.id, 0, 10)
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == "duplicated_from"));
+
+        let child = service.create(draft(dir.path())).unwrap();
+        service
+            .store
+            .append_event(&child.id, "team_owner", json!({"team_id":"parent"}))
+            .unwrap();
+        service
+            .store
+            .transition(&child.id, &[Status::Draft], Status::Running, None)
+            .unwrap();
+        service
+            .store
+            .transition(
+                &child.id,
+                &[Status::Running],
+                Status::Failed,
+                Some("failed"),
+            )
+            .unwrap();
+        assert!(service.duplicate_as_new_draft(&child.id).is_err());
     }
     #[test]
     fn ownership_prevents_false_recovery_and_releases_on_close() {

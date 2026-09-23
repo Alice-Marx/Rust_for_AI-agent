@@ -400,6 +400,8 @@ npm test --prefix packaging/npm/wonderland-cli
 
 **位置：** `src/workflow.rs`、`src/workbench_service.rs`、`src/team_store.rs`、`src/native_executor*`、`src/process_tree.rs`。
 
+**已交付（新任务副本第一步，H05 未完成）：** 终态独立 workflow 可经 `POST /api/v1/workflows/{id}/duplicate` 或 `wonderland work duplicate <id>` 复制为 Draft；保留提示/工具配置/验收合同，生成新 ID，在事务内记录 `duplicated_from`。原生 session、输出和错误不复制，也不自动启动；Team-owned child 必须由父团队处理。此功能不是恢复、历史分叉或同一 attempt 重试；所有适配器的 `resume/fork` 继续为 false。细节见 [H05 新任务副本工作报告](WORK-REPORT-2026-09-23-H05-NEW-DRAFT.md)。
+
 1. 分开“继续同一原生会话”“复制成新任务”“从失败节点重试”“分叉历史”，分别定义数据和权限合同。
 2. 建立保存的原生 session id、工具版本、配置、工作区 revision 与恢复可用性检查；不可恢复时给出新任务流程。
 3. 注入服务崩溃、网络断开、待批准中退出、进程残留和集成中取消场景，保证状态、进程和数据库一致。
