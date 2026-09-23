@@ -21,6 +21,8 @@ AppUpdatesURL={#MyAppURL}
 DefaultDirName={localappdata}\Programs\Wonderland
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
+; 安装目录与数据目录都必须可选，用户可以全部放到非系统盘。
+DisableDirPage=no
 OutputDir=..\..\dist
 OutputBaseFilename=Wonderland-Setup-{#MyAppVersion}-x64
 PrivilegesRequired=lowest
@@ -70,6 +72,9 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{sys}\WindowsPowerShell\v1.0\powe
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Start-Wonderland.ps1"""; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
 
 [Code]
+var
+  DataDirPage: TInputDirWizardPage;
+
 function PathContains(const PathValue, Entry: String): Boolean;
 var
   Remaining, Segment: String;
@@ -162,7 +167,11 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
+  begin
     AddAppDirectoryToUserPath;
+    SaveStringToFile(ExpandConstant('{app}') + '\data-location.txt',
+      DataDirPage.Values[0], False);
+  end;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
@@ -170,3 +179,32 @@ begin
   if CurUninstallStep = usUninstall then
     RemoveAppDirectoryFromUserPath;
 end;
+
+procedure InitializeWizard;
+begin
+  DataDirPage := CreateInputDirPage(wpSelectDir,
+    '选择数据目录',
+    'Wonderland 的任务数据、数据库和日志将保存到这里。',
+    '如果不希望占用 C 盘，请选择其他磁盘上的目录。目录不存在时会自动创建。' + #13#10 +
+    '提示：数据目录与安装目录相互独立；卸载程序不会删除数据目录。',
+    False,
+    '');
+  DataDirPage.Add('');
+  DataDirPage.Values[0] := ExpandConstant('{localappdata}') + '\WonderlandData';
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+  if CurPageID = wpSelectDir then
+  begin
+    // Keep the data-dir default sensible when the user picks a non-C install
+    // drive before reaching the data page.
+    if DataDirPage.Values[0] = ExpandConstant('{localappdata}') + '\WonderlandData' then
+    begin
+      if Copy(ExpandConstant('{app}'), 1, 2) <> Copy(ExpandConstant('{localappdata}'), 1, 2) then
+        DataDirPage.Values[0] := Copy(ExpandConstant('{app}'), 1, 3) + 'WonderlandData';
+    end;
+  end;
+end;
+
