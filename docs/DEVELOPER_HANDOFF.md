@@ -388,11 +388,11 @@ npm test --prefix packaging/npm/wonderland-cli
 
 **位置：** `src/team_store.rs`、`src/team_service.rs`、原生 usage 事件、`src/pricing.rs`。
 
-**已交付（观察归档阶段，H04 未完成）：** `src/team_service.rs` 在 Planner 与每个 node attempt child 进入验证或终止时，将其原生 usage 事件按 workflow/phase/node/attempt 归入 `usage_observed`。CLI/harness 自报 USD 明确标为未确认，估算与 provider 确认金额保持空值，不对快照求和。此记录不是账单，也不限制在途消费；`budget_usd` 仍在派工前阻塞。实施细节与测试见 [H04 usage 工作报告](WORK-REPORT-2026-09-23-H04-USAGE.md)。
+**已交付（H04 机械第一、二片，硬预算仍未完成）：** `src/team_service.rs` 在 Planner 与每个 node attempt child 进入验证或终止时，将原生 usage 事件按 workflow/phase/node/attempt 归入 `usage_observed`。CLI/harness 自报 USD 明确标为未确认，估算与 provider 确认金额保持空值，不对快照求和。Automatic 决策的 `selected_estimated_cost_usd` 以 1.25 安全系数平摊预留，attempt 终态按预留额保守结算，运行收尾、重跑前和服务重启均对遗留 hold 对账；启动还扫描历史 Interrupted 团队。所有渠道 `hard_budget_capable=false`，故 `budget_usd` 仍在派工前阻塞。实施细节与测试见 [H04 usage 工作报告](WORK-REPORT-2026-09-23-H04-USAGE.md)、[预算接线报告](WORK-REPORT-2026-09-23-BUDGET-WIRING.md) 和 [预算恢复报告](WORK-REPORT-2026-09-23-BUDGET-RECOVERY.md)。
 
-1. 定义规划、执行、评审、重试、缓存和并发在途请求的费用归属，明确什么是估算、什么是提供商确认值。
-2. 派工前预留，终态结算/释放，异常和重启对账；订阅额度用其自身单位管理。
-3. 为官方工具设计可验证的输出/轮数限制、提前停止与在途超额策略。若工具无法保证硬 USD 边界，就保持该渠道不支持硬预算，UI 明示可用的软预警。
+1. 接入提供商确认账单/额度来源，明确规划、执行、评审、重试、缓存和并发在途请求的确认归属；估算与确认值继续分开。
+2. 将确认金额接入既有结算账本，补齐预算内放行、超限阻塞、在途超额和服务重启的集成验收；订阅额度用其自身单位管理。
+3. 为官方工具设计并实证可验证的输出/轮数限制、提前停止与在途超额策略。若工具无法保证硬 USD 边界，就保持该渠道不支持硬预算，UI 明示可用的软预警。
 
 **验收门槛：** 并发/崩溃不重复预留或漏结算；无免费零价未知项；可解释最坏在途消耗。只有能证明兑现的限制才允许解除当前 `budget_usd` 阻塞。
 

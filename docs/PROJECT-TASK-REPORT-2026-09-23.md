@@ -1,8 +1,8 @@
 # 总项目任务报告
 
-日期：2026-09-23（含 Grok Build ACP 适配与 G3 文档/测试改进）
-仓库：[Alice-Marx/Rust_for_AI-agent](https://github.com/Alice-Marx/Rust_for_AI-agent)，当前分支 `handoff-development`；身份回读提交 `09a1014` 后继续；CLI/桌面交付已提交为 `03a8ff9`
-版本基线：0.11.0（`24dbf54`）+ 当前开发分支；本轮 Grok ACP、文档同步与测试闸门见「一·本轮交付」
+日期：2026-09-23（含 Grok Build ACP、H04 预算接线与服务重启恢复）
+仓库：[Alice-Marx/Rust_for_AI-agent](https://github.com/Alice-Marx/Rust_for_AI-agent)，当前分支 `main`；H04 第一片为 `8db113f`，服务重启恢复作为当前增量
+版本基线：0.11.0（`24dbf54`）+ main 后续开发；本轮交付见「一·本轮交付」
 配套文档：[文档指南](DOCUMENT-GUIDE-2026-09-23.md)（每份文档的用途）、[后续路线图](ROADMAP-2026-09-23.md)（H01–H10 分解）
 
 ## 一、完成的工作（总项目视角）
@@ -44,11 +44,12 @@ API Agent 与 SSE、Rust egui 桌面、Rust/npm 双 CLI、官方工具 Work/Chat
 4. **ZCode 源码取回待深读**：按固定提交 `872ad96` 取回（`upstream-study/ZCode`）。monorepo 结构确认（`apps/zcode-cli`、`packages/server|rpc|zcode-server-cli`），接入仍按自有 app-server 协议（codex 模式独立 transport）；注意源码仓 `apps/zcode-cli` 版本显示 0.16.9 且标 private，实现前需先核对 npm 发布物 `@zcode/cli` 3.14.0 与该提交的对应关系。
 5. **H01 Codex 身份回读第一步**：新增脱敏 `NativeIdentity`，Codex 执行前通过官方 app-server `config/read`、`account/read` 和 `thread/start` 保存配置模型/档位、`api` 或 `subscription` 渠道、ChatGPT 计划档位，以及线程回读的生效模型/提供商/默认档位。账户邮箱不进入身份事件；账户未登录或账号类型不受支持时，在发送提示前失败关闭。
 6. **H01 其他原生工具身份回读扩展**：Claude 保存固定 CLI 版本/二进制指纹、已应用模型/档位、first-party provider 边界及成功结果里的模型用量；ACP 通用会话引擎保存工具版本/指纹、会话配置模型、已选择模型，以及模型 ID 明确携带的 provider（DeepSeek、MiMo、MiniMax、Grok）；DeepSeek 与 Grok 另回读 reasoning effort。Grok 仅在明确选择 `xai.api_key` 且认证成功后记录 API 计费渠道；缓存令牌不推断渠道或账号计划。Kimi Code 的模型 ID 不携带 provider，故 provider 保持 unknown；Python Kimi 保存受限后的本地精确模型配置，但协议不回显实际生效模型。真实账户闭环尚未完成。
-7. **H04 usage 归档（部分完成）**：规划 child、执行/评审 child 与每次重试结束时，把原生工具 `usage` 事件按 `workflow_id` 归入 `usage_observed` Teams 事件，并标记 phase、node、attempt、app、model、effort。最多保留最近 16 个快照；Claude CLI 与 MiMo harness 报告的 USD 值标成未确认来源，不做快照求和；估算与已确认金额都明确为空。**美元预算仍在派工前阻塞**：usage 事件不等于发票，也不能限制在途消费；预留账本尚未接入派工/结算。
+7. **H04 usage 与账本接线（部分完成）**：规划 child、执行/评审 child 与每次重试结束时，把原生工具 `usage` 事件按 `workflow_id` 归入 `usage_observed` Teams 事件，并标记 phase、node、attempt、app、model、effort。Automatic 决策估算以 1.25 系数平摊预留，attempt 终态按预留额保守结算，运行结束、重跑和重启均有对账；Claude CLI 与 MiMo harness 报告的 USD 值仍标成未确认来源，不做快照求和。**美元预算仍在派工前阻塞**：没有提供商确认账单或可强制在途中断的证据，不能把 usage 或列价当作硬预算。
 8. **H05 终态任务复制首步**：独立终态 workflow 可通过 `POST /api/v1/workflows/{id}/duplicate` 或 Rust/npm CLI `work duplicate <id>` 复制为新 Draft，并在事务内保存 `duplicated_from` 来源事件。保留任务请求配置，但不复制旧原生 session、输出或错误，不自动启动；活动任务和 Teams-owned child 被拒绝。**H05 原生恢复/分叉尚未完成**，所有适配器 `resume/fork` 仍为 false。
 9. **G3 文档与测试信号改进**：npm README 补齐 duplicate 与 routing 命令；仓库外 `upstream-study/PROVENANCE.md` 记录 Grok/ZCode 固定来源；版本探测分离 stdout/stderr，避免 PowerShell CLIXML 污染；Kimi 同名识别改为纯函数测试；真实 PTY 时序测试明确为外部集成测试；清除 native executor 编译警告。
 10. **npm CLI 预览发布完成**：npm registry 已占用 0.11.0，因此新包使用版本 0.11.1（兼容后端 0.11.0），发布到 `next`；`latest` 保持 0.7.0。发布包仅含许可证、README、两个 CLI 脚本和 package.json。registry integrity 为 `sha512-nm/ojEZyHK7jQM89AqvpiQ9ZUBQcb4uUCkZHxiDX7tVprlBzwpFAFzSLgXTmigAeHDuKtv6jQVOkLsJGF10zhw==`，SHA-1 `bfe8f5d814c18cf9ef773e732fdf15ed0558f0f7`，本地与重新下载 registry tarball 的 SHA-256 均为 `F06B76B511DDBD0E7BBFB65935DB2A6CE6CBACBBD27E4E544D8FD141DE3F853C`。
 11. **GitHub main 整合**：PR [#2](https://github.com/Alice-Marx/Rust_for_AI-agent/pull/2) 已合并，main 合并提交 `aab19524ffb01e8444a39a2efc007a73e1d6423a`；合并后 GitHub Actions 的 Windows、Ubuntu、macOS 检查全部通过。此交付推送的是源码与报告；本轮没有重建或上传新的 Windows 桌面发行资产。
+12. **H04 服务重启预留恢复**：当前启动中断的团队在 `recover_interrupted` 的同一事务内关闭 hold，已有的 Interrupted 团队也在服务启动时扫描并对账；事件记录每笔处理结果，重复启动保持幂等。详见[预算恢复报告](WORK-REPORT-2026-09-23-BUDGET-RECOVERY.md)。
 
 ### 本轮报告对账
 
@@ -103,8 +104,8 @@ API Agent 与 SSE、Rust egui 桌面、Rust/npm 双 CLI、官方工具 Work/Chat
 
 | 文件 | 说明 |
 | --- | --- |
-| `team_service.rs` | Teams HTTP 合同 + Automatic 启动路径（决策→`set_planner` 写回→执行）；将 Planner、节点执行/评审/重试 child 的工具 usage 按 workflow 归档为带尝试归属、未确认金额分类的事件 |
-| `team_store.rs` | 团队/节点/attempt 权威存储 + 微美元账本 + `set_planner` |
+| `team_service.rs` | Teams HTTP 合同 + Automatic 启动路径（决策→`set_planner` 写回→执行）；归档 child usage，结算/对账预留，并在启动时扫描历史 Interrupted 团队的 hold |
+| `team_store.rs` | 团队/节点/attempt 权威存储 + 微美元账本 + `set_planner`；当前重启恢复在同一事务保守结算 hold 并记录事件清单 |
 | `team_workspace.rs` / `team_checks.rs` | 独立 Git 工作区与主机验收 |
 | `workflow.rs` / `workbench_service.rs` | 单任务 SQLite 状态机（v2）、执行控制与原生身份回读持久化 |
 
@@ -123,6 +124,7 @@ API Agent 与 SSE、Rust egui 桌面、Rust/npm 双 CLI、官方工具 Work/Chat
 | `cargo test --locked desktop_bridge::tests --lib` | 19 项通过，1 项安装型测试按设计忽略 |
 | `cargo test --locked app_diagnostics::tests --lib` | 8 项通过，1 项安装型测试按设计忽略 |
 | `cargo test --locked native_executor::tests --lib` | 16/16 通过 |
+| `cargo test --locked --lib team_` | 38/38 通过；覆盖运行中恢复与历史 Interrupted 团队的预留对账、事件审计和重复启动幂等性 |
 | `cargo test --locked --all-targets --features ui-snapshots` | 库 454 项通过、8 项按外部条件忽略；Rust CLI 4 项、桌面 18 项、协议集成 7 项通过；0 失败 |
 | `npm test --prefix packaging/npm/wonderland-cli` | 16/16 通过 |
 | `npm pack --dry-run --json --pack-destination dist` | 通过；5 个白名单文件，0.11.1 包，registry integrity `sha512-nm/ojEZyHK7jQM89AqvpiQ9ZUBQcb4uUCkZHxiDX7tVprlBzwpFAFzSLgXTmigAeHDuKtv6jQVOkLsJGF10zhw==` |
@@ -148,12 +150,13 @@ API Agent 与 SSE、Rust egui 桌面、Rust/npm 双 CLI、官方工具 Work/Chat
 | 任务 | 现状 | 完成思路 |
 | --- | --- | --- |
 | **H01 真实账号闭环** | Codex 回读账号渠道/计划和线程模型；Claude、ACP 与 Python Kimi 的工具指纹和可证实模型设置代码已完成。账号渠道/计划仅 Codex 有显式回读；其余字段遵守未知保留规则。真实账户测试未完成，需登录 | 按上节测试 1–5 执行，归档脱敏事件；仅在工具官方会话回传明确账号计费/额度信息时扩充 `billing_channel`/`account_plan`，否则保持 `None`。根据实测更新工具版本与指纹支持策略 |
-| **H04 硬预算闭环** | usage 归档已完成；**预留/保守结算/对账已接线**（`ROUTING_RESERVATION_MARGIN=1.25` 平摊预留、attempt 终态结算 actual=None、运行收尾与重跑前 `reconcile_reservations` 兜底）；渠道 `hard_budget_capable` 合同建立（当前全 false），`budget_usd` 仍阻塞但原因结构化。详见[预算接线报告](WORK-REPORT-2026-09-23-BUDGET-WIRING.md) | 剩余：接入任一渠道的提供商确认账单源并证明可强制中断后置 `hard_budget_capable=true`，补预算内/超限/在途三场景测试解除该渠道阻塞；确认金额写入 `settle_reservation(actual)`；服务启动恢复流程批量对账 Interrupted 团队；harness 自报金额保持未确认分类 |
+| **H04 硬预算闭环** | usage 归档、预留/保守结算、运行收尾/重跑和服务启动恢复对账均已接线；渠道 `hard_budget_capable` 合同建立（当前全 false），`budget_usd` 仍阻塞但原因结构化。详见[预算接线报告](WORK-REPORT-2026-09-23-BUDGET-WIRING.md)与[预算恢复报告](WORK-REPORT-2026-09-23-BUDGET-RECOVERY.md) | 剩余：接入任一渠道的提供商确认账单源并证明可强制中断后置 `hard_budget_capable=true`，补预算内/超限/在途三场景测试解除该渠道阻塞；确认金额写入 `settle_reservation(actual)`；harness 自报金额保持未确认分类 |
 | **两个 CLI 的路由策略命令** | 实现、自动测试完成；随提交 `03a8ff9` 交付 | 已提供 `preview/saved/replay`，严格透传既有 HTTP 合同；无需额外 CLI 测试 |
 | **桌面阻塞原因面板（H06 起步）** | 实现、桌面自动化测试完成；随提交 `03a8ff9` 交付 | 已渲染 `dispatch_readiness.missing` 与路由事件；还需按本报告手工检查事件差异、长解释和空数据情形 |
 | **Grok Build 真实闭环** | 第 8 个受管执行器的代码、离线 fixture、应用注册和文档已完成；`resume/fork=false`，无真实安装/账号推理证据，固定发布二进制摘要待回填 | 安装官方 1.0.38，分别用 `XAI_API_KEY` 与缓存令牌完成握手；执行真实推理、允许/拒绝、取消、认证失败和 usage 归档，保存脱敏 fixture 并回填发布指纹。真实 wire 不符时继续失败关闭并新增显式版本 profile |
 | **ZCode 接入** | 源码已取回，发布物对应关系待核 | 核对 `@zcode/cli@3.14.0` 与源码提交，再按其 app-server 协议实现独立 transport；不复用 ACP 假设 |
 | **H05 恢复/分叉** | 新增终态独立 workflow → 新 Draft 的 duplicate API/CLI（不复制 session/output、不自动启动；团队 child 禁止脱离父团队复制）；所有适配器 `resume/fork=false` | 继续完善终态状态/HTTP/CLI覆盖；注入崩溃、断网、审批等待、进程残留和集成中取消。后续按适配器持久化 session ID、工具版本/配置、workspace revision 并实测可恢复性；分叉历史与 Teams attempt 重试单独定合同，未验证前保持 false |
+| **Windows 安装包交付** | 用户要求在无需账号的开发完成后交付安装器，用于自行登录实测 | 完成剩余离线开发与全回归后构建 release 二进制、Inno Setup 安装器和便携 ZIP，检查文件清单与 SHA-256；安装包不包含账号、OAuth token 或测试数据 |
 | **H07 插件/定时/远程/PR/网站、H08 沙箱/MCP、H10 研究实验** | 未开始 | 按 [ROADMAP](ROADMAP-2026-09-23.md) 既有分解与验收门槛执行 |
 
 **执行顺序建议**：完成桌面视觉检查 → 你登录账号做 H01 实测（含 Codex API key/ChatGPT 两渠道、Grok 两认证路径及其他已接入工具）→ H04 预算闭环（只有兑现成本上限后才解除阻塞）→ G2 核对并适配 ZCode → H05/H07/H08 → H10 实验出结论。

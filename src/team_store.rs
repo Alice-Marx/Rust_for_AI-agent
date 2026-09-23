@@ -1160,11 +1160,6 @@ impl TeamStore {
             Ok(json!({"reservation_id":reservation_id,"actual_cost_usd":actual_cost_usd,"known":actual.is_some(),"charged_microusd":charged}))
         })
     }
-    /// Close every reservation still marked Reserved on a team: attempts that
-    /// reached a terminal state settle conservatively at their reserved amount
-    /// (no provider-confirmed actual exists yet); attempts that never launched
-    /// are released. Called when a run finalizes, before a Blocked team is
-    /// retried, and after service restarts so stale holds never leak.
     /// Settle the reservation attached to one attempt, if any. Actual cost
     /// stays None (conservative: charged falls back to the reserved amount)
     /// until a provider-confirmed invoice source exists.
@@ -1183,6 +1178,11 @@ impl TeamStore {
         Ok(())
     }
 
+    /// Close every reservation still marked Reserved on a team: attempts that
+    /// reached a terminal state settle conservatively at their reserved amount
+    /// (no provider-confirmed actual exists yet); attempts that never launched
+    /// are released. Called when a run finalizes, before a Blocked team is
+    /// retried, and after service restarts so stale holds never leak.
     pub fn reconcile_reservations(&self, id: &str, reason: &str) -> Result<TeamRecord> {
         bounded(reason, 256, "reconciliation reason", false)?;
         self.mutate(id, "budget_reconciled", |_, record| {
@@ -1286,6 +1286,25 @@ impl TeamStore {
                 NodeStatus::Interrupted,
                 Some("Task service restarted"),
             );
+            // Close leftover reservation holds in the same transaction: the
+            // interrupted attempts above are terminal, so they settle
+            // conservatively at their reserved amounts; nothing leaks into a
+            // future run of a fresh team on the same budget evidence.
+            let reconciled: Vec<Value> = record
+                .reservations
+                .iter_mut()
+                .filter(|reservation| reservation.status == ReservationStatus::Reserved)
+                .map(|reservation| {
+                    reservation.status = ReservationStatus::Settled;
+                    reservation.settled_at = Some(now());
+                    json!({
+                        "reservation_id": reservation.id,
+                        "node_id": reservation.node_id,
+                        "attempt": reservation.attempt,
+                        "outcome": "settled_at_reserved",
+                    })
+                })
+                .collect();
             record.revision += 1;
             record.updated_at = now();
             tx.execute("UPDATE teams SET status=?1,revision=?2,updated_at=?3,record=?4 WHERE id=?5 AND revision=?6",params![record.status.as_str(),i64::try_from(record.revision)?,record.updated_at,encode_record(&record)?,record.id,i64::try_from(old)?])?;
@@ -1293,7 +1312,7 @@ impl TeamStore {
                 &tx,
                 &record.id,
                 "recovered_interrupted",
-                json!({"retained_reservations":true}),
+                json!({"reconciled_reservations": reconciled}),
             )?;
             count += 1;
         }
@@ -1945,7 +1964,7 @@ mod tests {
             .is_err());
     }
     #[test]
-    fn opening_never_recovers_and_explicit_recovery_retains_reservations() {
+    fn opening_never_recovers_and_explicit_recovery_reconciles_reservations() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("teams.db");
         let store = TeamStore::open(&path).unwrap();
@@ -1964,12 +1983,31 @@ mod tests {
         let recovered = reopened.get(&team.id).unwrap().unwrap();
         assert_eq!(recovered.nodes[0].status, NodeStatus::Interrupted);
         assert_eq!(charged_microusd(&recovered), 200_000);
+        // Restart reconciliation settles the hold at its reserved amount
+        // instead of leaving it Reserved forever.
+        assert_eq!(recovered.reservations[0].status, ReservationStatus::Settled);
+        let events = reopened.events(&team.id, 0, 100).unwrap();
+        let recovery = events
+            .iter()
+            .find(|event| event.kind == "recovered_interrupted")
+            .unwrap();
+        assert_eq!(
+            recovery.data["reconciled_reservations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            recovery.data["reconciled_reservations"][0]["outcome"],
+            "settled_at_reserved"
+        );
         assert!(reopened
             .begin_attempt(&team.id, "a", binding(), None)
             .is_err());
-        let events = reopened.events(&team.id, 0, 2).unwrap();
-        assert_eq!(events.len(), 2);
-        let next = reopened.events(&team.id, events[1].seq, 100).unwrap();
-        assert!(next.iter().all(|e| e.seq > events[1].seq));
+        let page = reopened.events(&team.id, 0, 2).unwrap();
+        assert_eq!(page.len(), 2);
+        let next = reopened.events(&team.id, page[1].seq, 100).unwrap();
+        assert!(next.iter().all(|event| event.seq > page[1].seq));
     }
 }

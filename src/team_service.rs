@@ -5,8 +5,8 @@ use crate::{
     native_executor,
     routing::RoutingPreviewRequest,
     team_store::{
-        ExecutorBinding, NodeSpec, NodeStatus, TeamCreate, TeamRecord, TeamStatus, TeamStore,
-        TeamStrategy,
+        ExecutorBinding, NodeSpec, NodeStatus, ReservationStatus, TeamCreate, TeamRecord,
+        TeamStatus, TeamStore, TeamStrategy,
     },
     workbench_service::WorkbenchService,
     workflow::{WorkflowCreate, WorkflowRecord, WorkflowStatus},
@@ -46,6 +46,19 @@ impl TeamService {
     pub fn open(directory: &Path) -> Result<Self> {
         let store = TeamStore::open(directory.join("teams.sqlite"))?;
         store.recover_interrupted()?;
+        // `recover_interrupted` handles teams that were active when this service
+        // started. Older records may already be Interrupted but still carry a
+        // Reserved hold from a prior version, so close those holds before this
+        // process accepts new work for the same data directory.
+        for team in store.list()?.into_iter().filter(|team| {
+            team.status == TeamStatus::Interrupted
+                && team
+                    .reservations
+                    .iter()
+                    .any(|reservation| reservation.status == ReservationStatus::Reserved)
+        }) {
+            store.reconcile_reservations(&team.id, "service startup recovery")?;
+        }
         let directory = directory.join("team-workspaces");
         std::fs::create_dir_all(&directory)?;
         Ok(Self {
@@ -1385,6 +1398,87 @@ mod tests {
             budget_usd: None,
             routing_policy: None,
         }
+    }
+
+    #[test]
+    fn startup_reconciles_historical_interrupted_team_reservations_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let store = TeamStore::open(data.join("teams.sqlite")).unwrap();
+        let mut input = request(dir.path());
+        input.budget_usd = Some(1.0);
+        input.nodes = vec![NodeSpec {
+            id: "implementation".into(),
+            objective: "Implement the bounded change".into(),
+            dependencies: vec![],
+            write_paths: vec!["src".into()],
+            acceptance: vec!["test passes".into()],
+            executor: None,
+        }];
+        let team = store.create(input).unwrap();
+        let run_workspace = dir.path().join("run-workspace");
+        std::fs::create_dir_all(&run_workspace).unwrap();
+        store
+            .set_workspace(&team.id, &"a".repeat(40), &run_workspace.to_string_lossy())
+            .unwrap();
+        store
+            .transition(&team.id, &[TeamStatus::Planned], TeamStatus::Running, None)
+            .unwrap();
+        let attempt = store
+            .begin_attempt(
+                &team.id,
+                "implementation",
+                team.request.planner.clone(),
+                Some(0.2),
+            )
+            .unwrap();
+        store
+            .transition(
+                &team.id,
+                &[TeamStatus::Running],
+                TeamStatus::Interrupted,
+                Some("simulated older service shutdown"),
+            )
+            .unwrap();
+        drop(store);
+
+        let service = TeamService::open(&data).unwrap();
+        let recovered = service.store.get(&team.id).unwrap().unwrap();
+        let reservation = recovered
+            .reservations
+            .iter()
+            .find(|reservation| reservation.id == attempt.reservation_id.clone().unwrap())
+            .unwrap();
+        assert_eq!(reservation.status, ReservationStatus::Settled);
+        assert_eq!(reservation.actual_microusd, None);
+        assert_eq!(crate::team_store::charged_microusd(&recovered), 200_000);
+        let events = service.store.events(&team.id, 0, 100).unwrap();
+        let recovery = events
+            .iter()
+            .find(|event| {
+                event.kind == "budget_reconciled"
+                    && event.data["reason"] == "service startup recovery"
+            })
+            .unwrap();
+        assert_eq!(
+            recovery.data["reservations"][0]["outcome"],
+            "settled_at_reserved"
+        );
+        drop(service);
+
+        let reopened = TeamService::open(&data).unwrap();
+        let recovery_count = reopened
+            .store
+            .events(&team.id, 0, 100)
+            .unwrap()
+            .iter()
+            .filter(|event| {
+                event.kind == "budget_reconciled"
+                    && event.data["reason"] == "service startup recovery"
+            })
+            .count();
+        assert_eq!(recovery_count, 1);
     }
 
     #[tokio::test]

@@ -58,6 +58,7 @@ Windows 全目标回归通过：404 项库测试、3 项 Rust CLI、18 项桌面
 - [anytool 上游工具受管接入评估](ANYTOOL-ADAPTER-ASSESSMENT-2026-09-23.md)：各工具协议入口结论与后续接入路径。
 - [2026-09-23 kimi-code/minimax 接入](WORK-REPORT-2026-09-23-KIMI-CODE-MINIMAX.md)：受管执行器扩至 7 个；含待做测试清单与剩余任务思路。
 - [2026-09-23 预算接线](WORK-REPORT-2026-09-23-BUDGET-WIRING.md)：H04 第一片——预留/保守结算/对账接入派工路径，渠道硬预算能力合同。
+- [2026-09-23 预算恢复](WORK-REPORT-2026-09-23-BUDGET-RECOVERY.md)：H04 第二片——服务重启预留对账、历史 Interrupted 团队扫描和幂等性测试。
 - [2026-09-23 Grok Build ACP 接入](WORK-REPORT-2026-09-23-GROK-DIALECT.md)：受管执行器扩至 8 个；完成非交互认证、模型/档位回读、权限、usage 与离线完整生命周期，真实账号握手待做。
 - [2026-09-22 源码获取工作报告](WORK-REPORT-2026-09-22-UPSTREAM-ACQUISITION.md)：Git Smart HTTP 不可达时的官方归档回退、验证结果与未解决网络限制。
 - [2026-09-22 最终交接整理报告](WORK-REPORT-2026-09-22-FINAL-HANDOFF.md)：文件分类、完成项、未完成项和交付前检查。
