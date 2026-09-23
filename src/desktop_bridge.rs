@@ -151,10 +151,10 @@ pub fn official_apps() -> Vec<AppMetadata> {
             "MoonshotAI/kimi-code",
             "https://github.com/MoonshotAI/kimi-code",
             Some("@moonshot-ai/kimi-code"),
-            false,
+            true,
             "acp;harness-sdk",
             "anytool/kimi/kimi-code;kimi-code",
-            "使用 ACP；print 模式会自动授权，不作为交互适配器",
+            "受管 ACP 适配（kimi acp，固定 2.0.2）；与 Python kimi 命令同名，只认 npm dist/main.mjs 入口；真实握手与推理待账号验证",
         ),
         (
             "minimax",
@@ -163,7 +163,7 @@ pub fn official_apps() -> Vec<AppMetadata> {
             "MiniMax-AI/minimax-code",
             "https://github.com/MiniMax-AI/minimax-code",
             None,
-            false,
+            true,
             "acp",
             "anytool/minimax/minimax-code;minimax-code",
             "手动终端候选；MiniMax CLI 产品接口与 mcode 编程工具分别识别",
@@ -1304,7 +1304,18 @@ mod tests {
             .filter(|app| app.capabilities.structured_runner)
             .map(|app| app.id.as_str())
             .collect();
-        assert_eq!(native, ["codex", "claude", "kimi-cli", "mimo", "deepseek"]);
+        assert_eq!(
+            native,
+            [
+                "codex",
+                "claude",
+                "kimi-cli",
+                "kimi-code",
+                "minimax",
+                "mimo",
+                "deepseek"
+            ]
+        );
         assert!(
             !apps
                 .iter()

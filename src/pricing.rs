@@ -1909,7 +1909,7 @@ Prompt caching uses the following pricing multipliers relative to base input tok
         assert_eq!(service.status()["auto_dispatch_ready"], false);
         let status = service.status();
         let channels = status["billing_channels"].as_array().unwrap();
-        assert_eq!(channels.len(), 9);
+        assert_eq!(channels.len(), 13);
         assert!(channels
             .iter()
             .any(|entry| entry["app_id"] == "deepseek" && entry["billing_channel"] == "api"));

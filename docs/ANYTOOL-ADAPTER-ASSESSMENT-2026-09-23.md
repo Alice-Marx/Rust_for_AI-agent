@@ -7,9 +7,9 @@
 | 工具 | 入口 | 协议 | 受管接入结论 |
 | --- | --- | --- | --- |
 | **MiMo Code**（Xiaomi，`@mimo-ai/cli` 0.1.15，bin `mimo`） | `mimo acp` | **ACP** stdin/stdout NDJSON（`@agentclientprotocol/sdk`） | **本轮已接入**（`src/native_executor/mimo.rs`） |
-| **grok-build**（xAI，Rust workspace） | 含 `xai-acp-lib` crate | **ACP** | 同框架可接：新增 `GrokDialect` + 二进制定位；协议细节需读 `xai-acp-lib` 定稿 |
-| **kimi-code**（Moonshot，`@moonshot-ai/kimi-code` 2.0.2，bin `kimi`） | `kimi acp` 子命令（`src/cli/sub/acp.ts`） | **ACP** | 同框架可接；注意与 Python `kimi-cli` 的 `kimi` 命令同名冲突（已有身份区分记录） |
-| **minimax-code**（`minimax-code` 0.5.2，bin `mcode`） | `packages/tui/src/acp/agent.ts` 用 `@agentclientprotocol/sdk` | **ACP** | 同框架可接：模型/登录门控（`TuiLoginRequiredError`）等 profile 细节待读 |
+| **grok-build**（xAI，Rust workspace） | `xai-acp-lib` 是 gateway/转发层，`xai-grok-pager` 是 ACP **客户端**（leader） | ACP（客户端侧） | **需先确认 server 暴露方式**：仓库内未见独立的 stdio ACP server 入口（bin/ 仅 protoc）；下一步是查 `xai-grok-agent` 是否可作为 server 进程启动，再定 `GrokDialect` |
+| **kimi-code**（Moonshot，`@moonshot-ai/kimi-code` 2.0.2，bin `kimi`） | `kimi acp`（`dist/main.mjs acp`，`@moonshot-ai/acp-server` 驱动） | **ACP** | **已接入**（`src/native_executor/kimi_code.rs`）：身份 "Kimi Code CLI" 2.0.2、裸模型 id、`thinking` 选项模型相关故不映射、权限 `approve_once`/`reject`、`plan` 与 `available_commands_update` 透传、usage 无 cost。只认 npm `dist/main.mjs` 入口，绝不解析 PATH 裸 `kimi`（与 Python kimi-cli 区分） |
+| **minimax-code**（`minimax-code` 0.5.2，bin `mcode`） | `mcode acp`（`node dist/cli.js acp`） | **ACP** | **已接入**（`src/native_executor/minimax.rs`）：身份 "minimax-code" 0.5.2、模型值 `m:<provider>:<model>[:v:<variant>]` wire 格式、权限 `allow-once`/`deny`、`thinkingEffort` 模型相关故不映射。登录走 `mcode acp login --region cn\|global`（真实登录待账号验证） |
 | **ZCode**（zai-org，`@zcode/cli` 3.14.0） | `zcode app-server` / `agent-server` | 自有 app-server JSON（与 Codex app-server 同类） | 可接但走**自有协议**路径（类似 codex 适配），工作量大于 ACP 方言 |
 | opencode（opencode-ai，Go 重写版） | 仅 TUI | 无结构化入口 | **暂不接**：当前 Go 主干没有 serve/RPC 模式（TS 时代有 `opencode serve`；MiMo-Code 正是 TS 版 fork 并自带 ACP） |
 | Kiro / KiroCrew / Hermes / pi / anomalyco | 未在本次深扫范围 | 待评估 | 按同方法逐个补评 |

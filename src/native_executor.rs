@@ -12,7 +12,9 @@ use tokio::{
 mod acp;
 mod claude;
 mod deepseek;
+mod kimi_code;
 mod mimo;
+mod minimax;
 
 /// Implemented host controls. These describe our adapter, not account access.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -34,6 +36,8 @@ pub fn capabilities(app_id: &str) -> NativeCapabilities {
         "claude" => Some("claude-stream-json"),
         "deepseek" => Some("deepseek-acp"),
         "mimo" => Some("mimo-acp"),
+        "kimi-code" => Some("kimi-code-acp"),
+        "minimax" => Some("minimax-acp"),
         _ => None,
     };
     let managed = protocol.is_some();
@@ -93,6 +97,8 @@ pub fn validate_binding(
         // MiMo is a multi-provider harness: providerID/modelID with at least
         // one variant segment allowed inside the modelID half.
         "mimo" => model.split('/').count() >= 2 && model.split('/').count() <= 8,
+        "kimi-code" => model.starts_with("kimi-"),
+        "minimax" => model.starts_with("m:"),
         _ => false,
     };
     anyhow::ensure!(
@@ -235,6 +241,12 @@ pub async fn execute_with_control(
     }
     if req.app_id == "mimo" {
         return mimo::execute_with_control(req, events, cancel, controls).await;
+    }
+    if req.app_id == "kimi-code" {
+        return kimi_code::execute_with_control(req, events, cancel, controls).await;
+    }
+    if req.app_id == "minimax" {
+        return minimax::execute_with_control(req, events, cancel, controls).await;
     }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(req.max_duration_secs);
     if *cancel.borrow() {
@@ -413,6 +425,12 @@ fn validate_request(req: &NativeRequest) -> Result<()> {
     }
     if req.app_id == "mimo" {
         mimo::validate_request(&req)?;
+    }
+    if req.app_id == "kimi-code" {
+        kimi_code::validate_request(&req)?;
+    }
+    if req.app_id == "minimax" {
+        minimax::validate_request(&req)?;
     }
     Ok(())
 }

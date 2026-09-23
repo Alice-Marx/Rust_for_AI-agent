@@ -123,7 +123,7 @@ const fn subscription_channel(app_id: &'static str) -> ChannelContract {
 
 /// 受管应用与其可用计费渠道的静态合同。DeepSeek 官方发行只有充值式
 /// API（dsh 适配不宣称订阅 OAuth），因此没有订阅渠道。
-const CATALOG: [ChannelContract; 9] = [
+const CATALOG: [ChannelContract; 13] = [
     api_channel("codex"),
     subscription_channel("codex"),
     api_channel("kimi-cli"),
@@ -135,6 +135,10 @@ const CATALOG: [ChannelContract; 9] = [
     // Xiaomi-managed subscription accounts; both attestation sets are absent.
     api_channel("mimo"),
     subscription_channel("mimo"),
+    api_channel("kimi-code"),
+    subscription_channel("kimi-code"),
+    api_channel("minimax"),
+    subscription_channel("minimax"),
 ];
 
 pub fn catalog() -> &'static [ChannelContract] {
@@ -255,7 +259,17 @@ mod tests {
             .filter(|contract| contract.kind == ChannelKind::SubscriptionQuota)
             .map(|contract| contract.app_id)
             .collect();
-        assert_eq!(subscription_apps, ["codex", "kimi-cli", "claude", "mimo"]);
+        assert_eq!(
+            subscription_apps,
+            [
+                "codex",
+                "kimi-cli",
+                "claude",
+                "mimo",
+                "kimi-code",
+                "minimax"
+            ]
+        );
         assert!(channel("deepseek", CHANNEL_SUBSCRIPTION).is_none());
         assert!(channel("codex", CHANNEL_API).is_some());
         assert!(channel("unknown-app", CHANNEL_API).is_none());
