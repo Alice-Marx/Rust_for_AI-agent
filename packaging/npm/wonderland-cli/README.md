@@ -1,6 +1,6 @@
 # rust-ai-wonderland-cli
 
-Wonderland 0.11.0 终端客户端。Node.js 18+，连接已启动的 Wonderland Rust 后端；后端来自桌面安装包、便携包或源码构建。npm 包不包含后端。预览版本使用 `next` 频道，稳定频道 `latest` 仍为 0.7.0。
+Wonderland 0.11.0 后端兼容的终端客户端，当前 npm 客户端版本为 0.11.1。Node.js 18+，连接已启动的 Wonderland Rust 后端；后端来自桌面安装包、便携包或源码构建。npm 包不包含后端。预览版本使用 `next` 频道，稳定频道 `latest` 仍为 0.7.0。
 
 新增官方应用任务命令：
 
@@ -10,13 +10,14 @@ wonderland-cli apps --probe claude
 wonderland-cli --cwd /path/to/project --model kimi-for-coding work create kimi-cli "修复测试"
 wonderland-cli work start <id>
 wonderland-cli work events <id>
+wonderland-cli work duplicate <terminal-id>
 wonderland-cli work approve <id> <request-id> allow
 wonderland-cli work cancel <id>
 wonderland-cli work accept <id> "独立检查变更和测试结果"
 wonderland-cli intelligence refresh
 ```
 
-受管任务支持官方 Codex、Kimi CLI（Python）、Claude Code 和 DeepSeek Harness；其余工具提供终端入口。Claude 要求官方原生 npm 版 2.1.193，DeepSeek 要求官方 npm 版 0.1.6-alpha.2。Codex、Kimi、Claude 沿用官方登录，DeepSeek 继承 `DEEPSEEK_API_KEY`。工具需单独安装，未知版本可能阻止受管执行。任务完成执行后进入待验收。API 对话与官方工具任务是独立执行路径，实际可用能力以 `apps` 返回的后端信息为准。
+受管任务支持官方 Codex、Kimi CLI（Python）、Claude Code、DeepSeek Harness、Kimi Code（Node）、MiniMax Code、MiMo Code 和 Grok Build；其他登记工具保留终端入口。Claude 固定官方原生 npm 版 2.1.193，DeepSeek 固定 0.1.6-alpha.2，Kimi Code 固定 2.0.2，MiniMax Code 固定 0.5.2，MiMo 固定 0.1.15，Grok 固定 1.0.38。工具需单独安装，未知版本或身份回读不符会阻止受管执行。Grok 只使用 `XAI_API_KEY` 或官方程序实际广告的缓存令牌认证，不发起交互登录。任务完成执行后进入待验收。API 对话与官方工具任务是独立执行路径，实际可用能力以 `apps` 返回的后端信息为准。
 
 `apps --probe <id>` 只检测注册程序的版本、路径和 SHA-256，不调用模型或读取凭据。程序已安装不代表账号、模型或订阅可用；文件指纹也不是发行商签名认证。
 
@@ -33,6 +34,9 @@ wonderland-cli team get <team-id>
 wonderland-cli team start <team-id>
 wonderland-cli team events <team-id> --after 0
 wonderland-cli team cancel <team-id>
+wonderland-cli team routing preview <team-id> --file routing-policy.json
+wonderland-cli team routing saved <team-id>
+wonderland-cli team routing replay <team-id>
 ```
 
 `team.json` 示例；将 `cwd` 改为后端机器上的绝对项目路径，并将规划器模型替换为当前账号实际支持的精确 ID：
@@ -57,6 +61,22 @@ wonderland-cli team cancel <team-id>
 ```
 
 `nodes: []` 由规划器生成计划；也可提交带 `id/objective/dependencies/write_paths/acceptance/executor` 的节点。验收命令使用独立的 `program` 和 `args`，不执行拼接的 shell 命令。固定策略沿用规划器执行器；自动策略需要显式候选列表以及已核验的模型、计费渠道和价格，条件不足时后端会报告阻塞原因。事件的 `seq` 可作为下一次 `--after` 的游标；取消以服务返回的最终状态为准。
+
+路由策略文件是严格的 `RoutingPolicy` JSON 对象。例如：
+
+```json
+{
+  "required_categories": ["Coding"],
+  "category_weights": { "Coding": 1.0 },
+  "minimum_quality": 0.75,
+  "billing_channel": "api",
+  "estimated_input_tokens": 12000,
+  "estimated_output_tokens": 4000,
+  "budget_usd": 1.5
+}
+```
+
+`routing preview` 使用文件中的约束在线刷新证据并保存本次决策；`routing saved` 使用 Team 创建时保存的 `routing_policy` 再次在线预览；`routing replay` 只读取最近一次持久化决策，不联网刷新。三者都不会启动 Team，也不会解除 Automatic 的预算与身份闸门。`work duplicate` 只接受已终止的独立任务，返回新的 Draft；它保留任务请求，不复制旧 session、输出或错误，也不自动启动。
 
 官方价格与 LiveBench 数据分别刷新：
 

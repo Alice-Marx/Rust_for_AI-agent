@@ -474,6 +474,10 @@ fn observe_identity(requested: &str, banner: Option<&str>, package: Option<&str>
             "kimi-code",
             r"(?i)^(?:kimi-code|kimi code)\s+([0-9][A-Za-z0-9.+-]{1,95})$",
         ),
+        (
+            "grok",
+            r"(?i)^grok\s+([0-9][A-Za-z0-9.+-]{1,95})(?:\s+\([^\r\n]{1,64}\))?(?:\s+\[(?:alpha|stable)\])?$",
+        ),
     ];
     if let Some(banner) = banner {
         for line in banner
@@ -570,6 +574,9 @@ mod tests {
         assert!(result["version"].is_null());
         assert_eq!(result["identity"]["status"], "unknown");
         let result = observe_identity("kimi-code", Some("2.0.1"), Some("@moonshot-ai/kimi-code"));
+        assert_eq!(result["identity"]["matches_requested"], true);
+        let result = observe_identity("grok", Some("grok 1.0.38 (4247f66) [stable]"), None);
+        assert_eq!(result["version"], "1.0.38");
         assert_eq!(result["identity"]["matches_requested"], true);
     }
 

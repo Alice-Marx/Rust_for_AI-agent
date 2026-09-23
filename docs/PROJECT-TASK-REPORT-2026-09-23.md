@@ -1,8 +1,8 @@
 # 总项目任务报告
 
-日期：2026-09-23
-仓库：[Alice-Marx/Rust_for_AI-agent](https://github.com/Alice-Marx/Rust_for_AI-agent)，main = `d8c3461`
-版本基线：0.11.0（`24dbf54`）+ 本阶段 13 个提交
+日期：2026-09-23（含 Grok Build ACP 适配与 G3 文档/测试改进）
+仓库：[Alice-Marx/Rust_for_AI-agent](https://github.com/Alice-Marx/Rust_for_AI-agent)，当前分支 `handoff-development`；身份回读提交 `09a1014` 后继续；CLI/桌面交付已提交为 `03a8ff9`
+版本基线：0.11.0（`24dbf54`）+ 当前开发分支；本轮 Grok ACP、文档同步与测试闸门见「一·本轮交付」
 配套文档：[文档指南](DOCUMENT-GUIDE-2026-09-23.md)（每份文档的用途）、[后续路线图](ROADMAP-2026-09-23.md)（H01–H10 分解）
 
 ## 一、完成的工作（总项目视角）
@@ -13,7 +13,7 @@
 
 API Agent 与 SSE、Rust egui 桌面、Rust/npm 双 CLI、官方工具 Work/Chat、Teams DAG 与独立 Git 工作区、持久事件与权限交互、验收检查、LiveBench/价格来源快照、SQLite v1→v2 迁移、Windows 打包、npm 发布（`next=0.11.0`）。Kimi 订阅账号完成过真实 Teams 协作实测（12 项主机验收）。
 
-### 本阶段新增（`24dbf54`..`d8c3461`，13 个提交）
+### 本阶段新增（`24dbf54` 之后的当前开发分支）
 
 **H02 数据合同——全部四项完成：**
 1. **模型身份注册表**（`model_identity.rs` + 内嵌种子 v1.1）：精确 (app_id, model, reasoning_effort) → LiveBench 条目的 attestation 或显式 unknown；种子 6 条记录（3 attested：kimi-k2.7-code、kimi-k3、deepseek-v4-pro，均带官方定价文档 + 榜单 byte-identical 行双证据）。
@@ -26,30 +26,66 @@ API Agent 与 SSE、Rust egui 桌面、Rust/npm 双 CLI、官方工具 Work/Chat
 - **Automatic 团队启动路径打通**：在线刷新→身份→决策（事件持久化）→决策 selected 且无硬预算→`set_planner` 写回绑定→进入执行路径（与固定执行同等成本地位）；blocked/刷新失败/硬预算保持诚实阻塞并带候选级原因。
 - 预览/保存策略/重放三个 HTTP 接口。
 
-**anytool 官方工具接入（参考 codex-host 的 profile 化方法）——受管执行器 4→7：**
+**anytool 官方工具接入（参考 codex-host 的 profile 化方法）——受管执行器 4→8：**
 - **通用 ACP 会话引擎**（`native_executor/acp.rs`）：从 DeepSeek transport 泛化（帧循环/生命周期/权限/取消），方言差异收敛为 `AcpDialect` trait；**上游子模块零修改**，适配全在 Wonderland 侧。
 - 新接入 **mimo**（@mimo-ai/cli 0.1.15）、**kimi-code**（@moonshot-ai/kimi-code 2.0.2）、**minimax-code**（0.5.2）——方言细节全部按上游源码逐项核对并 fail-closed。
-- 协议评估结论：ACP 是 anytool 工具收敛点；ZCode 走自有 app-server 协议；opencode Go 版无结构化入口；grok-build 需先确认 server 暴露方式。
+- 新接入 **Grok Build**（xAI CLI 1.0.38）：`grok agent stdio`、非交互 authenticate、模型/档位精确回读、一次性权限、x.ai 扩展、usage 与取消均已完成离线协议验证；真实账号握手仍待 H01。
+- 协议评估结论：ACP 是 anytool 工具收敛点；ZCode 走自有 app-server 协议；opencode Go 版无结构化入口。
 
 ### 当前能力边界（诚实声明）
 
-`auto_dispatch_ready=false` 仍是正确状态：全部渠道的账号级计费字段 unknown、无真实账号实测。无预算 Automatic 派工代码路径已就绪，等账号登录后即可真实验证。硬预算（`budget_usd`）阻塞保持到 H04 闭环。
+`auto_dispatch_ready=false` 仍是正确状态：Codex 可回读 API key/ChatGPT 账号渠道与计划档位；Claude、ACP 与 Kimi CLI 已增加工具/模型配置身份记录，但各自账号渠道与真实服务端落点尚未全部实测。Grok 的 API key 认证可证明 `billing_channel=api`，缓存令牌渠道继续 unknown。账号实付、额度、限速、重置周期仍未核验。无预算 Automatic 派工代码路径已就绪，等账号登录后即可真实验证；硬预算（`budget_usd`）阻塞保持到 H04 闭环。
+
+### 本轮交付（12 个程序/测试文件 + 配套报告）
+
+1. **两个 CLI 的路由策略命令完成**（原「未完成任务」表第 3 行）：Rust CLI 与 npm CLI 均新增 `team routing preview <id> --file <policy.json>`（显式约束在线预览，typed JSON 校验）、`team routing saved <id>`（用团队保存的 routing_policy 预览）、`team routing replay <id>`（重放最新持久化决策，不刷新网络）。三个命令严格透传既有 HTTP 合同，ID 单段 URL 编码，非法参数不发请求。
+2. **桌面 Teams 阻塞原因面板完成**（H06 起步项）：Teams 详情页新增「路由决策」区，渲染 `routing_decision`/`binding_applied`/`routing_preview` 事件——决策状态、解释、逐候选状态与拒绝原因、质量分/估算成本、epoch 与身份映射版本证据链；价格面板新增 `dispatch_readiness` 就绪状态与 `missing` 阻塞清单、`automatic_dispatch` 两档状态文案（改为读取后端事实，移除已过时的「Automatic 尚未开放自动价格调度」硬编码文案）。
+3. **Grok Build 受管 ACP 接入完成（离线）**：通用 ACP runner 新增 initialize 后、session/new 前的可选 authenticate 生命周期；Grok 方言固定官方版本 1.0.38，校验 `_meta.grokShell` / `_meta.agentVersion`，只选择 `xai.api_key` 或 `cached_token`，并强制 `_meta.headless=true`。模型、reasoning effort、provider、一次性权限、x.ai 扩展、usage、取消和进程回收均有离线 fixture。GitHub 子模块提交 `4247f661689354b831191f11eeeac8424993fe3d` 与归档内 `SOURCE_REV=9bb727ccdff0a793ee73bcde4e2e09cbef6b5387` 分属归档提交和 monorepo 同步点，已通过同一不可变 codeload 归档核对，并非冲突。真实官方程序和账号推理仍待实测。
+4. **ZCode 源码取回待深读**：按固定提交 `872ad96` 取回（`upstream-study/ZCode`）。monorepo 结构确认（`apps/zcode-cli`、`packages/server|rpc|zcode-server-cli`），接入仍按自有 app-server 协议（codex 模式独立 transport）；注意源码仓 `apps/zcode-cli` 版本显示 0.16.9 且标 private，实现前需先核对 npm 发布物 `@zcode/cli` 3.14.0 与该提交的对应关系。
+5. **H01 Codex 身份回读第一步**：新增脱敏 `NativeIdentity`，Codex 执行前通过官方 app-server `config/read`、`account/read` 和 `thread/start` 保存配置模型/档位、`api` 或 `subscription` 渠道、ChatGPT 计划档位，以及线程回读的生效模型/提供商/默认档位。账户邮箱不进入身份事件；账户未登录或账号类型不受支持时，在发送提示前失败关闭。
+6. **H01 其他原生工具身份回读扩展**：Claude 保存固定 CLI 版本/二进制指纹、已应用模型/档位、first-party provider 边界及成功结果里的模型用量；ACP 通用会话引擎保存工具版本/指纹、会话配置模型、已选择模型，以及模型 ID 明确携带的 provider（DeepSeek、MiMo、MiniMax、Grok）；DeepSeek 与 Grok 另回读 reasoning effort。Grok 仅在明确选择 `xai.api_key` 且认证成功后记录 API 计费渠道；缓存令牌不推断渠道或账号计划。Kimi Code 的模型 ID 不携带 provider，故 provider 保持 unknown；Python Kimi 保存受限后的本地精确模型配置，但协议不回显实际生效模型。真实账户闭环尚未完成。
+7. **H04 usage 归档（部分完成）**：规划 child、执行/评审 child 与每次重试结束时，把原生工具 `usage` 事件按 `workflow_id` 归入 `usage_observed` Teams 事件，并标记 phase、node、attempt、app、model、effort。最多保留最近 16 个快照；Claude CLI 与 MiMo harness 报告的 USD 值标成未确认来源，不做快照求和；估算与已确认金额都明确为空。**美元预算仍在派工前阻塞**：usage 事件不等于发票，也不能限制在途消费；预留账本尚未接入派工/结算。
+8. **H05 终态任务复制首步**：独立终态 workflow 可通过 `POST /api/v1/workflows/{id}/duplicate` 或 Rust/npm CLI `work duplicate <id>` 复制为新 Draft，并在事务内保存 `duplicated_from` 来源事件。保留任务请求配置，但不复制旧原生 session、输出或错误，不自动启动；活动任务和 Teams-owned child 被拒绝。**H05 原生恢复/分叉尚未完成**，所有适配器 `resume/fork` 仍为 false。
+9. **G3 文档与测试信号改进**：npm README 补齐 duplicate 与 routing 命令；仓库外 `upstream-study/PROVENANCE.md` 记录 Grok/ZCode 固定来源；版本探测分离 stdout/stderr，避免 PowerShell CLIXML 污染；Kimi 同名识别改为纯函数测试；真实 PTY 时序测试明确为外部集成测试；清除 native executor 编译警告。
+10. **npm CLI 预览发布准备**：npm registry 已占用 0.11.0，因此将包版本升为 0.11.1（兼容后端 0.11.0），目标 dist-tag 为 `next`。本地 tarball 已按 5 文件白名单打包，SHA-256 `F06B76B511DDBD0E7BBFB65935DB2A6CE6CBACBBD27E4E544D8FD141DE3F853C`；npm 身份检查返回 401，故远端发布与 integrity 核验尚未完成。
+
+### 本轮报告对账
+
+修正了待办表中已实现的 CLI 命令与桌面面板状态；Grok Build 已从协议线索推进到第 8 个受管执行器，并完成全离线生命周期和负路径验证。源码归档两个 SHA 的含义已核对并记录到溯源清单。Codex 与其他原生工具身份字段均通过脱敏事件持久化。桌面真实窗口检查、Grok 官方安装/账号握手和其余依赖登录的 H01 实测仍待完成。
 
 ## 二、各文件的说明
 
-主程序 `src/` 共 53 个模块 + 5 个执行器子模块 + 4 个 bin（约 3.7 万行）；逐文件历史职责见 [FILE_CATALOG-2026-09-21](FILE_CATALOG-2026-09-21.md)（按 0.11.0 基线，新增模块以本报告为准）。
+主程序 `src/` 的历史逐文件职责见 [FILE_CATALOG-2026-09-21](FILE_CATALOG-2026-09-21.md)（按 0.11.0 基线）；其后的新增模块与当前职责以本报告为准，避免沿用已变化的文件数量。
 
 **受管执行器（官方工具适配层，全部不修改上游）：**
 
 | 文件 | 说明 |
 | --- | --- |
-| `native_executor.rs` | 执行器门面：capabilities、绑定校验（模型归属/档位）、dispatch、共享帧读取/事件/进程树工具 |
-| `native_executor/acp.rs` | **通用 ACP 会话引擎**（本轮新增）：AcpRunner + AcpDialect trait；JSON-RPC 循环、initialize/session/prompt、工具状态机、一次性权限（read-only/失联永不授权）、取消 |
+| `native_executor.rs` | 执行器门面：capabilities、绑定校验、共享帧读取/事件/进程树工具；`NativeIdentity`、Codex 配置/账户/线程回读、Python Kimi 受限配置模型与工具指纹 |
+| `native_executor/acp.rs` | **通用 ACP 会话引擎**：AcpRunner + AcpDialect trait；JSON-RPC 生命周期、工具状态机、一次性权限、取消；回读工具版本/指纹、已配置/已选择模型、方言明确提供的 provider 与 reasoning effort |
+| `native_executor/grok.rs` | Grok Build 方言：1.0.38 双身份闸、非交互认证、模型/档位回读、一次性权限、x.ai 扩展、usage、取消与离线 fixture |
 | `native_executor/deepseek.rs` | DeepSeek Harness 方言（隔离 profile、版本/哈希双闸、JSON 数组模型值） |
-| `native_executor/claude.rs` | Claude Code 双向 stream-json（严格 2.1.193） |
+| `native_executor/claude.rs` | Claude Code 双向 stream-json（严格 2.1.193）；保存应用模型/档位、first-party provider 边界与成功结果的 modelUsage 模型 |
 | `native_executor/kimi_code.rs` | Kimi Code·Node 方言（本轮新增）：只认 npm `dist/main.mjs`，与 Python kimi 身份隔离 |
 | `native_executor/mimo.rs` | MiMo Code 方言（本轮新增）：平台二进制定位（launcher 包 + 平台包） |
 | `native_executor/minimax.rs` | MiniMax Code 方言（本轮新增）：`m:p:m[:v:v]` wire 模型值 |
+
+**本轮程序与测试文件：**
+
+| 文件 | 说明 |
+| --- | --- |
+| `src/bin/wonderland-cli.rs` | Rust CLI 的 `team routing preview/saved/replay` 与 `work duplicate` 命令；参数/JSON 校验和路由接口映射测试 |
+| `packaging/npm/wonderland-cli/bin/wonderland.js` | npm CLI 的路由策略命令与 `work duplicate` HTTP 透传；限制策略文件大小、校验 JSON 对象并透传既有合同 |
+| `packaging/npm/wonderland-cli/test/workflows.test.js` | workflow CLI 测试；验证 `work duplicate` 路径编码、POST 空对象和不隐式 start |
+| `packaging/npm/wonderland-cli/test/teams-pricing.test.js` | npm CLI 路由策略请求、编码和非法参数不发请求的测试 |
+| `src/bin/desktop/teams.rs` | Teams 详情中的路由决策事件、候选拒绝原因、证据链和派工就绪状态面板 |
+| `src/desktop_bridge.rs` / `src/app_diagnostics.rs` | 注册 Grok 官方应用/profile 与版本 banner；版本探测分离 stdout/stderr，降低环境噪声 |
+| `packaging/npm/wonderland-cli/README.md` | 补齐任务复制、路由预览/保存/重放命令和严格 RoutingPolicy JSON 示例 |
+| `packaging/npm/wonderland-cli/package.json` | npm CLI 预览包版本 0.11.1；兼容 0.11.0 后端，拟发布到 `next` |
+| `src/workbench_service.rs` | 工作流完成后持久化脱敏 `identity_readback`；为终态独立任务提供 duplicate API，拒绝 Teams child |
+| `src/workflow.rs` | SQLite 工作流状态机和事件账本；把终态任务原子复制为全新草稿，不复用 session/output |
+| `tests/claude_native/protocol.rs` | Claude 离线协议夹具；核对成功结果的模型回读和身份字段脱敏边界 |
+| `docs/PROJECT-TASK-REPORT-2026-09-23.md` | 本总报告；同步当前实现、验证边界与剩余工作 |
 
 **证据与路由层（H02/H03 数据合同）：**
 
@@ -66,36 +102,55 @@ API Agent 与 SSE、Rust egui 桌面、Rust/npm 双 CLI、官方工具 Work/Chat
 
 | 文件 | 说明 |
 | --- | --- |
-| `team_service.rs` | Teams HTTP 合同 + Automatic 启动路径（决策→`set_planner` 写回→执行） |
+| `team_service.rs` | Teams HTTP 合同 + Automatic 启动路径（决策→`set_planner` 写回→执行）；将 Planner、节点执行/评审/重试 child 的工具 usage 按 workflow 归档为带尝试归属、未确认金额分类的事件 |
 | `team_store.rs` | 团队/节点/attempt 权威存储 + 微美元账本 + `set_planner` |
 | `team_workspace.rs` / `team_checks.rs` | 独立 Git 工作区与主机验收 |
-| `workflow.rs` / `workbench_service.rs` | 单任务 SQLite 状态机（v2）与执行控制 |
+| `workflow.rs` / `workbench_service.rs` | 单任务 SQLite 状态机（v2）、执行控制与原生身份回读持久化 |
 
 **其余模块**：API Agent（`agent/api/provider/anthropic/responses/router/tools/`）、会话（`session/session_index/memory/`）、安全（`permissions/sandbox*/mcp*/process_tree/`）、桌面与终端（`desktop_*/bin/desktop/`）、诊断（`app_diagnostics/subscription/cliproxy/`）、npm CLI（`packaging/npm/wonderland-cli/`）、Windows 打包（`packaging/windows/`）、上游参考（`anytool/` 16 子模块，只读）。
 
 ## 三、需要做的测试
 
-**自动回归（本机当前全过）**：库 437 + Rust CLI 3 + 桌面 18 + 协议集成 7 + npm 14；7 项外部条件测试按设计忽略；`cargo fmt --check` 干净。已知例外：desktop_bridge×3/desktop_terminal×1 在未改动基线即可复现（本机 PowerShell CLIXML 污染与真实 kimi CLI 行为），非回归。
+**本轮自动化验证（Rust stable 1.98.1）：**
+
+| 命令 | 结果 |
+| --- | --- |
+| `cargo fmt --all -- --check` | 通过 |
+| `cargo check --locked --all-targets --features ui-snapshots` | 通过；native executor 现有编译警告已清零 |
+| `cargo test --locked native_executor::grok --lib` | 6/6 通过；覆盖完整认证/会话/配置/提示/工具/权限/usage/取消及负路径 |
+| `cargo test --locked native_executor::acp --lib` | 11/11 通过；认证钩子和工具状态收紧未使既有方言回归 |
+| `cargo test --locked desktop_bridge::tests --lib` | 19 项通过，1 项安装型测试按设计忽略 |
+| `cargo test --locked app_diagnostics::tests --lib` | 8 项通过，1 项安装型测试按设计忽略 |
+| `cargo test --locked native_executor::tests --lib` | 16/16 通过 |
+| `cargo test --locked --all-targets --features ui-snapshots` | 库 454 项通过、8 项按外部条件忽略；Rust CLI 4 项、桌面 18 项、协议集成 7 项通过；0 失败 |
+| `npm test --prefix packaging/npm/wonderland-cli` | 16/16 通过 |
+| `npm pack --dry-run --json --pack-destination dist` | 通过；5 个白名单文件，0.11.1 包，registry integrity `sha512-nm/ojEZyHK7jQM89AqvpiQ9ZUBQcb4uUCkZHxiDX7tVprlBzwpFAFzSLgXTmigAeHDuKtv6jQVOkLsJGF10zhw==` |
+
+最终全目标回归通过。PowerShell stdout/stderr 分离和 Kimi 纯函数识别使此前 CLIXML/PATH 相关用例恢复稳定；超时用例在本轮并行全测通过；真实 PTY/ConPTY 时序测试现按其外部环境属性显式忽略。全测发现的 3 个仅测试使用导入警告随后清除，并由无警告的全目标 `cargo check` 复验。
+
+**仍需人工确认：**在桌面应用打开 Teams 详情，分别检查无路由事件、有 `routing_decision`、有 `binding_applied`，以及 `dispatch_readiness.missing` 有值/为空时的布局与长解释换行。自动化测试覆盖逻辑，尚不能替代该视觉检查。
 
 **真实证据（已有，历史）**：Kimi 订阅 Teams 实测、SQLite v1→v2 迁移实测、五源在线刷新（经代理）、真实官方文档解析冒烟（fixture 存 `F:\everyAI\all\pricing-fixtures-20260922\`）。
 
 **待做（需要你登录账号，按序执行）：**
-1. `npm i -g @mimo-ai/cli@0.1.15 @moonshot-ai/kimi-code@2.0.2 minimax-code@0.5.2`，各跑真实 ACP 握手（验证身份/banner 假设，回填固定指纹）。
-2. 各工具真实登录（kimi/mimo/minimax 官方流程）+ 真实推理、取消、失败注入各一次；脱敏 fixture 归档 `tests/`。
+1. 安装固定版本的 MiMo、Kimi Code、MiniMax Code 与官方 Grok 1.0.38，各跑真实 ACP 握手（验证身份/banner 假设，回填固定发布指纹）。
+2. 各工具真实登录并完成真实推理、允许/拒绝、取消和失败注入；Grok 分别覆盖 `XAI_API_KEY` 与缓存令牌；脱敏 fixture 归档 `tests/`。
 3. Automatic 无预算路径：独立示例 Git 项目跑一次跨厂商团队（≥2 厂商不同节点），主机测试通过、源 checkout 不变，证据归档（H01 第 4 步）。
 4. 真实账号下的 LiveBench 在线刷新 + 路由预览端到端。
+5. Codex：在 API key 与 ChatGPT 账号各执行一次脱敏闭环，核对 `identity_readback` 中的账户渠道、计划档位、生效模型/提供商/档位，再确认邮件等账户个人信息未写入事件；Claude/Kimi/DeepSeek/MiMo/MiniMax 对照各自字段确认未知项仍为空、不误报渠道。
 
 ## 四、还未完成的任务与完成思路
 
 | 任务 | 现状 | 完成思路 |
 | --- | --- | --- |
-| **H01 真实账号闭环** | 等你登录 | 按上节测试 1–3 执行；Codex 补生效配置回读，Claude/DeepSeek 补真实推理与失败注入 |
-| **H04 硬预算闭环** | 账本已有、未接线 | 派工前按估算成本×安全系数走 `team_store` 微美元预留，终态结算/释放，重启对账；适配器 usage→attempt 账目（mimo 的 `reported_cost_usd` 标为非确认值）；闭环后解除 `budget_usd` 阻塞 |
-| **两个 CLI 的路由策略命令** | 仅 HTTP | Rust/npm CLI 加 `team routing save/preview/replay`（透传三接口）+ 双端测试 |
-| **桌面阻塞原因面板（H06 起步）** | 无 UI | Teams 界面渲染 `dispatch_readiness.missing` 与 `routing_decision`/`binding_applied` 事件（「为什么阻塞/为什么选它」） |
-| **grok-build 接入** | 评估完成 | 查 `xai-grok-agent` 有无 headless/serve 模式；有则 GrokDialect，无则记为终端手动 |
-| **ZCode 接入** | 评估完成 | 自有 app-server 协议，按 codex 模式独立 transport，锁 3.14.0 |
-| **H05 恢复/分叉** | resume/fork=false | 先立数据合同（原生 session id/工具版本/revision/可恢复性检查），逐适配器实测后才置 true |
+| **H01 真实账号闭环** | Codex 回读账号渠道/计划和线程模型；Claude、ACP 与 Python Kimi 的工具指纹和可证实模型设置代码已完成。账号渠道/计划仅 Codex 有显式回读；其余字段遵守未知保留规则。真实账户测试未完成，需登录 | 按上节测试 1–5 执行，归档脱敏事件；仅在工具官方会话回传明确账号计费/额度信息时扩充 `billing_channel`/`account_plan`，否则保持 `None`。根据实测更新工具版本与指纹支持策略 |
+| **H04 硬预算闭环** | 已把每个 planner/node-attempt child 的原生 usage 事件按 workflow/phase/attempt 归档；金额有单独未确认分类。预留/终态结算仍未接线，`budget_usd` 继续阻塞 | 下一步建立 attempt 级 `estimated_usd`/`confirmed_usd` 数据合同；估算按 routing 成本与安全系数预留；接入官方确认账单源和进程内中断/配额机制后，才可结算并开放硬预算。凡只能拿到 token 数/CLI 或 harness 自报金额的渠道，明确标记不支持硬上限并只显示软提示；检查 Planner、评审、并行子任务、失败重试、取消及崩溃恢复均有费用归属 |
+| **两个 CLI 的路由策略命令** | 实现、自动测试完成；随提交 `03a8ff9` 交付 | 已提供 `preview/saved/replay`，严格透传既有 HTTP 合同；无需额外 CLI 测试 |
+| **桌面阻塞原因面板（H06 起步）** | 实现、桌面自动化测试完成；随提交 `03a8ff9` 交付 | 已渲染 `dispatch_readiness.missing` 与路由事件；还需按本报告手工检查事件差异、长解释和空数据情形 |
+| **Grok Build 真实闭环** | 第 8 个受管执行器的代码、离线 fixture、应用注册和文档已完成；`resume/fork=false`，无真实安装/账号推理证据，固定发布二进制摘要待回填 | 安装官方 1.0.38，分别用 `XAI_API_KEY` 与缓存令牌完成握手；执行真实推理、允许/拒绝、取消、认证失败和 usage 归档，保存脱敏 fixture 并回填发布指纹。真实 wire 不符时继续失败关闭并新增显式版本 profile |
+| **npm CLI 0.11.1 发布** | 本地包与 16 项测试通过，tarball 已生成；npm 当前登录失效（`npm whoami` 返回 E401），尚未发布 | 运行 `npm login --auth-type=web` 完成账号登录，再发布已校验 tarball 到 `next`；从 registry 核对版本、tag、SHA-256/integrity，并把核验结果补入本报告 |
+| **ZCode 接入** | 源码已取回，发布物对应关系待核 | 核对 `@zcode/cli@3.14.0` 与源码提交，再按其 app-server 协议实现独立 transport；不复用 ACP 假设 |
+| **H05 恢复/分叉** | 新增终态独立 workflow → 新 Draft 的 duplicate API/CLI（不复制 session/output、不自动启动；团队 child 禁止脱离父团队复制）；所有适配器 `resume/fork=false` | 继续完善终态状态/HTTP/CLI覆盖；注入崩溃、断网、审批等待、进程残留和集成中取消。后续按适配器持久化 session ID、工具版本/配置、workspace revision 并实测可恢复性；分叉历史与 Teams attempt 重试单独定合同，未验证前保持 false |
 | **H07 插件/定时/远程/PR/网站、H08 沙箱/MCP、H10 研究实验** | 未开始 | 按 [ROADMAP](ROADMAP-2026-09-23.md) 既有分解与验收门槛执行 |
 
-**执行顺序建议**：CLI 路由命令 + 桌面面板（纯代码，立即可做）→ 你登录账号做 H01 实测 → H04 闭环（解锁硬预算）→ grok/ZCode 适配 → H05/H07/H08 并行池 → H10 实验出结论。
+**执行顺序建议**：完成桌面视觉检查 → 你登录账号做 H01 实测（含 Codex API key/ChatGPT 两渠道、Grok 两认证路径及其他已接入工具）→ H04 预算闭环（只有兑现成本上限后才解除阻塞）→ G2 核对并适配 ZCode → H05/H07/H08 → H10 实验出结论。

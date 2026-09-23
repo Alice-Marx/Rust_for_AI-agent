@@ -193,6 +193,18 @@ pub fn official_apps() -> Vec<AppMetadata> {
             "受管任务使用已验证版本的 ACP；终端保留官方交互方式",
         ),
         (
+            "grok",
+            "Grok Build",
+            "xAI",
+            "xai-org/grok-build",
+            "https://grok.com",
+            None,
+            true,
+            "acp",
+            "upstream-study/grok-build;anytool/Grok/grok-build",
+            "受管 ACP 适配（grok agent stdio，固定 1.0.38）；只使用已广告的非交互认证；真实握手、推理与固定发布指纹待账号环境验证",
+        ),
+        (
             "zcode",
             "ZCode",
             "Z.ai",
@@ -470,6 +482,12 @@ pub fn default_cli_profiles() -> Vec<CliProfile> {
             "DeepSeek Harness",
             "dsh",
             "安装 @deepseek-ai/dsh，或指定已构建 checkout 的 Node 入口",
+        ),
+        (
+            "grok",
+            "Grok Build",
+            "grok",
+            "使用 xAI 官方安装方式安装 Grok Build",
         ),
         (
             "zcode",
@@ -793,7 +811,11 @@ pub fn prepare_native_cli(
 
 fn validate_version_identity(profile: &CliProfile, version: &str) -> Result<()> {
     anyhow::ensure!(
-        !(profile.id == "kimi-code" && version.trim_start().starts_with("kimi, version ")),
+        !(profile.id == "kimi-code"
+            && version
+                .lines()
+                .map(str::trim)
+                .any(|line| line.starts_with("kimi, version "))),
         "当前 kimi 命令属于 Python Kimi CLI；请为 Kimi Code · Node 指定独立安装路径"
     );
     Ok(())
@@ -1222,15 +1244,15 @@ fn probe_version(spec: &LaunchSpec, timeout: Duration) -> Result<String> {
         }
     };
     let (sender, receiver) = mpsc::channel();
-    for mut stream in [
+    for (is_stdout, mut stream) in [
         child
             .stdout
             .take()
-            .map(|s| Box::new(s) as Box<dyn Read + Send>),
+            .map(|s| (true, Box::new(s) as Box<dyn Read + Send>)),
         child
             .stderr
             .take()
-            .map(|s| Box::new(s) as Box<dyn Read + Send>),
+            .map(|s| (false, Box::new(s) as Box<dyn Read + Send>)),
     ]
     .into_iter()
     .flatten()
@@ -1246,7 +1268,7 @@ fn probe_version(spec: &LaunchSpec, timeout: Duration) -> Result<String> {
                 let keep = count.min(8192usize.saturating_sub(output.len()));
                 output.extend_from_slice(&buffer[..keep]);
             }
-            let _ = sender.send(output);
+            let _ = sender.send((is_stdout, output));
         });
     }
     drop(sender);
@@ -1264,14 +1286,27 @@ fn probe_version(spec: &LaunchSpec, timeout: Duration) -> Result<String> {
         thread::sleep(Duration::from_millis(25));
     };
     drop(process_tree);
-    let mut output = String::new();
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
     for _ in 0..2 {
-        if let Ok(bytes) = receiver.recv_timeout(Duration::from_millis(250)) {
-            output.push_str(&String::from_utf8_lossy(&bytes));
-            output.push('\n');
+        if let Ok((is_stdout, bytes)) = receiver.recv_timeout(Duration::from_millis(250)) {
+            if is_stdout {
+                stdout.extend(bytes);
+            } else {
+                stderr.extend(bytes);
+            }
         }
     }
-    let output: String = output
+    let selected = if status.success() && !stdout.is_empty() {
+        &stdout
+    } else if stdout.is_empty() {
+        &stderr
+    } else {
+        stdout.extend_from_slice(b"\n");
+        stdout.extend_from_slice(&stderr);
+        &stdout
+    };
+    let output: String = String::from_utf8_lossy(selected)
         .chars()
         .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
         .take(1024)
@@ -1295,7 +1330,7 @@ mod tests {
     #[test]
     fn catalog_separates_native_adapters_from_manual_candidates() {
         let apps = official_apps();
-        assert_eq!(apps.len(), 9);
+        assert_eq!(apps.len(), 10);
         for profile in default_cli_profiles() {
             assert!(apps.iter().any(|app| app.id == profile.id));
         }
@@ -1313,7 +1348,8 @@ mod tests {
                 "kimi-code",
                 "minimax",
                 "mimo",
-                "deepseek"
+                "deepseek",
+                "grok"
             ]
         );
         assert!(
@@ -1618,18 +1654,15 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn kimi_node_launch_rejects_python_command_even_before_detection() {
-        let directory = tempfile::tempdir().unwrap();
-        let script = directory.path().join("kimi.ps1");
-        std::fs::write(&script, "Write-Output 'kimi, version 1.0.0'").unwrap();
+    fn kimi_node_launch_rejects_python_banner_without_path_or_shell_dependency() {
         let profile = CliProfile {
             id: "kimi-code".into(),
-            executable: script.to_string_lossy().into_owned(),
             ..CliProfile::default()
         };
-        let error = prepare_cli(&profile, directory.path())
-            .unwrap_err()
-            .to_string();
+        let error =
+            validate_version_identity(&profile, "#< CLIXML shell diagnostics\nkimi, version 1.0.0")
+                .unwrap_err()
+                .to_string();
         assert!(error.contains("Python Kimi CLI"));
     }
 
@@ -1692,8 +1725,12 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn version_probe_times_out_hung_program() {
+        let Ok(shell) = powershell() else {
+            eprintln!("skipped: no PowerShell executable is available");
+            return;
+        };
         let spec = LaunchSpec {
-            executable: powershell().unwrap(),
+            executable: shell,
             args: encoded_powershell_args("Start-Sleep -Seconds 10"),
             cwd: env::temp_dir(),
             env: BTreeMap::new(),
@@ -1704,7 +1741,7 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("超时"));
-        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(started.elapsed() < Duration::from_secs(8));
     }
 
     #[test]

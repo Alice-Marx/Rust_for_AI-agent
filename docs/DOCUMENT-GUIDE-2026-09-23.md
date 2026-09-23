@@ -6,7 +6,7 @@
 
 | 文档 | 说明 |
 | --- | --- |
-| [根 README](../README.md) | 项目门面：Wonderland 是什么、0.11.0 版本概要、四个官方执行器、分发渠道（GitHub Releases / npm `next` 频道）。 |
+| [根 README](../README.md) | 项目门面：Wonderland 是什么、0.11.0 版本概要、官方执行路径与分发渠道（GitHub Releases / npm `next` 频道）。当前开发分支的 8 个受管执行器以总报告为准。 |
 | [docs/README](README.md) | 开发文档与仓库结构总览：代码模块位置表、0.11.0 本轮整理说明、版本特性摘要。 |
 | [DOCUMENT-GUIDE（本文档）](DOCUMENT-GUIDE-2026-09-23.md) | 每份文档的用途与阅读时机。 |
 | [STAGE-REPORT-2026-09-23](STAGE-REPORT-2026-09-23.md) | 最新阶段完成情况：H02 数据合同四项全部落地、H03 决策侧完成、验证证据与能力边界。**了解「现在做到哪了」先读这份。** |
@@ -48,6 +48,10 @@
 
 | 文档 | 说明 |
 | --- | --- |
+| [REVIEW-AND-PLAN-2026-09-23](REVIEW-AND-PLAN-2026-09-23.md) | 改进检查与后续工作完整规划（详细版）：ACP 引擎认证缺口、文档漂移、环境敏感测试等改进点（附证据），Grok/ZCode 接入与 H01–H10 的文件级实施计划。 |
+| [WORK-REPORT-2026-09-23-GROK-DIALECT](WORK-REPORT-2026-09-23-GROK-DIALECT.md) | G1/G3：Grok Build 第 8 个受管执行器、ACP 非交互认证、离线协议验证、文档与测试信号改进；列明真实账号边界。 |
+| [WORK-REPORT-2026-09-23-H05-NEW-DRAFT](WORK-REPORT-2026-09-23-H05-NEW-DRAFT.md) | H05 起步：终态独立任务复制为新草稿的 API、Rust/npm CLI、来源审计和原生恢复剩余边界。 |
+| [WORK-REPORT-2026-09-23-H04-USAGE](WORK-REPORT-2026-09-23-H04-USAGE.md) | H04 增量：Planner 与 node attempt 的原生 usage 观察归档、未确认金额语义、测试结果及硬预算剩余条件。 |
 | [WORK-REPORT-2026-09-23-IDENTITY-SEED-V1.1](WORK-REPORT-2026-09-23-IDENTITY-SEED-V1.1.md) | 身份种子 v1.1：59 报价模型 × 59 榜单行核验结论、deepseek-v4-pro attestation 依据。 |
 | [WORK-REPORT-2026-09-23-ROUTING-IDENTITY](WORK-REPORT-2026-09-23-ROUTING-IDENTITY.md) | routing-v2：决策消费身份注册表的语义与测试。 |
 | [WORK-REPORT-2026-09-23-ACCOUNT-BILLING](WORK-REPORT-2026-09-23-ACCOUNT-BILLING.md) | 账号计费合同：渠道语义、显式 unknown、dispatch blockers。 |

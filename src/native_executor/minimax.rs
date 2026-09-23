@@ -10,7 +10,9 @@
 use super::acp::{AcpDialect, AcpRunner};
 use crate::native_executor::{emit, NativeControl, NativeEvent, NativeRequest, NativeResult};
 use anyhow::{bail, ensure, Context, Result};
-use serde_json::{json, Value};
+#[cfg(test)]
+use serde_json::json;
+use serde_json::Value;
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
@@ -222,6 +224,12 @@ impl AcpDialect for MiniMaxDialect {
         );
         Ok(())
     }
+    fn confirmed_provider(&self, req: &NativeRequest) -> Option<String> {
+        let mut parts = req.model.split(':');
+        (parts.next() == Some("m"))
+            .then(|| parts.next().map(str::to_owned))
+            .flatten()
+    }
     fn permission_selection(&self, options: &[Value]) -> Result<(String, String)> {
         let allow = options
             .iter()
@@ -358,6 +366,7 @@ pub(super) async fn execute_with_control(
         events.clone(),
         &req,
     );
+    runner.set_executable_identity(PACKAGE_VERSION, &prepared.sha256);
     let outcome = tokio::select! {
         result = runner.run(&req) => result,
         _ = super::cancellation(&mut cancel) => Ok("cancelled".into()),
@@ -450,6 +459,10 @@ mod tests {
             ])
             .is_err());
         assert_eq!(dialect.model_value(&request(true)), "m:minimax:minimax-m3");
+        assert_eq!(
+            dialect.confirmed_provider(&request(true)).as_deref(),
+            Some("minimax")
+        );
         assert_eq!(dialect.effort_config_id(), None);
         assert_eq!(dialect.stop_status(Some("end_turn")).unwrap(), "completed");
         assert_eq!(dialect.stop_status(Some("cancelled")).unwrap(), "cancelled");

@@ -294,6 +294,7 @@ pub(super) async fn execute(
         controls,
         events.clone(),
     );
+    runner.set_executable_identity(SUPPORTED_VERSION, &prepared.sha256);
     let outcome = tokio::select! {
         result = runner.run() => result,
         _ = cancellation(&mut cancel) => Ok("cancelled".to_owned()),
@@ -383,6 +384,12 @@ impl Runner {
         }
     }
 
+    fn set_executable_identity(&mut self, version: &str, sha256: &str) {
+        self.result.identity.tool_version = Some(version.to_owned());
+        self.result.identity.executable_sha256 = Some(sha256.to_owned());
+        super::record_identity_evidence(&mut self.result.identity, "local_executable_probe");
+    }
+
     async fn write(&mut self, value: Value) -> Result<()> {
         let mut data = serde_json::to_vec(&value)?;
         ensure!(
@@ -451,10 +458,34 @@ impl Runner {
                 == Some("firstParty"),
             "Claude account provider is unknown or rerouted; native adapter requires firstParty"
         );
+        // The official CLI reports this only as firstParty. It establishes the
+        // Anthropic provider boundary, but does not distinguish API billing from
+        // a Claude subscription.
+        self.result.identity.effective_provider = Some("anthropic".into());
+        super::record_identity_evidence(
+            &mut self.result.identity,
+            "claude_first_party_account_provider",
+        );
         let applied = self
             .rpc("host-settings", json!({"subtype":"get_settings"}))
             .await?;
         validate_settings(&applied, &self.req)?;
+        self.result.identity.configured_model = applied
+            .pointer("/applied/model")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let applied_effort = applied
+            .pointer("/applied/effort")
+            .and_then(Value::as_str)
+            .filter(|effort| ["low", "medium", "high", "xhigh", "max"].contains(effort))
+            .map(str::to_owned);
+        self.result.identity.configured_reasoning_effort = applied_effort.clone();
+        if self.req.reasoning_effort.is_none()
+            || applied_effort.as_deref() == self.req.reasoning_effort.as_deref()
+        {
+            self.result.identity.effective_reasoning_effort = applied_effort;
+        }
+        super::record_identity_evidence(&mut self.result.identity, "claude_applied_settings");
         let mcp = self
             .rpc("host-mcp", json!({"subtype":"mcp_status"}))
             .await?;
@@ -619,6 +650,8 @@ impl Runner {
                     !usage.is_empty() && usage.keys().all(|model| model == &self.req.model),
                     "Claude result used an unrequested model or did not report model usage"
                 );
+                self.result.identity.effective_model = Some(self.req.model.clone());
+                super::record_identity_evidence(&mut self.result.identity, "claude_model_usage");
                 ensure!(
                     self.pending.is_empty(),
                     "Claude completed while approval was pending"

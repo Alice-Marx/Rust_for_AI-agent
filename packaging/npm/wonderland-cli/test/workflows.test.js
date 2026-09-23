@@ -33,6 +33,15 @@ test("managed task creation preserves explicit tool/model and does not auto-star
   assert.equal(result.requests[0].body.model, "kimi-k2.5");
   assert.equal(result.requests[0].body.prompt, "Fix a test");
 });
+test("duplicate copies a terminal task as a draft without starting it", async () => {
+  const result = await invoke(["work", "duplicate", "task 1"]);
+  assert.equal(result.code, 0);
+  assert.deepEqual(result.requests, [{
+    path: "/api/v1/workflows/task%201/duplicate",
+    method: "POST",
+    body: {},
+  }]);
+});
 test("approval requires an explicit decision and sends scoped request identity", async () => {
   const result = await invoke(["work", "approve", "task-1", "rpc-2", "deny"]);
   assert.equal(result.code, 0);

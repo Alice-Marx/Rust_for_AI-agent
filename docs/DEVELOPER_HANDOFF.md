@@ -347,7 +347,7 @@ npm test --prefix packaging/npm/wonderland-cli
 
 以下是建议的依赖顺序，均为待办，不是已完成承诺。H01/H02 可由两人并行，H03 依赖二者；H04 与 H03 共同决定何时能向用户开放成本控制。GUI 产品工作可以并行，但不得用前端状态掩盖后端阻塞。
 
-### H01：四个官方执行器的身份与真实模型闭环
+### H01：受管执行器的身份与真实模型闭环
 
 **位置：** `src/native_executor.rs`、`src/native_executor/claude.rs`、`src/native_executor/deepseek.rs`、`src/app_diagnostics.rs`、相关协议测试和适配文档。
 
@@ -388,6 +388,8 @@ npm test --prefix packaging/npm/wonderland-cli
 
 **位置：** `src/team_store.rs`、`src/team_service.rs`、原生 usage 事件、`src/pricing.rs`。
 
+**已交付（观察归档阶段，H04 未完成）：** `src/team_service.rs` 在 Planner 与每个 node attempt child 进入验证或终止时，将其原生 usage 事件按 workflow/phase/node/attempt 归入 `usage_observed`。CLI/harness 自报 USD 明确标为未确认，估算与 provider 确认金额保持空值，不对快照求和。此记录不是账单，也不限制在途消费；`budget_usd` 仍在派工前阻塞。实施细节与测试见 [H04 usage 工作报告](WORK-REPORT-2026-09-23-H04-USAGE.md)。
+
 1. 定义规划、执行、评审、重试、缓存和并发在途请求的费用归属，明确什么是估算、什么是提供商确认值。
 2. 派工前预留，终态结算/释放，异常和重启对账；订阅额度用其自身单位管理。
 3. 为官方工具设计可验证的输出/轮数限制、提前停止与在途超额策略。若工具无法保证硬 USD 边界，就保持该渠道不支持硬预算，UI 明示可用的软预警。
@@ -397,6 +399,8 @@ npm test --prefix packaging/npm/wonderland-cli
 ### H05：恢复、重试、分叉与长任务稳定性
 
 **位置：** `src/workflow.rs`、`src/workbench_service.rs`、`src/team_store.rs`、`src/native_executor*`、`src/process_tree.rs`。
+
+**已交付（新任务副本第一步，H05 未完成）：** 终态独立 workflow 可经 `POST /api/v1/workflows/{id}/duplicate` 或 Rust/npm `wonderland work duplicate <id>` 复制为 Draft；保留提示/工具配置/验收合同，生成新 ID，在事务内记录 `duplicated_from`。原生 session、输出和错误不复制，也不自动启动；Team-owned child 必须由父团队处理。此功能不是恢复、历史分叉或同一 attempt 重试；所有适配器的 `resume/fork` 继续为 false。细节见 [H05 新任务副本工作报告](WORK-REPORT-2026-09-23-H05-NEW-DRAFT.md)。
 
 1. 分开“继续同一原生会话”“复制成新任务”“从失败节点重试”“分叉历史”，分别定义数据和权限合同。
 2. 建立保存的原生 session id、工具版本、配置、工作区 revision 与恢复可用性检查；不可恢复时给出新任务流程。
@@ -432,7 +436,7 @@ npm test --prefix packaging/npm/wonderland-cli
 
 ### H09：官方工具升级与更多应用适配
 
-**已评估（2026-09-23，见 [anytool 接入评估](ANYTOOL-ADAPTER-ASSESSMENT-2026-09-23.md)）**：ACP 是 anytool 候选工具的收敛协议——MiMo（已接入，`src/native_executor/mimo.rs`，复用泛化的 `acp.rs` 框架）、grok-build（`xai-acp-lib`）、kimi-code（`kimi acp`）、minimax-code（tui ACP）全部可走 ACP 方言路径；ZCode 是自有 app-server 协议；opencode Go 主干无结构化入口暂不接。新增 ACP 工具 = 一个 dialect + 安装探测 + 注册。MiMo 的真实握手/推理与固定指纹待账号验证（H09 步骤 7–8）。
+**已评估并推进（2026-09-23，见 [anytool 接入评估](ANYTOOL-ADAPTER-ASSESSMENT-2026-09-23.md)）**：ACP 是 anytool 候选工具的收敛协议。MiMo、Kimi Code、MiniMax Code 与 Grok Build 均已通过独立 dialect 接入；Grok 另扩展了通用 ACP 的可选非交互 authenticate 生命周期，离线验证覆盖身份、模型/档位、权限、x.ai 扩展、usage 与取消，真实官方 1.0.38 安装和账号握手仍待 H01。ZCode 是自有 app-server 协议，下一步先核对 npm 发布物与固定源码提交；opencode Go 主干无结构化入口暂不接。所有新增工具的真实握手/推理与固定发布指纹仍须按 H09 步骤 7–8 验证。
 
 **位置：** `src/desktop_bridge.rs`、`src/app_diagnostics.rs`、`src/native_executor/`、`anytool/`、`REFERENCES.md`。
 

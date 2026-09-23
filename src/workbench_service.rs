@@ -1,7 +1,7 @@
 //! Service-owned native workflows. HTTP clients observe runs; they never own them.
 use crate::{
     api::AppState,
-    native_executor::{self, NativeControl, NativeEvent, NativeRequest},
+    native_executor::{self, NativeControl, NativeEvent, NativeIdentity, NativeRequest},
     workflow::{WorkflowCreate, WorkflowRecord, WorkflowStatus as Status, WorkflowStore},
 };
 use anyhow::{ensure, Context, Result};
@@ -114,6 +114,33 @@ impl WorkbenchService {
         let record = self.store.create(request)?;
         self.store.upsert_project(&record.cwd, None)?;
         Ok(record)
+    }
+
+    /// Copy a completed standalone task into a new draft. Team-owned children
+    /// must be retried through their parent collaboration, and starting the copy
+    /// remains an explicit user action.
+    pub fn duplicate_as_new_draft(&self, id: &str) -> Result<WorkflowRecord> {
+        ensure!(
+            !self.closing.load(Ordering::SeqCst),
+            "service is shutting down"
+        );
+        let source = self.store.get(id)?.context("task not found")?;
+        ensure!(
+            source.status.is_terminal(),
+            "only a terminal task can be copied as a new draft"
+        );
+        let events = self.store.events(id, 0, 10)?;
+        ensure!(
+            !events.iter().any(|event| event.kind == "team_owner"),
+            "team-owned child tasks must be retried through their parent collaboration"
+        );
+        native_executor::validate_binding(
+            &source.app_id,
+            &source.model,
+            source.reasoning_effort.as_deref(),
+            source.read_only,
+        )?;
+        self.store.duplicate_as_draft(id)
     }
 
     pub async fn start(self: &Arc<Self>, id: &str) -> Result<WorkflowRecord> {
@@ -236,6 +263,14 @@ impl WorkbenchService {
             }
         }
         let outcome = runner.await;
+        if let Ok(Ok(result)) = &outcome {
+            let readback = persist_identity_readback(&self.store, &record.id, &result.identity);
+            if let Err(error) = readback {
+                persistence_error.get_or_insert_with(|| {
+                    format!("cannot record native identity readback: {error}")
+                });
+            }
+        }
         let mut jobs = self.jobs.lock().await;
         let cancelled = *cancel.borrow();
         let (status, detail) = if let Some(error) = persistence_error {
@@ -397,6 +432,19 @@ impl WorkbenchService {
     }
 }
 
+fn persist_identity_readback(
+    store: &WorkflowStore,
+    workflow_id: &str,
+    identity: &NativeIdentity,
+) -> Result<()> {
+    store.append_event(
+        workflow_id,
+        "identity_readback",
+        serde_json::to_value(identity)?,
+    )?;
+    Ok(())
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .merge(crate::team_service::routes())
@@ -407,6 +455,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/workflows", get(list).post(create))
         .route("/api/v1/workflows/{id}", get(detail))
         .route("/api/v1/workflows/{id}/events", get(events))
+        .route("/api/v1/workflows/{id}/duplicate", post(duplicate))
         .route("/api/v1/workflows/{id}/start", post(start))
         .route("/api/v1/workflows/{id}/cancel", post(cancel))
         .route("/api/v1/workflows/{id}/approve", post(approve))
@@ -468,6 +517,9 @@ async fn detail(State(s): State<AppState>, HttpPath(id): HttpPath<String>) -> Ap
         .store
         .get(&id)?
         .context("task not found")?)))
+}
+async fn duplicate(State(s): State<AppState>, HttpPath(id): HttpPath<String>) -> ApiResult {
+    Ok(Json(json!(s.workbench.duplicate_as_new_draft(&id)?)))
 }
 #[derive(Deserialize)]
 struct Cursor {
@@ -599,6 +651,79 @@ mod tests {
             model: "gpt-test".into(),
             ..Default::default()
         }
+    }
+    #[test]
+    fn identity_readback_is_persisted_as_a_redacted_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = WorkbenchService::open(dir.path()).unwrap();
+        let record = service.create(draft(dir.path())).unwrap();
+        let identity = NativeIdentity {
+            app_id: "codex".into(),
+            requested_model: "gpt-test".into(),
+            billing_channel: Some("subscription".into()),
+            account_plan: Some("plus".into()),
+            ..NativeIdentity::default()
+        };
+        persist_identity_readback(&service.store, &record.id, &identity).unwrap();
+        let event = service
+            .store
+            .events(&record.id, 0, 10)
+            .unwrap()
+            .into_iter()
+            .find(|event| event.kind == "identity_readback")
+            .unwrap();
+        assert_eq!(event.data["billing_channel"], "subscription");
+        assert_eq!(event.data["account_plan"], "plus");
+        assert!(event.data.get("email").is_none());
+    }
+    #[test]
+    fn duplicate_rejects_team_owned_children_and_creates_standalone_draft() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = WorkbenchService::open(dir.path()).unwrap();
+        let standalone = service.create(draft(dir.path())).unwrap();
+        service
+            .store
+            .transition(&standalone.id, &[Status::Draft], Status::Running, None)
+            .unwrap();
+        service
+            .store
+            .transition(
+                &standalone.id,
+                &[Status::Running],
+                Status::Failed,
+                Some("failed"),
+            )
+            .unwrap();
+        let copy = service.duplicate_as_new_draft(&standalone.id).unwrap();
+        assert_eq!(copy.status, Status::Draft);
+        assert_eq!(copy.prompt, standalone.prompt);
+        assert!(copy.native_session_id.is_none());
+        assert!(service
+            .store
+            .events(&copy.id, 0, 10)
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == "duplicated_from"));
+
+        let child = service.create(draft(dir.path())).unwrap();
+        service
+            .store
+            .append_event(&child.id, "team_owner", json!({"team_id":"parent"}))
+            .unwrap();
+        service
+            .store
+            .transition(&child.id, &[Status::Draft], Status::Running, None)
+            .unwrap();
+        service
+            .store
+            .transition(
+                &child.id,
+                &[Status::Running],
+                Status::Failed,
+                Some("failed"),
+            )
+            .unwrap();
+        assert!(service.duplicate_as_new_draft(&child.id).is_err());
     }
     #[test]
     fn ownership_prevents_false_recovery_and_releases_on_close() {

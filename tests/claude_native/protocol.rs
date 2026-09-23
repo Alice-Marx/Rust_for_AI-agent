@@ -132,6 +132,7 @@ mod claude_protocol_tests {
     #[tokio::test]
     async fn stream_and_full_messages_do_not_duplicate_text_or_reasoning() {
         let (mut runner, mut events, _, _controls) = runner(true);
+        runner.set_executable_identity(SUPPORTED_VERSION, &"b".repeat(64));
         runner.frame(init(true)).await.unwrap();
         runner
             .frame(start("message-1", "claude-sonnet-4-6"))
@@ -173,6 +174,9 @@ mod claude_protocol_tests {
             .unwrap();
         assert_eq!(runner.result.output, "Hello");
         assert!(runner.frame(terminal()).await.unwrap());
+        assert_eq!(runner.result.identity.tool_version.as_deref(), Some(SUPPORTED_VERSION));
+        assert_eq!(runner.result.identity.effective_model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(runner.result.identity.billing_channel, None);
         let mut text = String::new();
         let mut reasoning = String::new();
         while let Ok(event) = events.try_recv() {

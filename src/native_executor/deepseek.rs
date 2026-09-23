@@ -3,7 +3,7 @@
 use super::acp::{AcpDialect, AcpRunner};
 use super::{
     cancellation, emit, empty_result, executable_digest, read_frame, NativeControl, NativeEvent,
-    NativeRequest, NativeResult, MAX_FRAME_BYTES, MAX_OUTPUT_BYTES,
+    NativeRequest, NativeResult,
 };
 use anyhow::{bail, ensure, Context, Result};
 use serde_json::{json, Value};
@@ -484,6 +484,7 @@ pub(super) async fn execute_with_control(
         events.clone(),
         &req,
     );
+    runner.set_executable_identity(VERSION, &prepared.sha256);
     let outcome = tokio::select! {
         result = runner.run(&req) => result,
         _ = cancellation(&mut cancel) => Ok("cancelled".into()),
@@ -576,6 +577,20 @@ impl AcpDialect for DeepSeekDialect {
             );
         }
         Ok(())
+    }
+    fn confirmed_provider(&self, _req: &NativeRequest) -> Option<String> {
+        Some(PROVIDER.into())
+    }
+    fn confirmed_reasoning_effort(&self, options: &Value) -> Option<String> {
+        let options = options.as_array()?;
+        let mut efforts = options
+            .iter()
+            .filter(|item| item["id"] == "reasoning_effort");
+        let effort = efforts.next()?.get("currentValue")?.as_str()?;
+        if efforts.next().is_some() || !["off", "low", "high", "max"].contains(&effort) {
+            return None;
+        }
+        Some(effort.to_owned())
     }
     fn permission_selection(&self, options: &[Value]) -> Result<(String, String)> {
         ensure!(options.len() == 2, "DeepSeek permission options changed");
@@ -670,58 +685,9 @@ mod tests {
     }
 }
 
-mod recorded {
-    use super::super::read_frame;
-    use anyhow::Result;
-    use serde_json::Value;
-    use std::{
-        pin::Pin,
-        sync::{Arc, Mutex},
-        task::{Context as TaskContext, Poll},
-    };
-    use tokio::io::AsyncWrite;
-
-    #[derive(Clone, Default)]
-    pub(super) struct Recorded(pub Arc<Mutex<Vec<u8>>>);
-    impl AsyncWrite for Recorded {
-        fn poll_write(
-            self: Pin<&mut Self>,
-            _: &mut TaskContext<'_>,
-            data: &[u8],
-        ) -> Poll<std::io::Result<usize>> {
-            self.0.lock().unwrap().extend_from_slice(data);
-            Poll::Ready(Ok(data.len()))
-        }
-        fn poll_flush(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
-        fn poll_shutdown(
-            self: Pin<&mut Self>,
-            _: &mut TaskContext<'_>,
-        ) -> Poll<std::io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
-    }
-    pub(super) async fn read_json_frames(
-        reader: &mut tokio::io::BufReader<impl tokio::io::AsyncRead + Unpin>,
-    ) -> Result<Vec<Value>> {
-        let mut frames = Vec::new();
-        let mut frame = Vec::new();
-        while read_frame(reader, &mut frame).await? {
-            frames.push(serde_json::from_slice(&frame)?);
-            frame.clear();
-        }
-        Ok(frames)
-    }
-    pub(super) const SESSION: &str = "bec6941c-a1ce-4cfe-bb28-c1c396f9f1e5";
-}
-
 #[cfg(test)]
 mod live_tests {
-    use super::recorded::{read_json_frames, Recorded, SESSION};
     use super::*;
-    use anyhow::Result;
-    use serde_json::{json, Value};
     use std::time::Duration;
     use tokio::{io::BufReader, sync::mpsc};
 

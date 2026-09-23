@@ -1,6 +1,7 @@
 //! Official harness processes, with structured events and explicit permissions.
 //! This adapter owns process lifetime; it never substitutes a direct model API.
 use anyhow::{bail, Context, Result};
+use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::HashMap, path::PathBuf, process::Stdio, time::Duration};
@@ -12,6 +13,7 @@ use tokio::{
 mod acp;
 mod claude;
 mod deepseek;
+mod grok;
 mod kimi_code;
 mod mimo;
 mod minimax;
@@ -35,6 +37,7 @@ pub fn capabilities(app_id: &str) -> NativeCapabilities {
         "kimi-cli" => Some("kimi-wire"),
         "claude" => Some("claude-stream-json"),
         "deepseek" => Some("deepseek-acp"),
+        "grok" => Some("grok-acp"),
         "mimo" => Some("mimo-acp"),
         "kimi-code" => Some("kimi-code-acp"),
         "minimax" => Some("minimax-acp"),
@@ -45,13 +48,14 @@ pub fn capabilities(app_id: &str) -> NativeCapabilities {
         managed,
         read_only: managed,
         permissions: managed,
-        questions: managed && !matches!(app_id, "deepseek" | "mimo"),
+        questions: managed && !matches!(app_id, "deepseek" | "mimo" | "grok"),
         reasoning_efforts: match app_id {
             "codex" => &[
                 "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
             ][..],
             "claude" => &["low", "medium", "high", "xhigh", "max"][..],
             "deepseek" => &["off", "low", "high", "max"][..],
+            "grok" => &["none", "minimal", "low", "medium", "high", "xhigh", "max"][..],
             _ => &[],
         }
         .iter()
@@ -94,6 +98,7 @@ pub fn validate_binding(
         "kimi-cli" => model.starts_with("kimi-"),
         "claude" => model.starts_with("claude-"),
         "deepseek" => model.starts_with("deepseek-"),
+        "grok" => model.starts_with("grok-"),
         // MiMo is a multi-provider harness: providerID/modelID with at least
         // one variant segment allowed inside the modelID half.
         "mimo" => model.split('/').count() >= 2 && model.split('/').count() <= 8,
@@ -202,6 +207,33 @@ pub struct NativeResult {
     /// completed, cancelled, or timed_out. Protocol/identity failures return Err.
     pub status: String,
     pub usage: Option<Value>,
+    #[serde(default)]
+    pub identity: NativeIdentity,
+}
+
+/// A redacted record of the exact requested settings and whatever the official
+/// tool confirms. Missing effective/account fields stay `None`; they are never
+/// inferred from a model name or a local configuration guess.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NativeIdentity {
+    pub app_id: String,
+    pub protocol: Option<String>,
+    pub tool_version: Option<String>,
+    pub executable_sha256: Option<String>,
+    pub requested_model: String,
+    pub configured_model: Option<String>,
+    pub effective_model: Option<String>,
+    pub effective_provider: Option<String>,
+    pub requested_reasoning_effort: Option<String>,
+    pub configured_reasoning_effort: Option<String>,
+    /// For an explicitly overridden turn this is only populated when the
+    /// protocol returns a matching effective value for that turn.
+    pub effective_reasoning_effort: Option<String>,
+    /// Uses the account billing contract values `api` or `subscription`.
+    pub billing_channel: Option<String>,
+    pub account_plan: Option<String>,
+    pub observed_at: Option<String>,
+    pub evidence_sources: Vec<String>,
 }
 
 const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024;
@@ -238,6 +270,9 @@ pub async fn execute_with_control(
     }
     if req.app_id == "deepseek" {
         return deepseek::execute_with_control(req, events, cancel, controls).await;
+    }
+    if req.app_id == "grok" {
+        return grok::execute_with_control(req, events, cancel, controls).await;
     }
     if req.app_id == "mimo" {
         return mimo::execute_with_control(req, events, cancel, controls).await;
@@ -326,6 +361,18 @@ pub async fn execute_with_control(
             }
         }
     });
+    let mut initial_result = empty_result(&req, "completed");
+    initial_result.identity.tool_version = Some(prepared.version.clone());
+    initial_result.identity.executable_sha256 = Some(prepared.sha256.clone());
+    record_identity_evidence(&mut initial_result.identity, "local_executable_probe");
+    if req.app_id == "kimi-cli" {
+        // prepare_native has reduced the user's configuration to one exact
+        // model and an allowlisted official Kimi endpoint. Kimi Wire does not
+        // echo the model in its initialize or prompt response, so this remains
+        // configured identity rather than an effective-model claim.
+        initial_result.identity.configured_model = Some(prepared.resolved_model.clone());
+        record_identity_evidence(&mut initial_result.identity, "kimi_restricted_local_config");
+    }
     let mut runner = Runner {
         stdin: Box::new(stdin),
         frames: frames_rx,
@@ -335,7 +382,7 @@ pub async fn execute_with_control(
         pending: HashMap::new(),
         next_id: 0,
         prompt_id: None,
-        result: empty_result(&req, "completed"),
+        result: initial_result,
         protocol: if req.app_id == "codex" {
             Protocol::Codex
         } else {
@@ -386,7 +433,53 @@ fn empty_result(req: &NativeRequest, status: &str) -> NativeResult {
         output: String::new(),
         status: status.into(),
         usage: None,
+        identity: NativeIdentity {
+            app_id: req.app_id.clone(),
+            protocol: capabilities(&req.app_id).protocol,
+            requested_model: req.model.clone(),
+            requested_reasoning_effort: req.reasoning_effort.clone(),
+            ..NativeIdentity::default()
+        },
     }
+}
+
+fn identity_observed_at() -> String {
+    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn record_identity_evidence(identity: &mut NativeIdentity, source: &str) {
+    if !identity.evidence_sources.iter().any(|item| item == source) {
+        identity.evidence_sources.push(source.to_owned());
+    }
+    identity.observed_at = Some(identity_observed_at());
+}
+
+fn record_codex_account_identity(identity: &mut NativeIdentity, response: &Value) -> Result<()> {
+    anyhow::ensure!(
+        response.get("requiresOpenaiAuth").and_then(Value::as_bool) == Some(true),
+        "Codex account/read did not confirm an OpenAI-authenticated account"
+    );
+    let account = response
+        .get("account")
+        .filter(|value| !value.is_null())
+        .context("Codex account/read found no signed-in account")?;
+    match account.get("type").and_then(Value::as_str) {
+        Some("apiKey") => {
+            identity.billing_channel = Some(crate::account_billing::CHANNEL_API.into());
+            identity.account_plan = None;
+        }
+        Some("chatgpt") => {
+            identity.billing_channel = Some(crate::account_billing::CHANNEL_SUBSCRIPTION.into());
+            identity.account_plan = account
+                .get("planType")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+        }
+        Some(other) => anyhow::bail!("unsupported Codex account type: {other}"),
+        None => anyhow::bail!("Codex account/read omitted the account type"),
+    }
+    record_identity_evidence(identity, "codex_account_read");
+    Ok(())
 }
 
 fn validate_request(req: &NativeRequest) -> Result<()> {
@@ -422,6 +515,9 @@ fn validate_request(req: &NativeRequest) -> Result<()> {
     }
     if req.app_id == "deepseek" {
         deepseek::validate_request(&req)?;
+    }
+    if req.app_id == "grok" {
+        grok::validate_request(&req)?;
     }
     if req.app_id == "mimo" {
         mimo::validate_request(&req)?;
@@ -904,14 +1000,27 @@ impl Runner {
             .send("config/read", json!({"includeLayers":false,"cwd":req.cwd}))
             .await?;
         let config = self.wait_for_response(&id).await?;
-        validate_codex_config(
-            config
-                .get("config")
-                .context("Codex did not return effective configuration")?,
-        )?;
+        let config = config
+            .get("config")
+            .context("Codex did not return effective configuration")?;
+        validate_codex_config(config)?;
+        self.result.identity.configured_model = config
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        self.result.identity.configured_reasoning_effort = config
+            .get("model_reasoning_effort")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        record_identity_evidence(&mut self.result.identity, "codex_config_read");
         if req.read_only {
-            validate_codex_chat_config(&config["config"])?;
+            validate_codex_chat_config(config)?;
         }
+        let id = self
+            .send("account/read", json!({"refreshToken":false}))
+            .await?;
+        let account = self.wait_for_response(&id).await?;
+        record_codex_account_identity(&mut self.result.identity, &account)?;
         let sandbox = if req.read_only {
             "read-only"
         } else {
@@ -920,14 +1029,34 @@ impl Runner {
         let id = self.send("thread/start", json!({"model":model,"modelProvider":"openai","cwd":req.cwd,"approvalPolicy":"on-request","approvalsReviewer":"user","sandbox":sandbox,"ephemeral":true,
             "config":{"features.multi_agent":false,"features.multi_agent_v2":false,"features.memories":false}})).await?;
         let thread = self.wait_for_response(&id).await?;
+        let effective_model = thread
+            .get("model")
+            .and_then(Value::as_str)
+            .context("Codex thread/start omitted its effective model")?;
+        let effective_provider = thread
+            .get("modelProvider")
+            .and_then(Value::as_str)
+            .context("Codex thread/start omitted its effective provider")?;
         anyhow::ensure!(
-            thread.get("model").and_then(Value::as_str) == Some(model),
+            effective_model == model,
             "Codex selected a different model; refusing automatic substitution"
         );
         anyhow::ensure!(
-            thread.get("modelProvider").and_then(Value::as_str) == Some("openai"),
+            effective_provider == "openai",
             "Codex selected an unexpected model provider"
         );
+        self.result.identity.effective_model = Some(effective_model.to_owned());
+        self.result.identity.effective_provider = Some(effective_provider.to_owned());
+        let thread_effort = thread
+            .get("reasoningEffort")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        if req.reasoning_effort.is_none() {
+            self.result.identity.effective_reasoning_effort = thread_effort;
+        } else if thread_effort.as_deref() == req.reasoning_effort.as_deref() {
+            self.result.identity.effective_reasoning_effort = thread_effort;
+        }
+        record_identity_evidence(&mut self.result.identity, "codex_thread_start");
         let thread_id =
             text_at(&thread, &["thread", "id"]).context("Codex did not return a thread ID")?;
         self.result.session_id = Some(thread_id.clone());
@@ -1801,7 +1930,8 @@ mod tests {
         for value in [
             json!({"id":"1","result":{}}),
             json!({"id":"2","result":{"config":{"model_provider":"openai"}}}),
-            json!({"id":"3","result":{"model":"gpt-other","modelProvider":"openai","thread":{"id":"new"}}}),
+            json!({"id":"3","result":{"account":{"type":"apiKey"},"requiresOpenaiAuth":true}}),
+            json!({"id":"4","result":{"model":"gpt-other","modelProvider":"openai","reasoningEffort":"high","thread":{"id":"new"}}}),
         ] {
             frames.send(Ok(value)).await.unwrap();
         }
@@ -1816,5 +1946,101 @@ mod tests {
             .await
             .unwrap();
         assert!(!text.contains("turn/start"));
+    }
+
+    #[tokio::test]
+    async fn codex_identity_uses_account_and_thread_start_readbacks() {
+        let (mut runner, _output, frames, _controls, _events) = runner(Protocol::Codex);
+        for value in [
+            json!({"id":"1","result":{}}),
+            json!({"id":"2","result":{"config":{"model_provider":"openai","model":"gpt-5","model_reasoning_effort":"medium"}}}),
+            json!({"id":"3","result":{"account":{"type":"chatgpt","email":"private@example.test","planType":"plus"},"requiresOpenaiAuth":true}}),
+            json!({"id":"4","result":{"model":"gpt-5","modelProvider":"openai","reasoningEffort":"high","thread":{"id":"thread-1"}}}),
+            json!({"id":"5","result":{"turn":{"id":"turn-1"}}}),
+            json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),
+            json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}}),
+        ] {
+            frames.send(Ok(value)).await.unwrap();
+        }
+        runner
+            .start_codex(&request("codex", "gpt-5"), "gpt-5")
+            .await
+            .unwrap();
+        assert_eq!(
+            runner.result.identity.billing_channel.as_deref(),
+            Some("subscription")
+        );
+        assert_eq!(runner.result.identity.account_plan.as_deref(), Some("plus"));
+        assert_eq!(
+            runner.result.identity.configured_model.as_deref(),
+            Some("gpt-5")
+        );
+        assert_eq!(
+            runner
+                .result
+                .identity
+                .configured_reasoning_effort
+                .as_deref(),
+            Some("medium")
+        );
+        assert_eq!(
+            runner.result.identity.effective_model.as_deref(),
+            Some("gpt-5")
+        );
+        assert_eq!(
+            runner.result.identity.effective_provider.as_deref(),
+            Some("openai")
+        );
+        assert_eq!(
+            runner.result.identity.effective_reasoning_effort.as_deref(),
+            Some("high")
+        );
+        assert!(runner.result.identity.observed_at.is_some());
+        assert!(runner
+            .result
+            .identity
+            .evidence_sources
+            .contains(&"codex_config_read".into()));
+        assert!(runner
+            .result
+            .identity
+            .evidence_sources
+            .contains(&"codex_account_read".into()));
+        assert!(runner
+            .result
+            .identity
+            .evidence_sources
+            .contains(&"codex_thread_start".into()));
+        let serialized = serde_json::to_string(&runner.result.identity).unwrap();
+        assert!(!serialized.contains("private@example.test"));
+    }
+
+    #[test]
+    fn codex_account_read_maps_billing_channel_without_persisting_email() {
+        let mut identity = NativeIdentity::default();
+        record_codex_account_identity(
+            &mut identity,
+            &json!({"requiresOpenaiAuth":true,"account":{"type":"chatgpt","email":"private@example.test","planType":"plus"}}),
+        )
+        .unwrap();
+        assert_eq!(identity.billing_channel.as_deref(), Some("subscription"));
+        assert_eq!(identity.account_plan.as_deref(), Some("plus"));
+        assert_eq!(identity.evidence_sources, ["codex_account_read"]);
+        let serialized = serde_json::to_string(&identity).unwrap();
+        assert!(!serialized.contains("private@example.test"));
+
+        let mut api_key = NativeIdentity::default();
+        record_codex_account_identity(
+            &mut api_key,
+            &json!({"requiresOpenaiAuth":true,"account":{"type":"apiKey"}}),
+        )
+        .unwrap();
+        assert_eq!(api_key.billing_channel.as_deref(), Some("api"));
+        assert!(api_key.account_plan.is_none());
+        assert!(record_codex_account_identity(
+            &mut NativeIdentity::default(),
+            &json!({"requiresOpenaiAuth":true,"account":null}),
+        )
+        .is_err());
     }
 }

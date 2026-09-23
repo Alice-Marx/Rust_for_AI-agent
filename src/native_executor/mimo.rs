@@ -13,7 +13,9 @@
 use super::acp::{AcpDialect, AcpRunner};
 use crate::native_executor::{emit, NativeControl, NativeEvent, NativeRequest, NativeResult};
 use anyhow::{bail, ensure, Context, Result};
-use serde_json::{json, Value};
+#[cfg(test)]
+use serde_json::json;
+use serde_json::Value;
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
@@ -242,6 +244,11 @@ impl AcpDialect for MimoDialect {
         );
         Ok(())
     }
+    fn confirmed_provider(&self, req: &NativeRequest) -> Option<String> {
+        req.model
+            .split_once('/')
+            .map(|(provider, _)| provider.to_owned())
+    }
     fn permission_selection(&self, options: &[Value]) -> Result<(String, String)> {
         // Exactly the one-shot pair is selected; allow_always exists upstream
         // but managed tasks never widen to session-wide grants.
@@ -273,7 +280,7 @@ impl AcpDialect for MimoDialect {
 }
 
 pub(super) async fn execute_with_control(
-    mut req: NativeRequest,
+    req: NativeRequest,
     events: mpsc::Sender<NativeEvent>,
     mut cancel: tokio::sync::watch::Receiver<bool>,
     controls: mpsc::Receiver<NativeControl>,
@@ -357,6 +364,7 @@ pub(super) async fn execute_with_control(
         events.clone(),
         &req,
     );
+    runner.set_executable_identity(PACKAGE_VERSION, &prepared.sha256);
     let outcome = tokio::select! {
         result = runner.run(&req) => result,
         _ = super::cancellation(&mut cancel) => Ok("cancelled".into()),
@@ -565,6 +573,10 @@ mod tests {
         assert_eq!(
             dialect.model_value(&request()),
             "anthropic/claude-sonnet-4.6"
+        );
+        assert_eq!(
+            dialect.confirmed_provider(&request()).as_deref(),
+            Some("anthropic")
         );
         assert_eq!(dialect.effort_config_id(), None);
         assert!(dialect
