@@ -45,6 +45,17 @@ pub(super) trait AcpDialect: Send {
         model: &str,
         effort: Option<&str>,
     ) -> Result<()>;
+    /// Provider identity returned only after `verify_config_options` has
+    /// confirmed the exact selected model. Dialects without an explicit
+    /// provider value keep this unknown.
+    fn confirmed_provider(&self, _req: &NativeRequest) -> Option<String> {
+        None
+    }
+    /// Read the selected reasoning-effort value where the protocol exposes a
+    /// generic, verified effort setting.
+    fn confirmed_reasoning_effort(&self, _options: &Value) -> Option<String> {
+        None
+    }
     /// Select the (allow, reject) optionIds from a permission request's
     /// options array; one-shot semantics only.
     fn permission_selection(&self, options: &[Value]) -> Result<(String, String)>;
@@ -105,6 +116,12 @@ impl AcpRunner {
             enforce_effort: false,
             streamed_bytes: 0,
         }
+    }
+
+    pub(super) fn set_executable_identity(&mut self, version: &str, sha256: &str) {
+        self.result.identity.tool_version = Some(version.to_owned());
+        self.result.identity.executable_sha256 = Some(sha256.to_owned());
+        super::record_identity_evidence(&mut self.result.identity, "local_executable_probe");
     }
 
     async fn write(&mut self, value: Value) -> Result<()> {
@@ -182,6 +199,11 @@ impl AcpRunner {
         self.result.session_id = Some(session_id.into());
         self.dialect
             .verify_config_options(&session["configOptions"], &req.model, None)?;
+        self.result.identity.configured_model = Some(req.model.clone());
+        self.result.identity.configured_reasoning_effort = self
+            .dialect
+            .confirmed_reasoning_effort(&session["configOptions"]);
+        super::record_identity_evidence(&mut self.result.identity, "acp_session_config");
         emit(
             &self.events,
             NativeEvent::SessionStarted {
@@ -197,6 +219,17 @@ impl AcpRunner {
             .await?;
         self.dialect
             .verify_config_options(&selected["configOptions"], &req.model, None)?;
+        self.result.identity.effective_model = Some(req.model.clone());
+        self.result.identity.effective_provider = self.dialect.confirmed_provider(req);
+        let selected_effort = self
+            .dialect
+            .confirmed_reasoning_effort(&selected["configOptions"]);
+        if req.reasoning_effort.is_none()
+            || selected_effort.as_deref() == req.reasoning_effort.as_deref()
+        {
+            self.result.identity.effective_reasoning_effort = selected_effort.clone();
+        }
+        super::record_identity_evidence(&mut self.result.identity, "acp_model_selection");
         if let (Some(config_id), Some(effort)) = (
             self.dialect.effort_config_id(),
             req.reasoning_effort.as_ref(),
@@ -213,6 +246,14 @@ impl AcpRunner {
                 &req.model,
                 req.reasoning_effort.as_deref(),
             )?;
+            let selected_effort = self
+                .dialect
+                .confirmed_reasoning_effort(&selected["configOptions"]);
+            self.result.identity.configured_reasoning_effort = selected_effort.clone();
+            if selected_effort.as_deref() == Some(effort.as_str()) {
+                self.result.identity.effective_reasoning_effort = selected_effort;
+            }
+            super::record_identity_evidence(&mut self.result.identity, "acp_effort_selection");
         }
         Ok(())
     }
@@ -608,6 +649,7 @@ mod tests {
     async fn handshake_pins_provider_model_and_effort_before_prompt() {
         let req = request(true);
         let (mut runner, written, tx, _controls, mut events) = fixture(&req);
+        runner.set_executable_identity("0.1.6-alpha.2", &"a".repeat(64));
         handshake(&tx, &req).await;
         tx.send(Ok(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":SESSION,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"checked"}}}}))).await.unwrap();
         tx.send(Ok(
@@ -617,6 +659,39 @@ mod tests {
         .unwrap();
         assert_eq!(runner.run(&req).await.unwrap(), "completed");
         assert_eq!(runner.result.output, "checked");
+        assert_eq!(
+            runner.result.identity.tool_version.as_deref(),
+            Some("0.1.6-alpha.2")
+        );
+        assert_eq!(
+            runner.result.identity.executable_sha256.as_deref(),
+            Some("a".repeat(64).as_str())
+        );
+        assert_eq!(
+            runner.result.identity.configured_model.as_deref(),
+            Some("deepseek-v4-pro")
+        );
+        assert_eq!(
+            runner.result.identity.effective_model.as_deref(),
+            Some("deepseek-v4-pro")
+        );
+        assert_eq!(
+            runner.result.identity.effective_provider.as_deref(),
+            Some("deepseek-official")
+        );
+        assert_eq!(
+            runner
+                .result
+                .identity
+                .configured_reasoning_effort
+                .as_deref(),
+            Some("low")
+        );
+        assert_eq!(
+            runner.result.identity.effective_reasoning_effort.as_deref(),
+            Some("low")
+        );
+        assert_eq!(runner.result.identity.billing_channel, None);
         let frames = written.frames();
         assert_eq!(frames[1]["params"]["mcpServers"], json!([]));
         assert_eq!(

@@ -484,6 +484,7 @@ pub(super) async fn execute_with_control(
         events.clone(),
         &req,
     );
+    runner.set_executable_identity(VERSION, &prepared.sha256);
     let outcome = tokio::select! {
         result = runner.run(&req) => result,
         _ = cancellation(&mut cancel) => Ok("cancelled".into()),
@@ -576,6 +577,20 @@ impl AcpDialect for DeepSeekDialect {
             );
         }
         Ok(())
+    }
+    fn confirmed_provider(&self, _req: &NativeRequest) -> Option<String> {
+        Some(PROVIDER.into())
+    }
+    fn confirmed_reasoning_effort(&self, options: &Value) -> Option<String> {
+        let options = options.as_array()?;
+        let mut efforts = options
+            .iter()
+            .filter(|item| item["id"] == "reasoning_effort");
+        let effort = efforts.next()?.get("currentValue")?.as_str()?;
+        if efforts.next().is_some() || !["off", "low", "high", "max"].contains(&effort) {
+            return None;
+        }
+        Some(effort.to_owned())
     }
     fn permission_selection(&self, options: &[Value]) -> Result<(String, String)> {
         ensure!(options.len() == 2, "DeepSeek permission options changed");

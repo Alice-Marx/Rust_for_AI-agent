@@ -350,6 +350,7 @@ pub(super) async fn execute_with_control(
         events.clone(),
         &req,
     );
+    runner.set_executable_identity(PACKAGE_VERSION, &prepared.sha256);
     let outcome = tokio::select! {
         result = runner.run(&req) => result,
         _ = super::cancellation(&mut cancel) => Ok("cancelled".into()),
@@ -434,6 +435,7 @@ mod tests {
             ])
             .is_err());
         assert_eq!(dialect.model_value(&request(true)), "kimi-k2.7-code");
+        assert_eq!(dialect.confirmed_provider(&request(true)), None);
         assert_eq!(dialect.effort_config_id(), None);
         assert!(dialect.passthrough_updates().contains(&"plan"));
         assert_eq!(dialect.stop_status(Some("end_turn")).unwrap(), "completed");

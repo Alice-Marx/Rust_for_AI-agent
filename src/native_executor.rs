@@ -358,6 +358,14 @@ pub async fn execute_with_control(
     initial_result.identity.tool_version = Some(prepared.version.clone());
     initial_result.identity.executable_sha256 = Some(prepared.sha256.clone());
     record_identity_evidence(&mut initial_result.identity, "local_executable_probe");
+    if req.app_id == "kimi-cli" {
+        // prepare_native has reduced the user's configuration to one exact
+        // model and an allowlisted official Kimi endpoint. Kimi Wire does not
+        // echo the model in its initialize or prompt response, so this remains
+        // configured identity rather than an effective-model claim.
+        initial_result.identity.configured_model = Some(prepared.resolved_model.clone());
+        record_identity_evidence(&mut initial_result.identity, "kimi_restricted_local_config");
+    }
     let mut runner = Runner {
         stdin: Box::new(stdin),
         frames: frames_rx,
