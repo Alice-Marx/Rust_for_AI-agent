@@ -31,7 +31,7 @@ Usage:
   wonderland-cli [options] mcp-reload
   wonderland-cli [options] apps [--probe <app>]
   wonderland-cli [options] intelligence [refresh]
-  wonderland-cli [options] work list|get|events|start|cancel <id>
+  wonderland-cli [options] work list|get|events|duplicate|start|cancel <id>
   wonderland-cli --model <id> --cwd <dir> work create <app> <prompt>
   wonderland-cli [options] work approve <id> <request-id> allow|deny
   wonderland-cli [options] work answer <id> <request-id> <answers-json>
@@ -603,6 +603,7 @@ async function main() {
         if (!id) throw new Error("work operation requires a task ID");
         endpoint += `/${encodeURIComponent(id)}`;
         if (action === "events") endpoint += "/events";
+        else if (action === "duplicate") { endpoint += "/duplicate"; body = {}; }
         else if (["start","cancel"].includes(action)) { endpoint += `/${action}`; body = {}; }
         else if (action === "approve") {
           if (!requestId || !["allow","deny"].includes(tail[0])) throw new Error("approve requires request-id and allow|deny");
