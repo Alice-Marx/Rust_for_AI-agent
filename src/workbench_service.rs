@@ -1,7 +1,7 @@
 //! Service-owned native workflows. HTTP clients observe runs; they never own them.
 use crate::{
     api::AppState,
-    native_executor::{self, NativeControl, NativeEvent, NativeRequest},
+    native_executor::{self, NativeControl, NativeEvent, NativeIdentity, NativeRequest},
     workflow::{WorkflowCreate, WorkflowRecord, WorkflowStatus as Status, WorkflowStore},
 };
 use anyhow::{ensure, Context, Result};
@@ -236,6 +236,14 @@ impl WorkbenchService {
             }
         }
         let outcome = runner.await;
+        if let Ok(Ok(result)) = &outcome {
+            let readback = persist_identity_readback(&self.store, &record.id, &result.identity);
+            if let Err(error) = readback {
+                persistence_error.get_or_insert_with(|| {
+                    format!("cannot record native identity readback: {error}")
+                });
+            }
+        }
         let mut jobs = self.jobs.lock().await;
         let cancelled = *cancel.borrow();
         let (status, detail) = if let Some(error) = persistence_error {
@@ -395,6 +403,19 @@ impl WorkbenchService {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
+}
+
+fn persist_identity_readback(
+    store: &WorkflowStore,
+    workflow_id: &str,
+    identity: &NativeIdentity,
+) -> Result<()> {
+    store.append_event(
+        workflow_id,
+        "identity_readback",
+        serde_json::to_value(identity)?,
+    )?;
+    Ok(())
 }
 
 pub fn routes() -> Router<AppState> {
@@ -599,6 +620,30 @@ mod tests {
             model: "gpt-test".into(),
             ..Default::default()
         }
+    }
+    #[test]
+    fn identity_readback_is_persisted_as_a_redacted_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = WorkbenchService::open(dir.path()).unwrap();
+        let record = service.create(draft(dir.path())).unwrap();
+        let identity = NativeIdentity {
+            app_id: "codex".into(),
+            requested_model: "gpt-test".into(),
+            billing_channel: Some("subscription".into()),
+            account_plan: Some("plus".into()),
+            ..NativeIdentity::default()
+        };
+        persist_identity_readback(&service.store, &record.id, &identity).unwrap();
+        let event = service
+            .store
+            .events(&record.id, 0, 10)
+            .unwrap()
+            .into_iter()
+            .find(|event| event.kind == "identity_readback")
+            .unwrap();
+        assert_eq!(event.data["billing_channel"], "subscription");
+        assert_eq!(event.data["account_plan"], "plus");
+        assert!(event.data.get("email").is_none());
     }
     #[test]
     fn ownership_prevents_false_recovery_and_releases_on_close() {
