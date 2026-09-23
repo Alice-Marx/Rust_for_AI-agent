@@ -1,14 +1,14 @@
 # 开发文档与仓库结构
 
-当前 Wonderland 后端版本为 [0.11.0](RELEASE-0.11.0.md)，包含 Work/Chat 推理配置持久化和完整开发交接资料。npm CLI [0.11.1](https://www.npmjs.com/package/rust-ai-wonderland-cli/v/0.11.1) 已发布到 `next`（兼容 0.11.0 后端），稳定频道 `latest` 保持 0.7.0。历史发布记录按对应版本理解。
+当前 Wonderland 源码与本地 Windows 发行候选版本为 0.11.1；[0.11.0](RELEASE-0.11.0.md) 保留 Work/Chat 推理配置持久化和开发交接的历史发布说明。npm CLI [0.11.1](https://www.npmjs.com/package/rust-ai-wonderland-cli/v/0.11.1) 已发布到 `next`，与 0.11.1 后端配套；稳定频道 `latest` 保持 0.7.0。历史发布记录按对应版本理解。
 
-**最终发布与远端核验结果见 [0.11.0 交付报告](DELIVERY-0.11.0.md)。** 安装包构建、GitHub 发布与 npm registry 发布已分别核对，包含实际下载与安装检查。
+**0.11.0 的最终远端核验见 [0.11.0 交付报告](DELIVERY-0.11.0.md)。** 当前 0.11.1 本地安装包的构建、校验、静默安装、离线后端健康检查和卸载结果见 [Windows 打包报告](WORK-REPORT-2026-09-23-WINDOWS-PACKAGE.md)。
 
 ## 代码位置
 
 | 目录/模块 | 职责 |
 | --- | --- |
-| src/workflow.rs、workbench_service.rs | 单任务 SQLite 状态、配置与执行控制 |
+| src/workflow.rs、schedule_store.rs、workbench_service.rs | 单任务 SQLite 状态、原子一次性定时 Draft、配置与执行控制 |
 | src/team_*.rs | 团队 DAG、官方执行器绑定、独立工作区和验收 |
 | src/native_executor.rs、native_executor/ | 8 个受管执行器门面，以及 Codex/Kimi/Claude/ACP 方言原生协议 |
 | src/model_intelligence.rs、pricing.rs、routing.rs | LiveBench、官方价格证据与快照绑定的可解释路由预览 |
@@ -29,13 +29,13 @@
 
 Work/Chat 支持创建时保存推理档位，任务详情显示请求值，复制任务保留选择。重启后启动任务只读取数据库内的配置；更改配置需要创建新任务。Teams 子任务采用同一保存和校验路径。两个 CLI 只在 work create 接受 --reasoning，start API 也拒绝携带配置覆盖。
 
-SQLite 工作流数据库从 v1 事务迁移到 v2；旧记录保持 reasoning_effort=null，原始模型、历史和状态不变。旧 0.10.0 程序会拒绝读取 v2 数据库，因此调试新源码应使用独立 AGENT_DATA_DIR；若要回退，使用升级前的完整数据备份。应用并不自动降级数据库。
+SQLite 工作流数据库从 v1→v2 保存 `reasoning_effort`，并从 v2→v3 增加一次性计划与触发审计表；旧记录保持 `reasoning_effort=null`，原始模型、历史和状态不变。旧二进制会拒绝读取 v3 数据库，因此调试新源码应使用独立 `AGENT_DATA_DIR`；若要回退，使用升级前的完整数据备份。应用并不自动降级数据库。
 
 推理选项来自所连接服务的能力报告，不是每个模型实际可用档位的保证。Kimi 当前没有这项受管配置，不能给它填入通用的 high。指定 None/省略表示官方默认，off、none、minimal 等原生值不会互相翻译。
 
 ## 本轮验证
 
-Windows 全目标回归通过：404 项库测试、3 项 Rust CLI、18 项桌面、7 项协议集成，共 432 项，外部条件测试 7 项默认忽略。npm 14 项测试通过。新增测试覆盖真实 v1 数据库迁移与重开、旧 JSON、非法档位、跨提供商拒绝、Teams 子任务持久化和归属检查，以及服务能力变更。
+Windows 全目标回归通过：466 项库测试、8 项外部条件默认忽略、6 项 Rust CLI、20 项桌面、7 项协议集成；npm 16 项测试通过。新增测试覆盖 v1→v3 迁移、终态复制边界、一次性定时 Draft 的原子触发/回滚/重启补触发、MCP 分页与名称碰撞，以及 Teams 路由长 blocker 渲染。0.11.1 安装器已在独立目录完成静默安装、安装后 CLI、离线后端健康检查和静默卸载。
 
 另从已发布版本的独立测试数据库创建副本，启动新版后端：Rust CLI 创建 Claude high 只读草稿，npm CLI 创建 DeepSeek off 草稿，旧客户端省略档位得到 null。重启后选择保持不变，5 个既有成功任务的模型、状态和输出保持一致；启动时覆盖配置、Kimi 不支持的 high 都被拒绝。测试未调用模型、未更改原数据库。界面在常规与 940×620 窗口检查过。
 
@@ -61,6 +61,11 @@ Windows 全目标回归通过：404 项库测试、3 项 Rust CLI、18 项桌面
 - [2026-09-23 预算恢复](WORK-REPORT-2026-09-23-BUDGET-RECOVERY.md)：H04 第二片——服务重启预留对账、历史 Interrupted 团队扫描和幂等性测试。
 - [2026-09-23 Grok Build ACP 接入](WORK-REPORT-2026-09-23-GROK-DIALECT.md)：受管执行器扩至 8 个；完成非交互认证、模型/档位回读、权限、usage 与离线完整生命周期，真实账号握手待做。
 - [2026-09-23 ZCode 发行物与协议审计](WORK-REPORT-2026-09-23-ZCODE-AUDIT.md)：确认私有源码包、缺失的公开发行物与实际自有 RPC；ZCode 尚未进入受管执行器。
+- [2026-09-23 H05 复制合同加固](WORK-REPORT-2026-09-23-H05-HARDENING.md)：终态边界、严格 HTTP body、CLI/桌面路径编码和离线 HTTP 验证。
+- [2026-09-23 H06 路由可视化](WORK-REPORT-2026-09-23-H06-ROUTING-VISUAL.md)：Teams 长 blocker/routing fixture、渲染测试和静态截图证据。
+- [2026-09-23 H07 一次性定时草稿](WORK-REPORT-2026-09-23-H07-SCHEDULED-DRAFTS.md)：SQLite v3 原子计划、启动补触发、HTTP/Rust CLI 和离线验证。
+- [2026-09-23 H08 MCP discovery](WORK-REPORT-2026-09-23-H08-MCP-DISCOVERY.md)：有界分页、资源模板和公开名称碰撞防护。
+- [2026-09-23 Windows 0.11.1 安装包](WORK-REPORT-2026-09-23-WINDOWS-PACKAGE.md)：安装器、便携 ZIP 和 npm tarball 的 SHA-256、离线安装验证与真实账号验收步骤。
 - [2026-09-22 源码获取工作报告](WORK-REPORT-2026-09-22-UPSTREAM-ACQUISITION.md)：Git Smart HTTP 不可达时的官方归档回退、验证结果与未解决网络限制。
 - [2026-09-22 最终交接整理报告](WORK-REPORT-2026-09-22-FINAL-HANDOFF.md)：文件分类、完成项、未完成项和交付前检查。
 

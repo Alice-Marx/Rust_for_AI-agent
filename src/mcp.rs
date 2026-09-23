@@ -8,7 +8,7 @@
 //! 配置文件（从低到高优先级）：`<cwd>/.mcp.json`、`<cwd>/.claude/settings.json`、
 //! `<cwd>/.wonderland/settings.json`，都读取顶层 `mcpServers` 对象。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -35,6 +35,8 @@ pub const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
 const MAX_TOOL_NAME_LEN: usize = 64;
 /// 默认请求超时。
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+/// 单次发现操作允许跟随的最大分页数量，防止服务端持续提供新 cursor 而无限等待。
+const MAX_MCP_PAGINATION_PAGES: usize = 100;
 
 /// 一个 MCP 服务器的启动配置，字段名与 Claude Code 的 `mcpServers` 对齐。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -201,12 +203,16 @@ pub fn parse_tools_list(result: &Value) -> (Vec<McpToolInfo>, Option<String>) {
             });
         }
     }
-    let next_cursor = result
+    let next_cursor = next_cursor(result);
+    (tools, next_cursor)
+}
+
+fn next_cursor(result: &Value) -> Option<String> {
+    result
         .get("nextCursor")
         .and_then(Value::as_str)
         .filter(|cursor| !cursor.is_empty())
-        .map(str::to_string);
-    (tools, next_cursor)
+        .map(str::to_string)
 }
 
 /// 把 `tools/call` 的结果渲染为文本：`(内容, 是否错误)`。纯函数。
@@ -330,26 +336,8 @@ pub trait McpSession: Send + Sync {
         if self.capabilities().get("tools").is_none() {
             return Ok(Vec::new());
         }
-        let mut tools = Vec::new();
-        let mut cursor: Option<String> = None;
-        let mut seen = std::collections::HashSet::new();
-        loop {
-            let params = match &cursor {
-                Some(cursor) => json!({ "cursor": cursor }),
-                None => json!({}),
-            };
-            let result = self.request("tools/list", params).await?;
-            let (page, next) = parse_tools_list(&result);
-            tools.extend(page);
-            match next {
-                Some(next) => {
-                    anyhow::ensure!(seen.insert(next.clone()), "MCP repeated pagination cursor");
-                    cursor = Some(next);
-                }
-                None => break,
-            }
-        }
-        Ok(tools)
+        let entries = collect_paginated(self, "tools/list", "tools").await?;
+        Ok(parse_tools_list(&json!({ "tools": entries })).0)
     }
 
     /// tools/call。
@@ -362,6 +350,37 @@ pub trait McpSession: Send + Sync {
             .await?;
         Ok(render_call_result(&result))
     }
+}
+
+/// 收集 MCP list 方法的全部页面。cursor 由服务器定义，客户端只回传并限制总页数。
+async fn collect_paginated<S>(session: &S, method: &str, item_key: &str) -> Result<Vec<Value>>
+where
+    S: McpSession + ?Sized,
+{
+    let mut items = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut seen = HashSet::new();
+    for _ in 0..MAX_MCP_PAGINATION_PAGES {
+        let params = match &cursor {
+            Some(cursor) => json!({ "cursor": cursor }),
+            None => json!({}),
+        };
+        let result = session.request(method, params).await?;
+        if let Some(page) = result.get(item_key).and_then(Value::as_array) {
+            items.extend(page.iter().cloned());
+        }
+        match next_cursor(&result) {
+            Some(next) => {
+                anyhow::ensure!(
+                    seen.insert(next.clone()),
+                    "MCP {method} repeated pagination cursor"
+                );
+                cursor = Some(next);
+            }
+            None => return Ok(items),
+        }
+    }
+    bail!("MCP {method} exceeded pagination limit of {MAX_MCP_PAGINATION_PAGES} pages")
 }
 
 /// Streamable HTTP（含 SSE 响应）MCP 客户端。
@@ -849,6 +868,9 @@ pub fn summaries(outcome: &McpLoadOutcome) -> Vec<Value> {
 /// 启动全部配置的 MCP 服务器并收集工具。单个服务器失败不影响其它服务器。
 pub async fn load_tools(cwd: &Path) -> McpLoadOutcome {
     let mut outcome = McpLoadOutcome::default();
+    // 公开给模型的名称必须在所有已连接服务器之间唯一。保留先加载的安全名称，
+    // 后续冲突服务器整体拒绝，避免工具定义和实际调用指向不同对象。
+    let mut exposed_names: HashMap<String, String> = HashMap::new();
     for (name, config) in load_server_configs(cwd) {
         let session: Result<Arc<dyn McpSession>> = match config.transport_kind() {
             McpTransportKind::Http => McpHttpClient::connect(&name, &config)
@@ -868,6 +890,19 @@ pub async fn load_tools(cwd: &Path) -> McpLoadOutcome {
         };
         match session.list_tools().await {
             Ok(tools) => {
+                let auxiliary = auxiliary_tools(session.clone());
+                let names = tools
+                    .iter()
+                    .map(|info| exposed_tool_name(session.name(), &info.name))
+                    .chain(auxiliary.iter().map(|tool| tool.name().to_string()))
+                    .collect::<Vec<_>>();
+                if let Err(error) = validate_exposed_tool_names(&name, &names, &exposed_names) {
+                    outcome.errors.push((name, error.to_string()));
+                    continue;
+                }
+                for exposed in names {
+                    exposed_names.insert(exposed, name.clone());
+                }
                 outcome.servers.push((name.clone(), tools.len()));
                 for info in &tools {
                     let mut tool = McpTool::new(session.clone(), info);
@@ -875,7 +910,7 @@ pub async fn load_tools(cwd: &Path) -> McpLoadOutcome {
                     tool.read_only |= config.read_only;
                     outcome.tools.push(Arc::new(tool));
                 }
-                for tool in auxiliary_tools(session.clone()) {
+                for tool in auxiliary {
                     outcome.tools.push(tool);
                 }
             }
@@ -885,6 +920,27 @@ pub async fn load_tools(cwd: &Path) -> McpLoadOutcome {
     outcome
 }
 
+/// 确保截断或字符替换后的 MCP 工具名仍无歧义。
+fn validate_exposed_tool_names(
+    server: &str,
+    names: &[String],
+    existing: &HashMap<String, String>,
+) -> Result<()> {
+    let mut local = HashSet::new();
+    for exposed in names {
+        anyhow::ensure!(
+            local.insert(exposed),
+            "MCP server {server} exposes colliding tool name '{exposed}'"
+        );
+        if let Some(other_server) = existing.get(exposed) {
+            bail!(
+                "MCP server {server} exposes tool name '{exposed}' already used by server {other_server}"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// 当服务器声明 resources / prompts 能力时，补上对应的读取工具。
 fn auxiliary_tools(session: Arc<dyn McpSession>) -> Vec<Arc<dyn Tool>> {
     let capabilities = session.capabilities();
@@ -892,7 +948,11 @@ fn auxiliary_tools(session: Arc<dyn McpSession>) -> Vec<Arc<dyn Tool>> {
     for (capability, kinds) in [
         (
             "resources",
-            vec![McpAuxKind::ListResources, McpAuxKind::ReadResource],
+            vec![
+                McpAuxKind::ListResources,
+                McpAuxKind::ListResourceTemplates,
+                McpAuxKind::ReadResource,
+            ],
         ),
         (
             "prompts",
@@ -913,6 +973,7 @@ fn auxiliary_tools(session: Arc<dyn McpSession>) -> Vec<Arc<dyn Tool>> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpAuxKind {
     ListResources,
+    ListResourceTemplates,
     ReadResource,
     ListPrompts,
     GetPrompt,
@@ -939,6 +1000,7 @@ impl McpAuxKind {
     fn tool_suffix(self) -> &'static str {
         match self {
             Self::ListResources => "list_resources",
+            Self::ListResourceTemplates => "list_resource_templates",
             Self::ReadResource => "read_resource",
             Self::ListPrompts => "list_prompts",
             Self::GetPrompt => "get_prompt",
@@ -948,6 +1010,7 @@ impl McpAuxKind {
     fn description(self) -> &'static str {
         match self {
             Self::ListResources => "列出该 MCP 服务器暴露的资源（URI 与名称）",
+            Self::ListResourceTemplates => "列出该 MCP 服务器暴露的资源 URI 模板",
             Self::ReadResource => "按 URI 读取该 MCP 服务器的资源内容",
             Self::ListPrompts => "列出该 MCP 服务器提供的提示词模板",
             Self::GetPrompt => "按名称渲染该 MCP 服务器的提示词模板",
@@ -957,9 +1020,19 @@ impl McpAuxKind {
     fn method(self) -> &'static str {
         match self {
             Self::ListResources => "resources/list",
+            Self::ListResourceTemplates => "resources/templates/list",
             Self::ReadResource => "resources/read",
             Self::ListPrompts => "prompts/list",
             Self::GetPrompt => "prompts/get",
+        }
+    }
+
+    fn list_item_key(self) -> Option<&'static str> {
+        match self {
+            Self::ListResources => Some("resources"),
+            Self::ListResourceTemplates => Some("resourceTemplates"),
+            Self::ListPrompts => Some("prompts"),
+            Self::ReadResource | Self::GetPrompt => None,
         }
     }
 }
@@ -1008,7 +1081,12 @@ impl Tool for McpAuxTool {
             }),
             _ => json!({}),
         };
-        let result = self.session.request(self.kind.method(), params).await?;
+        let result = match self.kind.list_item_key() {
+            Some(item_key) => json!({
+                item_key: collect_paginated(self.session.as_ref(), self.kind.method(), item_key).await?,
+            }),
+            None => self.session.request(self.kind.method(), params).await?,
+        };
         Ok(ToolOutput::ok(render_aux_result(&result)))
     }
 }
@@ -1044,6 +1122,31 @@ pub fn render_aux_result(result: &Value) -> String {
         return contents
             .iter()
             .filter_map(|entry| entry.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    if let Some(templates) = result.get("resourceTemplates").and_then(Value::as_array) {
+        if templates.is_empty() {
+            return "（没有可用资源模板）".to_string();
+        }
+        return templates
+            .iter()
+            .map(|template| {
+                format!(
+                    "{}  {}",
+                    template
+                        .get("uriTemplate")
+                        .and_then(Value::as_str)
+                        .unwrap_or("(no uri template)"),
+                    template
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .or_else(|| template.get("description").and_then(Value::as_str))
+                        .unwrap_or("")
+                )
+                .trim_end()
+                .to_string()
+            })
             .collect::<Vec<_>>()
             .join("\n");
     }
@@ -1095,6 +1198,7 @@ pub fn render_aux_result(result: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
     use std::fs;
 
     fn write_settings(path: &Path, servers: Value) {
@@ -1102,6 +1206,54 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(path, json!({ "mcpServers": servers }).to_string()).unwrap();
+    }
+
+    struct ScriptedSession {
+        name: String,
+        capabilities: Value,
+        replies: tokio::sync::Mutex<VecDeque<Value>>,
+        requests: tokio::sync::Mutex<Vec<(String, Value)>>,
+    }
+
+    impl ScriptedSession {
+        fn new(capabilities: Value, replies: Vec<Value>) -> Self {
+            Self {
+                name: "scripted".to_string(),
+                capabilities,
+                replies: tokio::sync::Mutex::new(replies.into()),
+                requests: tokio::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        async fn requests(&self) -> Vec<(String, Value)> {
+            self.requests.lock().await.clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl McpSession for ScriptedSession {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn capabilities(&self) -> Value {
+            self.capabilities.clone()
+        }
+
+        async fn request(&self, method: &str, params: Value) -> Result<Value> {
+            self.requests
+                .lock()
+                .await
+                .push((method.to_string(), params));
+            match self.replies.lock().await.pop_front() {
+                Some(reply) => Ok(reply),
+                None => bail!("unexpected mock MCP request for {method}"),
+            }
+        }
+
+        async fn notify(&self, _method: &str, _params: Value) -> Result<()> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -1177,6 +1329,115 @@ mod tests {
         let long = exposed_tool_name("server", &"x".repeat(120));
         assert_eq!(long.len(), MAX_TOOL_NAME_LEN);
         assert!(long.starts_with("mcp__server__"));
+    }
+
+    #[test]
+    fn exposed_name_collisions_are_rejected_before_registration() {
+        let first = exposed_tool_name("server", &format!("{}-first", "x".repeat(100)));
+        let second = exposed_tool_name("server", &format!("{}-second", "x".repeat(100)));
+        assert_eq!(first, second, "test inputs must collide after truncation");
+
+        let local =
+            validate_exposed_tool_names("server", &[first.clone(), second], &HashMap::new())
+                .unwrap_err();
+        assert!(local.to_string().contains("colliding tool name"));
+
+        let existing = HashMap::from([(first.clone(), "other".to_string())]);
+        let cross_server = validate_exposed_tool_names("server", &[first], &existing).unwrap_err();
+        assert!(cross_server
+            .to_string()
+            .contains("already used by server other"));
+    }
+
+    #[tokio::test]
+    async fn auxiliary_lists_follow_pages_and_include_resource_templates() {
+        let scripted = Arc::new(ScriptedSession::new(
+            json!({"resources": {}, "prompts": {}}),
+            vec![
+                json!({"resources": [{"uri": "file:///one", "name": "one"}], "nextCursor": "resources-2"}),
+                json!({"resources": [{"uri": "file:///two", "name": "two"}]}),
+                json!({"prompts": [{"name": "review"}], "nextCursor": "prompts-2"}),
+                json!({"prompts": [{"name": "release"}]}),
+                json!({"resourceTemplates": [{"uriTemplate": "file:///items/{id}", "name": "item"}], "nextCursor": "templates-2"}),
+                json!({"resourceTemplates": [{"uriTemplate": "file:///logs/{date}", "name": "log"}]}),
+            ],
+        ));
+        let session: Arc<dyn McpSession> = scripted.clone();
+        let auxiliary = auxiliary_tools(session.clone());
+        let names = auxiliary.iter().map(|tool| tool.name()).collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                "mcp__scripted__list_resources",
+                "mcp__scripted__list_resource_templates",
+                "mcp__scripted__read_resource",
+                "mcp__scripted__list_prompts",
+                "mcp__scripted__get_prompt",
+            ]
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut context = ToolContext::for_tests(directory.path().to_path_buf());
+        let resources = McpAuxTool::new(session.clone(), McpAuxKind::ListResources)
+            .call(json!({}), &mut context)
+            .await
+            .unwrap();
+        assert!(resources.content.contains("file:///one"));
+        assert!(resources.content.contains("file:///two"));
+
+        let prompts = McpAuxTool::new(session.clone(), McpAuxKind::ListPrompts)
+            .call(json!({}), &mut context)
+            .await
+            .unwrap();
+        assert!(prompts.content.contains("review"));
+        assert!(prompts.content.contains("release"));
+
+        let templates = McpAuxTool::new(session, McpAuxKind::ListResourceTemplates)
+            .call(json!({}), &mut context)
+            .await
+            .unwrap();
+        assert!(templates.content.contains("file:///items/{id}"));
+        assert!(templates.content.contains("file:///logs/{date}"));
+
+        assert_eq!(
+            scripted.requests().await,
+            vec![
+                ("resources/list".to_string(), json!({})),
+                (
+                    "resources/list".to_string(),
+                    json!({"cursor": "resources-2"})
+                ),
+                ("prompts/list".to_string(), json!({})),
+                ("prompts/list".to_string(), json!({"cursor": "prompts-2"})),
+                ("resources/templates/list".to_string(), json!({})),
+                (
+                    "resources/templates/list".to_string(),
+                    json!({"cursor": "templates-2"}),
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn paginated_discovery_rejects_repeated_and_unbounded_cursors() {
+        let repeated = Arc::new(ScriptedSession::new(
+            json!({"tools": {}}),
+            vec![
+                json!({"tools": [], "nextCursor": "again"}),
+                json!({"tools": [], "nextCursor": "again"}),
+            ],
+        ));
+        let error = repeated.list_tools().await.unwrap_err();
+        assert!(error.to_string().contains("repeated pagination cursor"));
+        assert_eq!(repeated.requests().await.len(), 2);
+
+        let pages = (0..MAX_MCP_PAGINATION_PAGES)
+            .map(|page| json!({"tools": [], "nextCursor": format!("page-{page}")}))
+            .collect::<Vec<_>>();
+        let unbounded = Arc::new(ScriptedSession::new(json!({"tools": {}}), pages));
+        let error = unbounded.list_tools().await.unwrap_err();
+        assert!(error.to_string().contains("exceeded pagination limit"));
+        assert_eq!(unbounded.requests().await.len(), MAX_MCP_PAGINATION_PAGES);
     }
 
     #[test]

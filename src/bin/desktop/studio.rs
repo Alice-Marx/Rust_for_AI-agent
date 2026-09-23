@@ -845,26 +845,17 @@ impl Studio {
                     false,
                 );
             }
-            if matches!(
-                record.status,
-                WorkflowStatus::Blocked
-                    | WorkflowStatus::Failed
-                    | WorkflowStatus::Interrupted
-                    | WorkflowStatus::Cancelled
-                    | WorkflowStatus::Succeeded
-            ) && ui.button("复制为新任务").clicked()
+            if record.status.is_terminal()
+                && ui
+                    .add_enabled(!self.busy, egui::Button::new("复制为新草稿"))
+                    .clicked()
             {
-                self.title = record.title.clone();
-                self.prompt = record.prompt.clone();
-                self.cwd = record.cwd.clone();
-                self.app_id = record.app_id.clone();
-                self.model = record.model.clone();
-                self.effort = record.reasoning_effort.clone().unwrap_or_default();
-                self.read_only = record.read_only;
-                self.minutes = record.max_duration_secs.div_ceil(60);
-                self.acceptance = record.acceptance.join("\n");
-                self.selected = None;
-                self.composing = true;
+                self.mutate(
+                    ui.ctx(),
+                    workflow_endpoint(&record.id, "/duplicate"),
+                    json!({}),
+                    false,
+                );
             }
             if ui
                 .add_enabled(
@@ -1659,6 +1650,15 @@ fn status_text(s: WorkflowStatus) -> &'static str {
         WorkflowStatus::Interrupted => "已中断",
     }
 }
+
+fn workflow_endpoint(id: &str, suffix: &str) -> String {
+    let segment: String = url::form_urlencoded::byte_serialize(id.as_bytes()).collect();
+    format!(
+        "/api/v1/workflows/{}{}",
+        segment.replace('+', "%20"),
+        suffix
+    )
+}
 fn status_chip(ui: &mut Ui, s: WorkflowStatus) {
     pill(
         ui,
@@ -1897,6 +1897,14 @@ mod tests {
         assert_ne!(
             lane_for(WorkflowStatus::Verifying),
             lane_for(WorkflowStatus::Succeeded)
+        );
+    }
+
+    #[test]
+    fn duplicate_endpoint_escapes_a_terminal_task_id() {
+        assert_eq!(
+            workflow_endpoint("task/a b?x=1", "/duplicate"),
+            "/api/v1/workflows/task%2Fa%20b%3Fx%3D1/duplicate"
         );
     }
     #[test]

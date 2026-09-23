@@ -144,7 +144,7 @@ npm 包是客户端，不附带 Rust 后端或官方模型工具。npm 的 `wond
 | 内容 | 含义及处置 |
 | --- | --- |
 | `AGENT_DATA_DIR` | 源码默认 `.agent-data`；Windows 安装启动器默认 `%LOCALAPPDATA%/WonderlandData`。独立开发建议放到仓库外 |
-| `workflows.sqlite` | 官方 Work/Chat、项目记录、配置与事件的权威数据库；不能当作缓存删除 |
+| `workflows.sqlite` | 官方 Work/Chat、项目记录、配置、事件、一次性计划与触发审计的权威数据库；不能当作缓存删除 |
 | `teams.sqlite` | 团队、节点、attempt、预算预留和验收等权威状态 |
 | `workbench.lock` | 后端独占锁；遇到占用先找原服务，不通过强删锁文件绕开并发所有权 |
 | `team-workspaces/` | 团队和 attempt 的独立 Git 工作区及产物；清理前先检查任务终态与成果保存 |
@@ -161,7 +161,11 @@ npm 包是客户端，不附带 Rust 后端或官方模型工具。npm 的 `wond
 
 旧 0.10.0 程序拒绝读取 v2。**降级二进制不是数据库回滚**，没有自动降级迁移。不要手动改 `user_version`、删除字段或把 v2 宣称为 v1；这样会绕开保护并失去正确性保证。
 
-### 5.3 升级前备份
+### 5.3 v2 → v3 的精确变化
+
+0.11.1 在同一 `workflows.sqlite` 中新增 `schedules` 和 `schedule_triggers`。一次性计划到期时，新 Draft、`scheduled_from` 事件、触发审计和计划终态在同一个 SQLite 事务中提交；不会自动启动模型。旧二进制会以版本过高拒绝读取 v3。恢复旧版时必须使用升级前完整备份，不能删除新表或手改版本号。
+
+### 5.4 升级前备份
 
 1. 记录服务可执行路径、版本、当前数据根和任务状态；结束或明确停止运行中的任务，关闭桌面并让对应后端正常退出。
 2. 确认没有其他后端仍持有该数据根；数据库 WAL 模式下不要在运行时仅复制一个 `.sqlite` 文件。
@@ -400,7 +404,7 @@ npm test --prefix packaging/npm/wonderland-cli
 
 **位置：** `src/workflow.rs`、`src/workbench_service.rs`、`src/team_store.rs`、`src/native_executor*`、`src/process_tree.rs`。
 
-**已交付（新任务副本第一步，H05 未完成）：** 终态独立 workflow 可经 `POST /api/v1/workflows/{id}/duplicate` 或 Rust/npm `wonderland work duplicate <id>` 复制为 Draft；保留提示/工具配置/验收合同，生成新 ID，在事务内记录 `duplicated_from`。原生 session、输出和错误不复制，也不自动启动；Team-owned child 必须由父团队处理。此功能不是恢复、历史分叉或同一 attempt 重试；所有适配器的 `resume/fork` 继续为 false。细节见 [H05 新任务副本工作报告](WORK-REPORT-2026-09-23-H05-NEW-DRAFT.md)。
+**已交付（复制合同加固，H05 未完成）：** 终态独立 workflow 仅能从 succeeded/failed/cancelled/interrupted 经 `POST /api/v1/workflows/{id}/duplicate` 或 Rust/npm `wonderland work duplicate <id>` 复制为 Draft；HTTP 仅接受空对象，CLI 与桌面都对 ID 做单段编码。保留提示/工具配置/验收合同，生成新 ID，在事务内记录 `duplicated_from`。原生 session、输出和错误不复制，也不自动启动；Team-owned child 必须由父团队处理。所有适配器的 `resume/fork` 继续为 false。细节见 [H05 加固报告](WORK-REPORT-2026-09-23-H05-HARDENING.md)。
 
 1. 分开“继续同一原生会话”“复制成新任务”“从失败节点重试”“分叉历史”，分别定义数据和权限合同。
 2. 建立保存的原生 session id、工具版本、配置、工作区 revision 与恢复可用性检查；不可恢复时给出新任务流程。
@@ -416,13 +420,17 @@ npm test --prefix packaging/npm/wonderland-cli
 
 每个新面板都应有创建、进行中、权限等待、失败、重试/取消、成功产物与空状态；要支持键盘、中文、缩放、小窗口和长期输出。工作区编辑器仍需独立规划 LSP、调试和更多语言支持，不将已有文件识别当作完整 IDE。
 
+本轮离线 routing fixture 已覆盖长 blocker、价格状态和 `routing_preview`/`binding_applied` 事件，并通过 snapshot 渲染与静态截图检查；真实桌面窗口操作仍要在用户机器完成。细节见 [H06 路由可视化报告](WORK-REPORT-2026-09-23-H06-ROUTING-VISUAL.md)。
+
 **验收门槛：** 从真实项目完成端到端操作；切换项目不串目录；关闭界面不丢服务任务；截图以外还要记录实际操作验证与后端状态。
 
 ### H07：插件、定时、远程及 Git/网站集成
 
 **位置：** 先在 `docs/DESKTOP_PRODUCT_PLAN.md` 的合同上细化独立模块，再接 `src/workbench_service.rs` 与桌面；不要塞入 `tools/background.rs`。
 
-建议分别交付：插件 manifest/权限/安装与回滚；调度持久化/时区/重复触发去重/错过执行策略；远程身份/TLS/权限/断线重连；GitHub PR 的授权、diff、创建/更新/结果；网站本地预览与发布目标区分。远程执行不能只把监听地址改成 `0.0.0.0`。
+已交付一站式调度的第一片：计划/触发审计/新 Draft 在 `workflows.sqlite` 同一事务内提交，重启补触发和定时轮询只创建 Draft；HTTP 与 Rust CLI 提供创建、列表、读取和取消。周期规则、时区/DST、桌面计划页、插件、远程、PR 和网站发布仍未完成。细节见 [H07 定时草稿报告](WORK-REPORT-2026-09-23-H07-SCHEDULED-DRAFTS.md)。
+
+后续分别交付：插件 manifest/权限/安装与回滚；周期调度/时区/重复触发去重；远程身份/TLS/权限/断线重连；GitHub PR 的授权、diff、创建/更新/结果；网站本地预览与发布目标区分。远程执行不能只把监听地址改成 `0.0.0.0`。
 
 **验收门槛：** 每项都有生命周期和实际后端；定时重启不丢计划或重复派工；远程客户端不能越权；外部写操作留下可审计的明确目标和结果。
 
@@ -430,7 +438,7 @@ npm test --prefix packaging/npm/wonderland-cli
 
 **位置：** `src/sandbox.rs`、`sandbox_windows.rs`、`permissions.rs`、`mcp.rs`、`mcp_sse.rs`、`mcp_oauth.rs`、`process_tree.rs`。
 
-补 Unix 真实隔离与资源限制；明确哪些宿主执行需要新的隔离后端，哪些只依赖官方工具策略。MCP 补资源模板、分页、通知更新及 sampling/elicitation 的授权合同，测试实际 stdio/HTTP/SSE 服务的断线、刷新和撤权。不将所有官方工具 MCP 配置自动互相复制。
+MCP discovery 已支持 tools/resources/prompts/resource templates 的有界分页，并在重复/无限 cursor 或工具名碰撞时失败关闭。下一步补 Unix 真实隔离与资源限制，并测试实际 stdio/HTTP/SSE 服务的断线、刷新和撤权；sampling/elicitation 需先有明确授权合同。不将所有官方工具 MCP 配置自动互相复制。细节见 [H08 MCP discovery 报告](WORK-REPORT-2026-09-23-H08-MCP-DISCOVERY.md)。
 
 **验收门槛：** 文件/网络/进程边界有真实系统测试；无可用隔离时拒绝；OAuth token 不进日志；服务重载不留下孤儿进程或旧授权。
 
@@ -511,7 +519,7 @@ GitHub 和 npm 的认证由接手者自己的账号完成，不把账号 token �
 | --- | --- |
 | 新 UI 没有推理档位或操作报不支持 | 连接的后端版本/地址、`apps` 能力和 `workflow_settings`；不是先在 UI 硬加选项 |
 | 设置 `offline` 后仍见旧 API 连接 | 数据目录内已保存连接优先；换一个独立空数据目录验证，不删除正式连接 |
-| 启动报数据库版本过高 | 正在用旧二进制读 v2；升级程序或用升级前完整备份，不改版本标记 |
+| 启动报数据库版本过高 | 正在用旧二进制读 v3；升级程序或用升级前完整备份，不改版本标记 |
 | 锁文件/目录占用 | 找到实际后端与数据根；避免两个服务持有同一数据库 |
 | 应用已安装却任务失败 | 安装探测不是登录/模型可用验证；看协议身份、精确模型、官方账户和版本限制 |
 | Kimi 启动的是错误程序 | Python 与 Node 都可能叫 `kimi`；检查 app_id、实际入口、版本 banner 和 PATH |

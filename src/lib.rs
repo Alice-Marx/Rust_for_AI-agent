@@ -31,6 +31,7 @@ pub mod routing;
 pub mod sandbox;
 #[cfg(windows)]
 mod sandbox_windows;
+pub mod schedule_store;
 pub mod session;
 pub mod session_index;
 pub mod skills;

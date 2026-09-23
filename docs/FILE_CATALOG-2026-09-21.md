@@ -14,7 +14,7 @@
 | [.gitignore](../.gitignore) | 排除构建包、运行数据、日志、环境文件和本地只读参考仓库 | 新增发布/数据路径时同步维护，避免把凭据或大型构建物加入 Git |
 | [.gitmodules](../.gitmodules) | 声明 16 个上游工具子模块的路径与仓库 URL | 固定提交由 Git gitlink 记录；修改来源不代表适配器支持了新工具 |
 | [CONTRIBUTORS.md](../CONTRIBUTORS.md) | 项目贡献者名单 | 属于项目署名资料 |
-| [Cargo.toml](../Cargo.toml) | Rust 包版本、依赖、平台依赖、功能开关和默认运行目标 | 当前 0.11.0；`ui-snapshots` 是开发截图能力，不应无意加入正式包 |
+| [Cargo.toml](../Cargo.toml) | Rust 包版本、依赖、平台依赖、功能开关和默认运行目标 | 当前 0.11.1；`ui-snapshots` 是开发截图能力，不应无意加入正式包 |
 | [Cargo.lock](../Cargo.lock) | 锁定 Rust 依赖解析结果 | 与 `--locked` 配合保持构建可复现，升级依赖需重新验证 |
 | [LICENSE](../LICENSE) | Wonderland 自有项目 MIT 许可 | 不替代上游工具、字体等各自许可证 |
 | [README.md](../README.md) | 产品介绍、安装/运行、API/CLI、能力与版本入口 | 用户最先看到的说明，应区分源码版与已发布版 |
@@ -60,8 +60,9 @@
 | [src/native_executor/claude.rs](../src/native_executor/claude.rs) | 官方 Claude stream-json 进程、设置/模型/effort 核验、正文/思考去重、审批/问题、取消和清理 | 固定已验证官方 2.1.193 发行；只有离线/合成响应真实程序验证，没有真实模型推理 |
 | [src/native_executor/deepseek.rs](../src/native_executor/deepseek.rs) | 官方 DeepSeek ACP 与临时 profile、发行指纹、会话/模型/effort、权限/工具生命周期和清理 | 官方 0.1.6-alpha.2；有无密钥握手，无真实 prompt；上下文占用不当作计费 token |
 | [src/app_diagnostics.rs](../src/app_diagnostics.rs) | 有界并发/超时的 CLI 版本探测、入口识别、文件摘要和能力诊断 | 不读取账号凭据、不发模型请求；hash 不是发行商签名 |
-| [src/workflow.rs](../src/workflow.rs) | SQLite 工作流/项目主存储：配置、状态、输出、原生会话 ID、有序事件；schema v2 与中断标记 | 0.11 保存 `reasoning_effort`；旧记录保持 NULL，不能自动降级为 v1 |
-| [src/workbench_service.rs](../src/workbench_service.rs) | 独占数据目录的执行服务：建/启/停/验收任务、权限/提问转发、重叠目录保护，提供工作流/项目/应用接口 | 服务重启标 Interrupted；普通任务执行后待验收；Teams 子任务禁止独立绕过父级验收 |
+| [src/workflow.rs](../src/workflow.rs) | SQLite 工作流/项目/一次性计划主存储：配置、状态、输出、原生会话 ID、有序事件、计划与触发审计；schema v3 | v2→v3 增加计划表；旧二进制不能降级读取，升级前备份完整数据目录 |
+| [src/schedule_store.rs](../src/schedule_store.rs) | 一次性计划类型、状态、RFC 3339 规范化与模板大小校验；SQL 事务由 WorkflowStore 统一拥有 | 仅一站式 Draft；未实现周期、时区/DST、远程或通知 |
+| [src/workbench_service.rs](../src/workbench_service.rs) | 独占数据目录的执行服务：建/启/停/验收任务、权限/提问转发、重叠目录保护，提供工作流/项目/应用/一次性计划接口 | 启动补触发只创建 Draft；服务重启标 Interrupted；Teams 子任务禁止独立绕过父级验收 |
 | [src/team_store.rs](../src/team_store.rs) | Teams SQLite 事务：DAG、节点、attempt、绑定、事件、revision、原子 claim、验收和 microUSD 预留/结算 | 预算账本存在不代表实际官方账号花费已可约束 |
 | [src/team_service.rs](../src/team_service.rs) | 团队规划、依赖/并发调度、固定/Assigned 绑定、重试、只读评审、集成、主机验收和成功判定 | Automatic 刷新证据后仍无条件 Blocked；带 USD 上限也 Blocked |
 | [src/team_workspace.rs](../src/team_workspace.rs) | 创建独立 detached worktree、捕获改动、保护测试/写范围、提交/补丁散列与串行集成 | 要求干净 Git 根；成果在 integration 目录，不直接写回原始分支；不是 OS 沙箱 |
@@ -78,8 +79,8 @@
 | [src/desktop_bridge.rs](../src/desktop_bridge.rs) | 官方应用目录、来源/checkout 检查、程序发现、配置与跨平台 argv，打开终端/目录/本地构建入口 | 应用有卡片不等于已安装、已登录或已有受管适配 |
 | [src/desktop_terminal.rs](../src/desktop_terminal.rs) | PTY/ConPTY、vt100、终端读写线程、输入法/键鼠、滚动选择、尺寸/输出限额和关闭清理 | 以当前用户运行；不在 SandboxRun 隔离内 |
 | [src/desktop_workspace.rs](../src/desktop_workspace.rs) | 文件树、文本读写、语言/清单识别、Git 状态与 diff；修订校验和原子保存 | 发现外部改动时拒绝覆盖；不是完整 LSP/调试 IDE |
-| [src/bin/desktop/studio.rs](../src/bin/desktop/studio.rs) | Work/Chat 创建、列表/看板、详情/事件/审批、应用与安装诊断、项目页面，连接 Teams | 任务由服务拥有；从服务读取能力；看板不能随意拖成成功 |
-| [src/bin/desktop/teams.rs](../src/bin/desktop/teams.rs) | Teams 创建/详情、策略/执行器/effort、节点 JSON 和验收命令，展示依赖、attempt、改动/验证和价格 | JSON 编辑仍较重；Automatic 控件存在不代表自动路由可执行 |
+| [src/bin/desktop/studio.rs](../src/bin/desktop/studio.rs) | Work/Chat 创建、列表/看板、详情/事件/审批、应用与安装诊断、项目页面，连接 Teams；终态复制调用真实 API | 任务由服务拥有；从服务读取能力；看板不能随意拖成成功 |
+| [src/bin/desktop/teams.rs](../src/bin/desktop/teams.rs) | Teams 创建/详情、策略/执行器/effort、节点 JSON 和验收命令，展示依赖、attempt、改动/验证和价格；有路由事件/长 blocker snapshot 回归 | JSON 编辑仍较重；Automatic 控件存在不代表自动路由可执行；真实窗口操作另验收 |
 | [src/bin/desktop/workbench.rs](../src/bin/desktop/workbench.rs) | 文件树/编辑器、Git diff、CLI 配置扫描、内嵌/外部终端、项目切换，处理未保存编辑和终端关闭 | 本地文件/终端面板与服务型 Studio 页面职责不同 |
 | [src/bin/desktop/ui.rs](../src/bin/desktop/ui.rs) | 公共视觉组件、导航/欢迎页、对话/推理/工具内容、Markdown/代码复制、连接与账号设置、开发截图 | 截图 fixture 中展示数据不是真实模型执行记录 |
 | [src/bin/desktop/icons.rs](../src/bin/desktop/icons.rs) | egui Painter 绘制的可缩放图标、导航按钮和品牌图形 | 由代码绘制，未依赖 AI 位图生成服务 |
@@ -93,7 +94,7 @@
 | [src/hooks.rs](../src/hooks.rs) | 项目 settings 中 SessionStart/工具前后等命令 hooks、超时和结果解释 | 执行宿主命令，不由 SandboxRun 自动隔离 |
 | [src/skills.rs](../src/skills.rs) | SKILL.md 扫描/去重/摘要与显式或关键词激活，兼容 `.claude/skills` | 加载指南不授权脚本执行，不是插件市场 |
 | [src/commands.rs](../src/commands.rs) | Markdown 斜杠命令、YAML 元数据、目录命名空间和参数展开 | 是提示模板，不是独立官方 CLI 指令集 |
-| [src/mcp.rs](../src/mcp.rs) | MCP 配置和会话，stdio/Streamable HTTP，握手、ID、工具发现/分页，资源/提示基础包装 | 开头旧注释只称 stdio，正文已扩展；资源/提示分页与完整规范仍有缺口 |
+| [src/mcp.rs](../src/mcp.rs) | MCP 配置和会话，stdio/Streamable HTTP，握手、ID、tools/resources/prompts/resource templates 的有界发现与辅助包装 | 重复/无限 cursor 与公开名称碰撞失败关闭；通知、sampling/elicitation 和真实服务兼容性仍待验收 |
 | [src/mcp_sse.rs](../src/mcp_sse.rs) | 旧式 HTTP+SSE：GET 事件 endpoint、同源 POST JSON-RPC、ID 分发和断线处理 | 与新 Streamable HTTP 分开实现 |
 | [src/mcp_oauth.rs](../src/mcp_oauth.rs) | OAuth 发现/注册、PKCE S256、localhost 回调、state、刷新/退出和 token 存储 | 需远端服务器实际兼容；不是所有 MCP 服务已验证 |
 | [src/sandbox.rs](../src/sandbox.rs) | Python/Node 执行合同、输入/输出/时限/temp 目录和平台分派，缺隔离则拒绝 | Linux bwrap/macOS sandbox-exec；Unix 资源限制未全部落实 |
@@ -138,7 +139,7 @@
 | --- | --- | --- |
 | [packaging/windows/Start-Wonderland.ps1](../packaging/windows/Start-Wonderland.ps1) | 安装后启动器：选择用户数据目录、配置 sidecar/服务 URL、健康探测、隐藏启动后端后打开桌面 | 生命周期仍由 Rust 服务管理，脚本不是调度器 |
 | [packaging/windows/build-windows-package.ps1](../packaging/windows/build-windows-package.ps1) | 收集二进制/资源/许可证、获取并校验 sidecar、运行 Inno Setup、生成便携包和校验文件 | 需先完成正确版本的 release 构建；不能把开发二进制当发布验收 |
-| [packaging/windows/wonderland.iss](../packaging/windows/wonderland.iss) | Inno Setup 安装器定义：版本、文件、目录、快捷方式和安装行为 | 当前版本字段随源码为 0.11.0，不证明已生成/发布该包 |
+| [packaging/windows/wonderland.iss](../packaging/windows/wonderland.iss) | Inno Setup 安装器定义：版本、文件、目录、快捷方式和安装行为 | 当前版本字段随源码为 0.11.1，不证明已生成/发布该包 |
 | [packaging/npm/wonderland-cli/package.json](../packaging/npm/wonderland-cli/package.json) | npm 名称/版本、Node 要求、两个命令名、打包白名单、测试和公开发布设置 | 包名 `rust-ai-wonderland-cli`，只分发客户端 |
 | [packaging/npm/wonderland-cli/README.md](../packaging/npm/wonderland-cli/README.md) | npm 用户的安装、后端依赖、账号/工作流/Teams/情报/价格命令 | Rust 与 npm 某些参数写法不同，以各自说明为准 |
 | [packaging/npm/wonderland-cli/LICENSE](../packaging/npm/wonderland-cli/LICENSE) | 随 npm tarball 分发的 MIT 许可 | 不是官方工具的授权文件 |

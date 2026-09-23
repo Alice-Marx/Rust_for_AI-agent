@@ -1281,7 +1281,7 @@ impl Teams {
             status: TeamStatus::WaitingInput,
             revision: 7,
             created_at: timestamp.clone(),
-            updated_at: timestamp,
+            updated_at: timestamp.clone(),
             error: None,
             starting_revision: Some("fixture-revision".into()),
             run_workspace: Some(cwd.into()),
@@ -1296,6 +1296,127 @@ impl Teams {
                 duration_ms: 843,
             }],
         }];
+        self.events.insert(
+            "fixture-team".into(),
+            vec![
+                TeamEvent {
+                    seq: 41,
+                    team_id: "fixture-team".into(),
+                    kind: "routing_preview".into(),
+                    data: json!({
+                        "policy_version": "routing-v2",
+                        "status": "selected",
+                        "epoch_id": "livebench-fixture:pricing-fixture",
+                        "benchmark_snapshot_id": "livebench-fixture",
+                        "price_snapshot_id": "pricing-fixture",
+                        "identity_mapping_version": "1.1.0",
+                        "required_categories": ["Coding"],
+                        "category_weights": {"Coding": 1.0},
+                        "billing_channel": "api",
+                        "estimated_input_tokens": 12000,
+                        "estimated_output_tokens": 4000,
+                        "budget_usd": null,
+                        "candidates": [
+                            {
+                                "candidate": {
+                                    "binding": {
+                                        "app_id": "codex",
+                                        "model": "gpt-5.4",
+                                        "reasoning_effort": "high"
+                                    }
+                                },
+                                "status": "eligible",
+                                "quality_score": 87.6,
+                                "estimated_cost_usd": 0.1642,
+                                "quote_model": "gpt-5.4",
+                                "reasons": []
+                            },
+                            {
+                                "candidate": {
+                                    "binding": {
+                                        "app_id": "kimi-cli",
+                                        "model": "kimi-for-coding",
+                                        "reasoning_effort": null
+                                    }
+                                },
+                                "status": "rejected",
+                                "quality_score": null,
+                                "estimated_cost_usd": null,
+                                "quote_model": null,
+                                "reasons": [
+                                    "该精确模型与推理档位尚无可用的 LiveBench 身份核验，因此不能沿用同名或近似模型的分数。",
+                                    "订阅额度不能折算为 API token 价格，不能把账号剩余额度当作 USD 报价。"
+                                ]
+                            }
+                        ],
+                        "selected": {
+                            "binding": {
+                                "app_id": "codex",
+                                "model": "gpt-5.4",
+                                "reasoning_effort": "high"
+                            }
+                        },
+                        "selected_quality_score": 87.6,
+                        "selected_estimated_cost_usd": 0.1642,
+                        "explanation": "示例路由已选择经过身份、榜单与报价核验的候选；下方拒绝原因保留在事件中，供离线界面检查长文本换行和证据链布局。"
+                    }),
+                    created_at: timestamp.clone(),
+                },
+                TeamEvent {
+                    seq: 42,
+                    team_id: "fixture-team".into(),
+                    kind: "binding_applied".into(),
+                    data: json!({
+                        "planner": {
+                            "app_id": "codex",
+                            "model": "gpt-5.4",
+                            "reasoning_effort": "high"
+                        },
+                        "quality_score": 87.6,
+                        "estimated_cost_usd": 0.1642,
+                        "reservation_margin": 1.25,
+                        "epoch_id": "livebench-fixture:pricing-fixture",
+                        "identity_mapping_version": "1.1.0"
+                    }),
+                    created_at: timestamp.clone(),
+                },
+            ],
+        );
+        self.pricing = Some(json!({
+            "cache_is_stale": true,
+            "latest_snapshot": {
+                "id": "pricing-fixture",
+                "checked_at": "2026-09-21T10:30:00Z",
+                "quote_count": 59,
+                "sources": [
+                    {"provider": "openai", "status": "verified", "reason": null},
+                    {"provider": "anthropic", "status": "unverified", "reason": "示例来源状态：仅供界面布局检查，不是新的在线核验结果。"}
+                ]
+            },
+            "latest_failure": {
+                "error": "示例刷新失败：网络或来源结构改变时，缓存只能展示，不能授权新的 Automatic 派工。"
+            },
+            "dispatch_readiness": {
+                "ready": false,
+                "missing": [
+                    "billing:codex/api/actual_spend: no provider billing or usage API is integrated; list prices exclude account credits, negotiated rates, regional taxes, and invoice adjustments, so the actually billed amount remains unknown.",
+                    "billing:codex/api/remaining_quota: provider quota and reset-window evidence is unavailable, so a local planner cannot promise that the account still has usable capacity for this dispatch.",
+                    "billing:claude/api/actual_spend: invoice settlement is not exposed through an integrated official source and must remain unknown until a provider-confirmed record is available.",
+                    "billing:kimi-cli/subscription/remaining_quota: subscription quota units are provider-defined and cannot be converted into a dollar hard budget or a guaranteed token allowance.",
+                    "billing:kimi-cli/subscription/reset_window: the provider reset schedule has not been verified for this account, therefore retry timing cannot be inferred from a stale local display.",
+                    "billing:minimax-code/subscription/actual_spend: subscription billing may include plan terms and credits outside the local process, so observed CLI usage is not a settlement record.",
+                    "billing:mimo/api/actual_spend: a model response usage value is not provider-confirmed account billing and cannot close a hard-budget reservation.",
+                    "billing:deepseek/api/rate_limit: a current account-specific rate-limit record is unavailable, so automatic dispatch must keep the limitation visible rather than guessing availability.",
+                    "billing:grok/api/remaining_quota: current quota and reset information has not been obtained from an official account source for this exact channel.",
+                    "billing:claude/subscription/actual_spend: the subscription channel has no verified USD settlement source and must not inherit API list pricing."
+                ],
+                "scope": "hard-budget dispatch only; budget-less automatic dispatch still requires a fully attested identity, fresh benchmark snapshot, fresh price snapshot, and a recorded routing-v2 decision."
+            },
+            "automatic_dispatch": {
+                "no_budget": "enabled after a fully verified routing-v2 decision; this fixture does not run a model or call an account.",
+                "hard_budget": "blocked until provider-confirmed billing settlement and enforceable mid-run limits exist."
+            }
+        }));
         self.selected = (!composing).then(|| "fixture-team".into());
     }
 }
@@ -1739,5 +1860,85 @@ mod tests {
         }
         assert_eq!(team_status(teams.records[0].status), "运行验证");
         assert!(teams.records[0].verification.is_empty());
+    }
+
+    #[cfg(feature = "ui-snapshots")]
+    #[test]
+    fn routing_snapshot_fixture_contains_blockers_and_renders_routing_events() {
+        let ctx = egui::Context::default();
+        let mut teams = Teams::new("C:/fixture-project");
+        teams.prepare_snapshot("C:/fixture-project", false);
+
+        let pricing = teams.pricing.as_ref().expect("snapshot pricing fixture");
+        let blockers = pricing
+            .pointer("/dispatch_readiness/missing")
+            .and_then(Value::as_array)
+            .expect("snapshot blocker list");
+        assert_eq!(blockers.len(), 10);
+        assert!(blockers[0]
+            .as_str()
+            .is_some_and(|blocker| blocker.len() > 180));
+        assert_eq!(
+            pricing
+                .pointer("/dispatch_readiness/ready")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+
+        let events = teams
+            .events
+            .get("fixture-team")
+            .cloned()
+            .expect("snapshot routing events");
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["routing_preview", "binding_applied"]
+        );
+        assert_eq!(
+            events[0].data.get("status").and_then(Value::as_str),
+            Some("selected")
+        );
+        assert_eq!(
+            events[1]
+                .data
+                .pointer("/planner/app_id")
+                .and_then(Value::as_str),
+            Some("codex")
+        );
+
+        let page = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(1280., 820.),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| teams.render(ui, &local_apps()));
+            },
+        );
+        assert!(!page.shapes.is_empty());
+
+        let routing = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(940., 620.),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    for event in &events {
+                        render_routing_event(ui, event);
+                    }
+                });
+            },
+        );
+        assert!(!routing.shapes.is_empty());
     }
 }

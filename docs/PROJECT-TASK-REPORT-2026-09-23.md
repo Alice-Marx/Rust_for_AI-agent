@@ -1,8 +1,8 @@
 # 总项目任务报告
 
-日期：2026-09-23（含 Grok Build ACP、H04 预算接线与服务重启恢复、ZCode 发行物审计）
+日期：2026-09-23（含 Grok Build ACP、H04 预算接线与服务重启恢复、ZCode 发行物审计、H05–H08 和 Windows 0.11.1 打包）
 仓库：[Alice-Marx/Rust_for_AI-agent](https://github.com/Alice-Marx/Rust_for_AI-agent)，当前分支 `main`；H04 第一片为 `8db113f`，服务重启恢复作为当前增量
-版本基线：0.11.0（`24dbf54`）+ main 后续开发；本轮交付见「一·本轮交付」
+版本基线：0.11.0（`24dbf54`）+ main 后续开发；为构建当前安装包，源码、安装器和 npm CLI 已统一到 0.11.1；本轮交付见「一·本轮交付」
 配套文档：[文档指南](DOCUMENT-GUIDE-2026-09-23.md)（每份文档的用途）、[后续路线图](ROADMAP-2026-09-23.md)（H01–H10 分解）
 
 ## 一、完成的工作（总项目视角）
@@ -51,6 +51,11 @@ API Agent 与 SSE、Rust egui 桌面、Rust/npm 双 CLI、官方工具 Work/Chat
 11. **GitHub main 整合**：PR [#2](https://github.com/Alice-Marx/Rust_for_AI-agent/pull/2) 已合并，main 合并提交 `aab19524ffb01e8444a39a2efc007a73e1d6423a`；合并后 GitHub Actions 的 Windows、Ubuntu、macOS 检查全部通过。此交付推送的是源码与报告；本轮没有重建或上传新的 Windows 桌面发行资产。
 12. **H04 服务重启预留恢复**：当前启动中断的团队在 `recover_interrupted` 的同一事务内关闭 hold，已有的 Interrupted 团队也在服务启动时扫描并对账；事件记录每笔处理结果，重复启动保持幂等。详见[预算恢复报告](WORK-REPORT-2026-09-23-BUDGET-RECOVERY.md)。
 13. **H09 ZCode 审计报告**：已把发行物缺失和协议事实写入路线图、交接和来源记录。此项不依赖真实账号；后续只能在官方可验证安装物出现后继续，真实账号登录留给适配器与离线 fixture 完成之后。
+14. **H05 复制合同加固**：复制只接受四种终态，HTTP body 只接受空对象，Rust CLI 与桌面端按单段编码调用真实接口；离线 HTTP 冒烟确认取消后的任务复制为独立 Draft，带字段请求返回 HTTP 409。详见 [H05 加固报告](WORK-REPORT-2026-09-23-H05-HARDENING.md)。
+15. **H06 路由可视化回归**：Teams fixture 现包含长 blocker、价格状态和 `routing_preview`/`binding_applied`，固定尺寸 egui 渲染测试与静态截图检查已完成。真实桌面窗口操作仍留给安装包环境。详见 [H06 路由可视化报告](WORK-REPORT-2026-09-23-H06-ROUTING-VISUAL.md)。
+16. **H07 一次性定时草稿**：计划、触发审计、Draft 和 `scheduled_from` 事件迁入同一个 `workflows.sqlite` v3 事务；启动补触发/轮询只创建 Draft，HTTP 和 Rust CLI 提供管理接口。离线重启冒烟确认不触发模型。详见 [H07 定时草稿报告](WORK-REPORT-2026-09-23-H07-SCHEDULED-DRAFTS.md)。
+17. **H08 MCP discovery 加固**：tools/resources/prompts/resource templates 采用有界分页；重复/无限 cursor 和公开名称碰撞失败关闭。详见 [H08 MCP discovery 报告](WORK-REPORT-2026-09-23-H08-MCP-DISCOVERY.md)。
+18. **Windows 0.11.1 安装包交付**：release 二进制、Inno Setup 安装器、便携 ZIP 和本地 npm tarball 已构建；SHA-256、文件清单、独立静默安装、安装后 CLI、离线后端健康检查和静默卸载均已验证。安装包不含账号、OAuth token 或测试数据，交给你进行真实登录和窗口验收。详见 [Windows 打包报告](WORK-REPORT-2026-09-23-WINDOWS-PACKAGE.md)。
 
 ### 本轮报告对账
 
@@ -77,18 +82,20 @@ API Agent 与 SSE、Rust egui 桌面、Rust/npm 双 CLI、官方工具 Work/Chat
 
 | 文件 | 说明 |
 | --- | --- |
-| `src/bin/wonderland-cli.rs` | Rust CLI 的 `team routing preview/saved/replay` 与 `work duplicate` 命令；参数/JSON 校验和路由接口映射测试 |
+| `src/bin/wonderland-cli.rs` | Rust CLI 的 routing、严格 `work duplicate` 和一次性 `schedule` 命令；参数/JSON 校验、路径编码和路由接口映射测试 |
 | `packaging/npm/wonderland-cli/bin/wonderland.js` | npm CLI 的路由策略命令与 `work duplicate` HTTP 透传；限制策略文件大小、校验 JSON 对象并透传既有合同 |
 | `packaging/npm/wonderland-cli/test/workflows.test.js` | workflow CLI 测试；验证 `work duplicate` 路径编码、POST 空对象和不隐式 start |
 | `packaging/npm/wonderland-cli/test/teams-pricing.test.js` | npm CLI 路由策略请求、编码和非法参数不发请求的测试 |
-| `src/bin/desktop/teams.rs` | Teams 详情中的路由决策事件、候选拒绝原因、证据链和派工就绪状态面板 |
+| `src/bin/desktop/teams.rs` | Teams 详情中的路由决策事件、候选拒绝原因、证据链和派工就绪状态面板；长 blocker/routing fixture 渲染回归 |
 | `src/desktop_bridge.rs` / `src/app_diagnostics.rs` | 注册 Grok 官方应用/profile 与版本 banner；版本探测分离 stdout/stderr，降低环境噪声 |
 | `packaging/npm/wonderland-cli/README.md` | 补齐任务复制、路由预览/保存/重放命令和严格 RoutingPolicy JSON 示例 |
-| `packaging/npm/wonderland-cli/package.json` | npm CLI 0.11.1；兼容 0.11.0 后端，已发布到 `next` |
-| `src/workbench_service.rs` | 工作流完成后持久化脱敏 `identity_readback`；为终态独立任务提供 duplicate API，拒绝 Teams child |
-| `src/workflow.rs` | SQLite 工作流状态机和事件账本；把终态任务原子复制为全新草稿，不复用 session/output |
+| `Cargo.toml` / `Cargo.lock` / `packaging/windows/wonderland.iss` | Rust 后端、锁文件根包和安装器统一为 0.11.1，消除 Windows 构建脚本的版本闸门 |
+| `packaging/npm/wonderland-cli/package.json` | npm CLI 0.11.1；与 0.11.1 后端配套，已发布到 `next` |
+| `src/workbench_service.rs` | 工作流完成后持久化脱敏 `identity_readback`；严格 duplicate API、一次性计划 HTTP 接口和启动补触发 |
+| `src/workflow.rs` / `src/schedule_store.rs` | SQLite v3 工作流状态机、复制账本和与 Draft 同事务的一次性计划/触发审计 |
+| `src/mcp.rs` | MCP discovery 的通用分页、资源模板渲染、cursor 上限/重复检测和公开名称碰撞拒绝 |
 | `tests/claude_native/protocol.rs` | Claude 离线协议夹具；核对成功结果的模型回读和身份字段脱敏边界 |
-| `docs/PROJECT-TASK-REPORT-2026-09-23.md` | 本总报告；同步当前实现、验证边界与剩余工作 |
+| `docs/PROJECT-TASK-REPORT-2026-09-23.md` / `docs/WORK-REPORT-2026-09-23-WINDOWS-PACKAGE.md` | 本总报告与 0.11.1 安装包构建、校验、离线安装验证、真实账号验收说明 |
 
 **证据与路由层（H02/H03 数据合同）：**
 
@@ -108,7 +115,7 @@ API Agent 与 SSE、Rust egui 桌面、Rust/npm 双 CLI、官方工具 Work/Chat
 | `team_service.rs` | Teams HTTP 合同 + Automatic 启动路径（决策→`set_planner` 写回→执行）；归档 child usage，结算/对账预留，并在启动时扫描历史 Interrupted 团队的 hold |
 | `team_store.rs` | 团队/节点/attempt 权威存储 + 微美元账本 + `set_planner`；当前重启恢复在同一事务保守结算 hold 并记录事件清单 |
 | `team_workspace.rs` / `team_checks.rs` | 独立 Git 工作区与主机验收 |
-| `workflow.rs` / `workbench_service.rs` | 单任务 SQLite 状态机（v2）、执行控制与原生身份回读持久化 |
+| `workflow.rs` / `schedule_store.rs` / `workbench_service.rs` | 单任务 SQLite 状态机（v3）、原子一次性计划、执行控制与原生身份回读持久化 |
 
 **其余模块**：API Agent（`agent/api/provider/anthropic/responses/router/tools/`）、会话（`session/session_index/memory/`）、安全（`permissions/sandbox*/mcp*/process_tree/`）、桌面与终端（`desktop_*/bin/desktop/`）、诊断（`app_diagnostics/subscription/cliproxy/`）、npm CLI（`packaging/npm/wonderland-cli/`）、Windows 打包（`packaging/windows/`）、上游参考（`anytool/` 16 子模块，只读）。
 
@@ -126,20 +133,22 @@ API Agent 与 SSE、Rust egui 桌面、Rust/npm 双 CLI、官方工具 Work/Chat
 | `cargo test --locked app_diagnostics::tests --lib` | 8 项通过，1 项安装型测试按设计忽略 |
 | `cargo test --locked native_executor::tests --lib` | 16/16 通过 |
 | `cargo test --locked --lib team_` | 38/38 通过；覆盖运行中恢复与历史 Interrupted 团队的预留对账、事件审计和重复启动幂等性 |
-| `cargo test --locked --all-targets --features ui-snapshots` | 库 454 项通过、8 项按外部条件忽略；Rust CLI 4 项、桌面 18 项、协议集成 7 项通过；0 失败 |
+| `cargo test --locked --all-targets --features ui-snapshots` | 库 466 项通过、8 项按外部条件忽略；Rust CLI 6 项、桌面 20 项、协议集成 7 项通过；0 失败 |
 | `npm test --prefix packaging/npm/wonderland-cli` | 16/16 通过 |
 | `npm pack --dry-run --json --pack-destination dist` | 通过；5 个白名单文件，0.11.1 包，registry integrity `sha512-nm/ojEZyHK7jQM89AqvpiQ9ZUBQcb4uUCkZHxiDX7tVprlBzwpFAFzSLgXTmigAeHDuKtv6jQVOkLsJGF10zhw==` |
 | `npm publish dist/rust-ai-wonderland-cli-0.11.1.tgz --tag next --access public` | registry 接受发布；网页登录验证完成 |
 | `npm pack rust-ai-wonderland-cli@0.11.1 --pack-destination dist/registry` + `npm view ...` | 远端版本可查，`next=0.11.1`、`latest=0.7.0`；tarball SHA-256 与本地完全一致 |
+| `packaging/windows/build-windows-package.ps1` | 通过；生成 0.11.1 release 二进制、Inno Setup 安装器、便携 ZIP、本地 npm tarball 和 SHA-256 清单 |
+| 独立静默安装、安装后 CLI、离线 `GET /health`、静默卸载 | 通过；三项主程序版本均为 0.11.1，离线服务返回 `status=ok`，临时安装目录已删除 |
 | GitHub PR #2 / 合并后 CI | PR merged；main commit `aab1952` 的 Windows、Ubuntu、macOS CI 全部通过 |
 
-最终全目标回归通过。PowerShell stdout/stderr 分离和 Kimi 纯函数识别使此前 CLIXML/PATH 相关用例恢复稳定；超时用例在本轮并行全测通过；真实 PTY/ConPTY 时序测试现按其外部环境属性显式忽略。全测发现的 3 个仅测试使用导入警告随后清除，并由无警告的全目标 `cargo check` 复验。
+最终全目标回归通过。新增 H05/H06/H07/H08 离线用例覆盖终态复制边界、Teams routing 渲染、计划事务回滚/重启补触发、MCP 分页与名称冲突；真实 PTY/ConPTY 时序测试仍按其外部环境属性显式忽略。离线 HTTP 冒烟和安装后端健康检查均使用独立数据目录，没有登录或模型调用。
 
 **仍需人工确认：**在桌面应用打开 Teams 详情，分别检查无路由事件、有 `routing_decision`、有 `binding_applied`，以及 `dispatch_readiness.missing` 有值/为空时的布局与长解释换行。自动化测试覆盖逻辑，尚不能替代该视觉检查。
 
 **真实证据（已有，历史）**：Kimi 订阅 Teams 实测、SQLite v1→v2 迁移实测、五源在线刷新（经代理）、真实官方文档解析冒烟（fixture 存 `F:\everyAI\all\pricing-fixtures-20260922\`）。
 
-**待做（需要你登录账号，按序执行）：**
+**待做（使用交付的 0.11.1 安装包、需要你登录账号，按序执行）：**
 1. 安装固定版本的 MiMo、Kimi Code、MiniMax Code 与官方 Grok 1.0.38，各跑真实 ACP 握手（验证身份/banner 假设，回填固定发布指纹）。
 2. 各工具真实登录并完成真实推理、允许/拒绝、取消和失败注入；Grok 分别覆盖 `XAI_API_KEY` 与缓存令牌；脱敏 fixture 归档 `tests/`。
 3. Automatic 无预算路径：独立示例 Git 项目跑一次跨厂商团队（≥2 厂商不同节点），主机测试通过、源 checkout 不变，证据归档（H01 第 4 步）。
@@ -153,11 +162,11 @@ API Agent 与 SSE、Rust egui 桌面、Rust/npm 双 CLI、官方工具 Work/Chat
 | **H01 真实账号闭环** | Codex 回读账号渠道/计划和线程模型；Claude、ACP 与 Python Kimi 的工具指纹和可证实模型设置代码已完成。账号渠道/计划仅 Codex 有显式回读；其余字段遵守未知保留规则。真实账户测试未完成，需登录 | 按上节测试 1–5 执行，归档脱敏事件；仅在工具官方会话回传明确账号计费/额度信息时扩充 `billing_channel`/`account_plan`，否则保持 `None`。根据实测更新工具版本与指纹支持策略 |
 | **H04 硬预算闭环** | usage 归档、预留/保守结算、运行收尾/重跑和服务启动恢复对账均已接线；渠道 `hard_budget_capable` 合同建立（当前全 false），`budget_usd` 仍阻塞但原因结构化。详见[预算接线报告](WORK-REPORT-2026-09-23-BUDGET-WIRING.md)与[预算恢复报告](WORK-REPORT-2026-09-23-BUDGET-RECOVERY.md) | 剩余：接入任一渠道的提供商确认账单源并证明可强制中断后置 `hard_budget_capable=true`，补预算内/超限/在途三场景测试解除该渠道阻塞；确认金额写入 `settle_reservation(actual)`；harness 自报金额保持未确认分类 |
 | **两个 CLI 的路由策略命令** | 实现、自动测试完成；随提交 `03a8ff9` 交付 | 已提供 `preview/saved/replay`，严格透传既有 HTTP 合同；无需额外 CLI 测试 |
-| **桌面阻塞原因面板（H06 起步）** | 实现、桌面自动化测试完成；随提交 `03a8ff9` 交付 | 已渲染 `dispatch_readiness.missing` 与路由事件；还需按本报告手工检查事件差异、长解释和空数据情形 |
+| **桌面阻塞原因面板（H06 起步）** | 长 blocker/routing fixture、渲染测试和静态截图检查完成 | 仍需在最终安装包的真实窗口检查 DPI、滚动、空数据和长中文换行 |
 | **Grok Build 真实闭环** | 第 8 个受管执行器的代码、离线 fixture、应用注册和文档已完成；`resume/fork=false`，无真实安装/账号推理证据，固定发布二进制摘要待回填 | 安装官方 1.0.38，分别用 `XAI_API_KEY` 与缓存令牌完成握手；执行真实推理、允许/拒绝、取消、认证失败和 usage 归档，保存脱敏 fixture 并回填发布指纹。真实 wire 不符时继续失败关闭并新增显式版本 profile |
 | **ZCode 接入** | 发行物与协议审计完成；未接入。源码包均 private，精确 npm 查询无包，GitHub 无 release；源码是初始 JSON 握手后接二进制 RPC | 等官方 tarball、签名 release 资产或安装器；先固定来源、版本、SHA-256、启动命令，再按实测协议写独立 transport 与离线 fixture，最后再做真实登录 |
-| **H05 恢复/分叉** | 新增终态独立 workflow → 新 Draft 的 duplicate API/CLI（不复制 session/output、不自动启动；团队 child 禁止脱离父团队复制）；所有适配器 `resume/fork=false` | 继续完善终态状态/HTTP/CLI覆盖；注入崩溃、断网、审批等待、进程残留和集成中取消。后续按适配器持久化 session ID、工具版本/配置、workspace revision 并实测可恢复性；分叉历史与 Teams attempt 重试单独定合同，未验证前保持 false |
-| **Windows 安装包交付** | 用户要求在无需账号的开发完成后交付安装器，用于自行登录实测 | 完成剩余离线开发与全回归后构建 release 二进制、Inno Setup 安装器和便携 ZIP，检查文件清单与 SHA-256；安装包不包含账号、OAuth token 或测试数据 |
-| **H07 插件/定时/远程/PR/网站、H08 沙箱/MCP、H10 研究实验** | 未开始 | 按 [ROADMAP](ROADMAP-2026-09-23.md) 既有分解与验收门槛执行 |
+| **H05 恢复/分叉** | 终态复制状态、HTTP body、CLI/桌面路径边界已加固；所有适配器 `resume/fork=false` | 注入崩溃、断网、审批等待、进程残留和集成中取消。后续按适配器持久化 session ID、工具版本/配置、workspace revision 并实测可恢复性；分叉历史与 Teams attempt 重试单独定合同，未验证前保持 false |
+| **Windows 安装包交付** | `dist/Wonderland-Setup-0.11.1-x64.exe`、便携 ZIP 和 npm tarball 已构建并完成 SHA-256、独立静默安装、离线健康检查和卸载验证；当前等待真实账号与窗口验收 | 用安装器在常用显示缩放下检查桌面路由界面，再按上节账号步骤完成登录、模型/账号列表、Work/Chat/Teams 与退出登录；记录结果写入下一份报告 |
+| **H07/H08 与 H10** | H07 一次性定时 Draft、H08 MCP discovery 分页/模板/名称防护已完成；插件、周期计划、远程、PR/网站、真实隔离/MCP 服务和研究实验仍未完成 | 按 [ROADMAP](ROADMAP-2026-09-23.md) 的独立合同与验收门槛推进；外部写入、远程与账号测试逐项授权并留审计 |
 
-**执行顺序建议**：完成桌面视觉检查和 H05/H07/H08 的离线增量 → 构建安装包 → 你登录账号做 H01 实测（含 Codex API key/ChatGPT 两渠道、Grok 两认证路径及其他已接入工具）→ H04 预算闭环（只有兑现成本上限后才解除阻塞）。ZCode 等官方可验证发行物出现后再进入适配与账号测试；H10 等真实跨厂商与费用证据齐备后出结论。
+**执行顺序建议**：你在最终安装包中完成桌面视觉检查与 H01 真实账号实测（含 Codex API key/ChatGPT 两渠道、Grok 两认证路径及其他已接入工具）→ H04 预算闭环（只有兑现成本上限后才解除阻塞）。H05 原生恢复、H07 周期计划/桌面页与 H08 真实服务隔离可并行推进；ZCode 等官方可验证发行物出现后再进入适配与账号测试；H10 等真实跨厂商与费用证据齐备后出结论。

@@ -98,6 +98,11 @@ enum Command {
         #[command(subcommand)]
         action: PricingAction,
     },
+    /// 一次性定时草稿：到点只创建 Draft，永不自动启动模型
+    Schedule {
+        #[command(subcommand)]
+        action: ScheduleAction,
+    },
     /// 查看模型数据来源；--refresh 每次在线刷新 LiveBench
     Intelligence {
         #[arg(long)]
@@ -268,6 +273,77 @@ enum PricingAction {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum ScheduleAction {
+    /// 列出全部一次性定时草稿
+    List,
+    /// 从 WorkflowCreate JSON 模板创建定时草稿；到点只创建 Draft，不自动启动
+    Create {
+        /// RFC 3339 触发时间，例如 2026-09-24T09:00:00+08:00；必须是将来的时刻
+        #[arg(long)]
+        at: String,
+        /// WorkflowCreate JSON 模板文件
+        #[arg(long)]
+        file: std::path::PathBuf,
+    },
+    Get {
+        id: String,
+    },
+    /// 取消尚未触发的定时草稿
+    Cancel {
+        id: String,
+    },
+}
+
+fn schedule_request(action: ScheduleAction) -> Result<(String, Option<serde_json::Value>, bool)> {
+    fn schedule_endpoint(id: &str) -> Result<String> {
+        anyhow::ensure!(
+            !id.is_empty() && id != "." && id != "..",
+            "定时任务 ID 无效"
+        );
+        let segment: String = url::form_urlencoded::byte_serialize(id.as_bytes()).collect();
+        Ok(format!("/api/v1/schedules/{}", segment.replace('+', "%20")))
+    }
+    Ok(match action {
+        ScheduleAction::List => ("/api/v1/schedules".into(), None, false),
+        ScheduleAction::Create { at, file } => {
+            anyhow::ensure!(!at.trim().is_empty(), "触发时间不能为空（RFC 3339）");
+            const MAX_TEMPLATE_FILE: u64 = 8 * 1024 * 1024;
+            let handle = std::fs::File::open(&file)
+                .with_context(|| format!("无法读取定时模板：{}", file.display()))?;
+            anyhow::ensure!(
+                handle.metadata()?.is_file() && handle.metadata()?.len() <= MAX_TEMPLATE_FILE,
+                "定时模板必须是最多 8 MiB 的 JSON 文件"
+            );
+            let mut bytes = Vec::new();
+            handle.take(MAX_TEMPLATE_FILE + 1).read_to_end(&mut bytes)?;
+            anyhow::ensure!(
+                bytes.len() as u64 <= MAX_TEMPLATE_FILE,
+                "定时模板超过 8 MiB"
+            );
+            let template: wonderland::workflow::WorkflowCreate = serde_json::from_slice(&bytes)
+                .context("定时模板 JSON 不符合 WorkflowCreate 格式")?;
+            (
+                "/api/v1/schedules".into(),
+                Some(serde_json::json!({"run_at": at, "template": template})),
+                false,
+            )
+        }
+        ScheduleAction::Get { id } => (schedule_endpoint(&id)?, None, false),
+        ScheduleAction::Cancel { id } => (schedule_endpoint(&id)?, None, true),
+    })
+}
+
+fn workflow_endpoint(id: &str, suffix: &str) -> Result<String> {
+    anyhow::ensure!(!id.is_empty() && id != "." && id != "..", "任务 ID 无效");
+    let segment: String = url::form_urlencoded::byte_serialize(id.as_bytes()).collect();
+    Ok(format!(
+        "/api/v1/workflows/{}{}",
+        segment.replace('+', "%20"),
+        suffix
+    ))
+}
+
 fn team_request(action: TeamAction) -> Result<(String, Option<serde_json::Value>)> {
     fn read_typed_json<T: serde::de::DeserializeOwned>(
         file: &std::path::Path,
@@ -370,6 +446,23 @@ impl AgentApi {
             None => self.client.get(self.url(path)),
         };
         let response = request.send().await.context("无法连接任务服务")?;
+        let status = response.status();
+        let value: serde_json::Value = response.json().await?;
+        anyhow::ensure!(
+            status.is_success(),
+            "{status}: {}",
+            value["error"].as_str().unwrap_or("请求失败")
+        );
+        Ok(value)
+    }
+
+    async fn work_delete(&self, path: &str) -> Result<serde_json::Value> {
+        let response = self
+            .client
+            .delete(self.url(path))
+            .send()
+            .await
+            .context("无法连接任务服务")?;
         let status = response.status();
         let value: serde_json::Value = response.json().await?;
         anyhow::ensure!(
@@ -848,6 +941,15 @@ async fn main() -> Result<()> {
                 serde_json::to_string_pretty(&api.work_request(&path, body).await?)?
             );
         }
+        Command::Schedule { action } => {
+            let (path, body, delete) = schedule_request(action)?;
+            let value = if delete {
+                api.work_delete(&path).await?
+            } else {
+                api.work_request(&path, body).await?
+            };
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
         Command::Work { action } => {
             use serde_json::json;
             anyhow::ensure!(
@@ -878,33 +980,29 @@ async fn main() -> Result<()> {
                     })),
                     start,
                 ),
-                WorkAction::Get { id } => (format!("/api/v1/workflows/{id}"), None, false),
+                WorkAction::Get { id } => (workflow_endpoint(&id, "")?, None, false),
                 WorkAction::Duplicate { id } => (
-                    format!("/api/v1/workflows/{id}/duplicate"),
+                    workflow_endpoint(&id, "/duplicate")?,
                     Some(json!({})),
                     false,
                 ),
                 WorkAction::Events { id, after } => (
-                    format!("/api/v1/workflows/{id}/events?after={after}"),
+                    format!("{}?after={after}", workflow_endpoint(&id, "/events")?),
                     None,
                     false,
                 ),
-                WorkAction::Start { id } => (
-                    format!("/api/v1/workflows/{id}/start"),
-                    Some(json!({})),
-                    false,
-                ),
-                WorkAction::Cancel { id } => (
-                    format!("/api/v1/workflows/{id}/cancel"),
-                    Some(json!({})),
-                    false,
-                ),
+                WorkAction::Start { id } => {
+                    (workflow_endpoint(&id, "/start")?, Some(json!({})), false)
+                }
+                WorkAction::Cancel { id } => {
+                    (workflow_endpoint(&id, "/cancel")?, Some(json!({})), false)
+                }
                 WorkAction::Approve {
                     id,
                     request_id,
                     allow,
                 } => (
-                    format!("/api/v1/workflows/{id}/approve"),
+                    workflow_endpoint(&id, "/approve")?,
                     Some(json!({"request_id":request_id,"approve":allow})),
                     false,
                 ),
@@ -913,14 +1011,14 @@ async fn main() -> Result<()> {
                     request_id,
                     answers_json,
                 } => (
-                    format!("/api/v1/workflows/{id}/answer"),
+                    workflow_endpoint(&id, "/answer")?,
                     Some(
                         json!({"request_id":request_id,"answers":serde_json::from_str::<serde_json::Value>(&answers_json)?}),
                     ),
                     false,
                 ),
                 WorkAction::Accept { id, evidence } => (
-                    format!("/api/v1/workflows/{id}/accept"),
+                    workflow_endpoint(&id, "/accept")?,
                     Some(json!({"evidence":evidence})),
                     false,
                 ),
@@ -1498,6 +1596,51 @@ mod management_tests {
         assert_eq!(path, "/api/v1/teams/team%2Fa%20b%3Fx%3D1/events?after=42");
         assert!(body.is_none());
         assert!(team_request(TeamAction::Get { id: "..".into() }).is_err());
+    }
+
+    #[test]
+    fn workflow_endpoints_escape_path_ids_and_reject_invalid_segments() {
+        assert_eq!(
+            workflow_endpoint("task/a b?x=1", "/duplicate").unwrap(),
+            "/api/v1/workflows/task%2Fa%20b%3Fx%3D1/duplicate"
+        );
+        assert!(workflow_endpoint("", "").is_err());
+        assert!(workflow_endpoint("..", "").is_err());
+    }
+
+    #[test]
+    fn schedule_requests_use_typed_templates_and_escape_ids() {
+        let directory = tempfile::tempdir().unwrap();
+        let template = directory.path().join("schedule.json");
+        std::fs::write(
+            &template,
+            r#"{"prompt":"inspect only","cwd":"E:/projects/demo","app_id":"codex","model":"gpt-test","read_only":true}"#,
+        )
+        .unwrap();
+        let (path, body, delete) = schedule_request(ScheduleAction::Create {
+            at: "2026-09-24T09:00:00+08:00".into(),
+            file: template.clone(),
+        })
+        .unwrap();
+        assert_eq!(path, "/api/v1/schedules");
+        assert!(!delete);
+        let body = body.unwrap();
+        assert_eq!(body["template"]["app_id"], "codex");
+        assert_eq!(body["template"]["read_only"], true);
+        let (path, body, delete) = schedule_request(ScheduleAction::Cancel {
+            id: "schedule/a b?x=1".into(),
+        })
+        .unwrap();
+        assert_eq!(path, "/api/v1/schedules/schedule%2Fa%20b%3Fx%3D1");
+        assert!(body.is_none());
+        assert!(delete);
+        assert!(schedule_request(ScheduleAction::Get { id: "..".into() }).is_err());
+        std::fs::write(&template, r#"{"prompt":"inspect","unexpected":true}"#).unwrap();
+        assert!(schedule_request(ScheduleAction::Create {
+            at: "2026-09-24T09:00:00+08:00".into(),
+            file: template,
+        })
+        .is_err());
     }
 
     #[test]

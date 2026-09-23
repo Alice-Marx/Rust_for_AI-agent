@@ -2,6 +2,7 @@
 use crate::{
     api::AppState,
     native_executor::{self, NativeControl, NativeEvent, NativeIdentity, NativeRequest},
+    schedule_store::ScheduleMaterialization,
     workflow::{WorkflowCreate, WorkflowRecord, WorkflowStatus as Status, WorkflowStore},
 };
 use anyhow::{ensure, Context, Result};
@@ -74,7 +75,7 @@ impl WorkbenchService {
         let intelligence = crate::model_intelligence::ModelIntelligence::open(directory)?;
         let pricing = crate::pricing::PriceService::open(directory)?;
         let teams = crate::team_service::TeamService::open(directory)?;
-        Ok(Arc::new(Self {
+        let service = Arc::new(Self {
             store,
             intelligence,
             pricing,
@@ -82,10 +83,42 @@ impl WorkbenchService {
             jobs: Mutex::new(HashMap::new()),
             closing: AtomicBool::new(false),
             _ownership: ownership,
-        }))
+        });
+        // Catch up synchronously after taking the workbench owner lock. Each
+        // due schedule only creates a Draft; no model is invoked here.
+        service.process_due_schedules()?;
+
+        // Continue polling while a Tokio runtime owns the service. A weak
+        // handle prevents this task from retaining the workbench lock after
+        // the service itself closes.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let trigger_service = Arc::downgrade(&service);
+            runtime.spawn(async move {
+                let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
+                    crate::schedule_store::SCHEDULE_POLL_SECS,
+                ));
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    ticker.tick().await;
+                    let Some(trigger_service) = trigger_service.upgrade() else {
+                        break;
+                    };
+                    if trigger_service.is_closing() {
+                        break;
+                    }
+                    if let Err(error) = trigger_service.process_due_schedules() {
+                        tracing::warn!(%error, "schedule poll failed");
+                    }
+                }
+            });
+        }
+        Ok(service)
     }
 
-    pub fn create(&self, mut request: WorkflowCreate) -> Result<WorkflowRecord> {
+    /// Apply service-owned Draft rules before a request enters durable storage.
+    /// Scheduled templates run through this again at their firing instant so a
+    /// removed workspace or invalid adapter binding becomes an audited failure.
+    fn normalize_draft_request(&self, mut request: WorkflowCreate) -> Result<WorkflowCreate> {
         ensure!(
             !self.closing.load(Ordering::SeqCst),
             "service is shutting down"
@@ -111,9 +144,34 @@ impl WorkbenchService {
             std::fs::canonicalize(&request.cwd).context("project directory is unavailable")?;
         ensure!(cwd.is_dir(), "project must be a directory");
         request.cwd = cwd.to_string_lossy().into_owned();
+        Ok(request)
+    }
+
+    pub fn create(&self, request: WorkflowCreate) -> Result<WorkflowRecord> {
+        let request = self.normalize_draft_request(request)?;
         let record = self.store.create(request)?;
         self.store.upsert_project(&record.cwd, None)?;
         Ok(record)
+    }
+
+    /// Catch up due one-shot schedules after startup and during the local poll.
+    /// The store transaction writes either a new Draft plus its audit event or
+    /// a terminal failed trigger; it never starts an executor.
+    pub fn process_due_schedules(&self) -> Result<Vec<ScheduleMaterialization>> {
+        let ids = self.store.due_schedule_ids()?;
+        let mut results = Vec::with_capacity(ids.len());
+        for id in ids {
+            let result = self
+                .store
+                .materialize_due_schedule(&id, |request| self.normalize_draft_request(request))?;
+            if let Some(result) = result {
+                if let ScheduleMaterialization::Failed { schedule, error } = &result {
+                    tracing::warn!(schedule_id = %schedule.id, %error, "scheduled draft was rejected at trigger time");
+                }
+                results.push(result);
+            }
+        }
+        Ok(results)
     }
 
     /// Copy a completed standalone task into a new draft. Team-owned children
@@ -462,6 +520,51 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/workflows/{id}/answer", post(answer))
         .route("/api/v1/workflows/{id}/accept", post(accept))
         .route("/api/v1/projects", get(projects).post(project))
+        .route(
+            "/api/v1/schedules",
+            get(list_schedules).post(create_schedule),
+        )
+        .route(
+            "/api/v1/schedules/{id}",
+            get(schedule_detail).delete(cancel_schedule),
+        )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScheduleCreateRequest {
+    run_at: String,
+    template: WorkflowCreate,
+}
+
+async fn create_schedule(
+    State(s): State<AppState>,
+    Json(request): Json<ScheduleCreateRequest>,
+) -> ApiResult {
+    // Normalize before persistence, then normalize once more when it becomes
+    // due so a later binding or workspace change is recorded safely.
+    let template = s.workbench.normalize_draft_request(request.template)?;
+    let record = s
+        .workbench
+        .store
+        .create_schedule(&request.run_at, template)?;
+    Ok(Json(json!(record)))
+}
+
+async fn list_schedules(State(s): State<AppState>) -> ApiResult {
+    Ok(Json(json!(s.workbench.store.list_schedules()?)))
+}
+
+async fn schedule_detail(State(s): State<AppState>, HttpPath(id): HttpPath<String>) -> ApiResult {
+    Ok(Json(json!(s
+        .workbench
+        .store
+        .get_schedule(&id)?
+        .context("schedule not found")?)))
+}
+
+async fn cancel_schedule(State(s): State<AppState>, HttpPath(id): HttpPath<String>) -> ApiResult {
+    Ok(Json(json!(s.workbench.store.cancel_schedule(&id)?)))
 }
 
 struct ServiceError(anyhow::Error);
@@ -518,7 +621,26 @@ async fn detail(State(s): State<AppState>, HttpPath(id): HttpPath<String>) -> Ap
         .get(&id)?
         .context("task not found")?)))
 }
-async fn duplicate(State(s): State<AppState>, HttpPath(id): HttpPath<String>) -> ApiResult {
+fn validate_duplicate_body(body: &[u8]) -> Result<()> {
+    if !body.is_empty() {
+        // An empty struct would also deserialize from a bare  (serde's
+        // sequence form), so require a JSON object explicitly.
+        let value: serde_json::Value = serde_json::from_slice(body)
+            .context("duplicate accepts an empty object only; it keeps the saved task settings")?;
+        ensure!(
+            value.as_object().is_some_and(|object| object.is_empty()),
+            "duplicate accepts an empty object only; it keeps the saved task settings"
+        );
+    }
+    Ok(())
+}
+
+async fn duplicate(
+    State(s): State<AppState>,
+    HttpPath(id): HttpPath<String>,
+    body: axum::body::Bytes,
+) -> ApiResult {
+    validate_duplicate_body(&body)?;
     Ok(Json(json!(s.workbench.duplicate_as_new_draft(&id)?)))
 }
 #[derive(Deserialize)]
@@ -724,6 +846,41 @@ mod tests {
             )
             .unwrap();
         assert!(service.duplicate_as_new_draft(&child.id).is_err());
+    }
+
+    #[test]
+    fn duplicate_request_accepts_only_an_empty_object() {
+        assert!(validate_duplicate_body(b"").is_ok());
+        assert!(validate_duplicate_body(br#"{}"#).is_ok());
+        assert!(validate_duplicate_body(br#"{"title":"override"}"#).is_err());
+        assert!(validate_duplicate_body(br#"[]"#).is_err());
+    }
+
+    #[test]
+    fn startup_catches_up_one_due_schedule_without_starting_a_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = WorkbenchService::open(dir.path()).unwrap();
+        let template = service.normalize_draft_request(draft(dir.path())).unwrap();
+        let run_at = (chrono::Utc::now() + chrono::Duration::milliseconds(300))
+            .to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+        let schedule = service.store.create_schedule(&run_at, template).unwrap();
+        assert!(!dir.path().join("schedules.sqlite").exists());
+        drop(service);
+        std::thread::sleep(std::time::Duration::from_millis(400));
+
+        let service = WorkbenchService::open(dir.path()).unwrap();
+        let schedule = service.store.get_schedule(&schedule.id).unwrap().unwrap();
+        assert_eq!(
+            schedule.status,
+            crate::schedule_store::ScheduleStatus::Fired
+        );
+        let workflow = service
+            .store
+            .get(schedule.created_workflow_id.as_deref().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(workflow.status, Status::Draft);
+        assert!(workflow.native_session_id.is_none());
     }
     #[test]
     fn ownership_prevents_false_recovery_and_releases_on_close() {

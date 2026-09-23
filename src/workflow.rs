@@ -21,6 +21,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use crate::schedule_store::{
+    ensure_future_run_at, normalize_run_at, validate_schedule_id, validate_template_size,
+    ScheduleMaterialization, ScheduleRecord, ScheduleStatus, ScheduleTrigger,
+    ScheduleTriggerOutcome,
+};
+
 pub const MAX_PROMPT_BYTES: usize = 262_144;
 pub const MAX_OUTPUT_BYTES: usize = 1_048_576;
 pub const MAX_EVENT_BYTES: usize = 262_144;
@@ -33,7 +39,7 @@ const MAX_DETAIL_BYTES: usize = 16_384;
 const MAX_ACCEPTANCE_ITEMS: usize = 64;
 const MAX_ACCEPTANCE_ITEM_BYTES: usize = 2_048;
 const MAX_ACCEPTANCE_BYTES: usize = 65_536;
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const RECORD_COLUMNS: &str = "id,title,prompt,cwd,mode,app_id,model,read_only,max_duration_secs,acceptance,status,created_at,updated_at,output,error,native_session_id,reasoning_effort";
 
 fn default_duration() -> u64 {
@@ -285,7 +291,28 @@ impl WorkflowStore {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS workflow_projects_updated ON workflow_projects(updated_at DESC);",
+            CREATE INDEX IF NOT EXISTS workflow_projects_updated ON workflow_projects(updated_at DESC);
+            CREATE TABLE IF NOT EXISTS schedules (
+                id TEXT PRIMARY KEY NOT NULL,
+                run_at TEXT NOT NULL,
+                template TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('pending','fired','failed','cancelled')),
+                created_at TEXT NOT NULL,
+                completed_at TEXT,
+                created_workflow_id TEXT REFERENCES workflows(id) ON DELETE RESTRICT,
+                error TEXT
+            );
+            CREATE INDEX IF NOT EXISTS schedules_due ON schedules(status,run_at);
+            CREATE TABLE IF NOT EXISTS schedule_triggers (
+                schedule_id TEXT NOT NULL REFERENCES schedules(id) ON DELETE RESTRICT,
+                scheduled_for TEXT NOT NULL,
+                outcome TEXT NOT NULL CHECK(outcome IN ('created','failed')),
+                workflow_id TEXT REFERENCES workflows(id) ON DELETE RESTRICT,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(schedule_id,scheduled_for)
+            );
+            CREATE INDEX IF NOT EXISTS schedule_triggers_created ON schedule_triggers(created_at DESC);",
         )?;
         if version < 2 {
             // An absent choice remains absent for existing tasks. Do not infer
@@ -350,6 +377,213 @@ impl WorkflowStore {
         let record = insert_workflow_record(&transaction, request, Some(&current))?;
         transaction.commit()?;
         Ok(record)
+    }
+
+    /// Persist a one-shot request in the same durable database as workflows.
+    /// It is intentionally only a saved Draft template; no executor is started
+    /// by this method.
+    pub fn create_schedule(&self, run_at: &str, request: WorkflowCreate) -> Result<ScheduleRecord> {
+        let run_at = normalize_run_at(run_at)?;
+        ensure_future_run_at(&run_at)?;
+        let template = validate_request(request)?;
+        validate_template_size(&template)?;
+        let now = timestamp();
+        let record = ScheduleRecord {
+            id: Uuid::new_v4().to_string(),
+            run_at,
+            template,
+            status: ScheduleStatus::Pending,
+            created_at: now.clone(),
+            completed_at: None,
+            created_workflow_id: None,
+            error: None,
+        };
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute(
+            "INSERT INTO schedules (id,run_at,template,status,created_at,completed_at,created_workflow_id,error)\
+             VALUES (?1,?2,?3,?4,?5,NULL,NULL,NULL)",
+            params![
+                record.id,
+                record.run_at,
+                serde_json::to_string(&record.template)?,
+                record.status.as_str(),
+                record.created_at,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(record)
+    }
+
+    pub fn list_schedules(&self) -> Result<Vec<ScheduleRecord>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT id,run_at,template,status,created_at,completed_at,created_workflow_id,error \
+             FROM schedules ORDER BY run_at DESC,id DESC",
+        )?;
+        let rows = statement.query_map([], schedule_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn get_schedule(&self, id: &str) -> Result<Option<ScheduleRecord>> {
+        validate_schedule_id(id)?;
+        let connection = self.lock()?;
+        get_schedule_record(&connection, id)
+    }
+
+    /// Cancel only a request that has not reached its scheduled instant. A
+    /// completed record is immutable audit evidence.
+    pub fn cancel_schedule(&self, id: &str) -> Result<ScheduleRecord> {
+        validate_schedule_id(id)?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let previous = required_schedule(&transaction, id)?;
+        ensure!(
+            previous.status == ScheduleStatus::Pending,
+            "schedule is no longer pending"
+        );
+        let now = timestamp();
+        let affected = transaction.execute(
+            "UPDATE schedules SET status='cancelled',completed_at=?1 WHERE id=?2 AND status='pending'",
+            params![now, id],
+        )?;
+        ensure!(
+            affected == 1,
+            "schedule changed while it was being cancelled"
+        );
+        let record = required_schedule(&transaction, id)?;
+        transaction.commit()?;
+        Ok(record)
+    }
+
+    /// Return only IDs that are still eligible to materialize. The actual
+    /// state transition is rechecked in `materialize_due_schedule` under the
+    /// same SQLite transaction that inserts the Draft.
+    pub fn due_schedule_ids(&self) -> Result<Vec<String>> {
+        let connection = self.lock()?;
+        let now = timestamp();
+        let mut statement = connection.prepare(
+            "SELECT id FROM schedules WHERE status='pending' AND run_at<=?1 ORDER BY run_at,id",
+        )?;
+        let rows = statement.query_map([now], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Atomically create the one scheduled Draft and terminally record the
+    /// trigger. `normalize` covers service-owned adapter availability and can
+    /// make a chat request read-only; storage validation covers the saved
+    /// request and workspace path.
+    pub fn materialize_due_schedule<F>(
+        &self,
+        id: &str,
+        normalize: F,
+    ) -> Result<Option<ScheduleMaterialization>>
+    where
+        F: FnOnce(WorkflowCreate) -> Result<WorkflowCreate>,
+    {
+        validate_schedule_id(id)?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(schedule) = get_schedule_record(&transaction, id)? else {
+            transaction.commit()?;
+            return Ok(None);
+        };
+        if schedule.status != ScheduleStatus::Pending || schedule.run_at > timestamp() {
+            transaction.commit()?;
+            return Ok(None);
+        }
+
+        let request = match validate_request(schedule.template.clone())
+            .and_then(normalize)
+            .and_then(validate_request)
+            .and_then(|request| {
+                validate_template_size(&request)?;
+                Ok(request)
+            }) {
+            Ok(request) => request,
+            Err(error) => {
+                let error = schedule_error(&error);
+                let now = timestamp();
+                transaction.execute(
+                    "INSERT INTO schedule_triggers (schedule_id,scheduled_for,outcome,workflow_id,error,created_at)\
+                     VALUES (?1,?2,?3,NULL,?4,?5)",
+                    params![
+                        schedule.id,
+                        schedule.run_at,
+                        ScheduleTriggerOutcome::Failed.as_str(),
+                        error,
+                        now,
+                    ],
+                )?;
+                let affected = transaction.execute(
+                    "UPDATE schedules SET status='failed',completed_at=?1,error=?2 WHERE id=?3 AND status='pending'",
+                    params![now, error, id],
+                )?;
+                ensure!(affected == 1, "schedule changed while failure was recorded");
+                let record = required_schedule(&transaction, id)?;
+                transaction.commit()?;
+                return Ok(Some(ScheduleMaterialization::Failed {
+                    schedule: record,
+                    error,
+                }));
+            }
+        };
+
+        let workflow = insert_workflow_record(&transaction, request, None)?;
+        let now = timestamp();
+        // Match an explicitly created Draft: a scheduled Draft must also make
+        // its workspace visible in the recent-project list. Keep that update
+        // inside the same transaction as the workflow and trigger audit.
+        touch_project(&transaction, &workflow.cwd, None, &now)?;
+        insert_event(
+            &transaction,
+            &workflow.id,
+            "scheduled_from",
+            json!({
+                "schedule_id": schedule.id,
+                "scheduled_for": schedule.run_at,
+                "started_automatically": false,
+                "model_dispatched": false,
+            }),
+            &now,
+        )?;
+        transaction.execute(
+            "INSERT INTO schedule_triggers (schedule_id,scheduled_for,outcome,workflow_id,error,created_at)\
+             VALUES (?1,?2,?3,?4,NULL,?5)",
+            params![
+                schedule.id,
+                schedule.run_at,
+                ScheduleTriggerOutcome::Created.as_str(),
+                workflow.id,
+                now,
+            ],
+        )?;
+        let affected = transaction.execute(
+            "UPDATE schedules SET status='fired',completed_at=?1,created_workflow_id=?2,error=NULL \
+             WHERE id=?3 AND status='pending'",
+            params![now, workflow.id, id],
+        )?;
+        ensure!(
+            affected == 1,
+            "schedule changed while draft was being created"
+        );
+        let record = required_schedule(&transaction, id)?;
+        transaction.commit()?;
+        Ok(Some(ScheduleMaterialization::Created {
+            schedule: record,
+            workflow_id: workflow.id,
+        }))
+    }
+
+    pub fn schedule_triggers(&self, id: &str) -> Result<Vec<ScheduleTrigger>> {
+        validate_schedule_id(id)?;
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT schedule_id,scheduled_for,outcome,workflow_id,error,created_at \
+             FROM schedule_triggers WHERE schedule_id=?1 ORDER BY created_at,rowid",
+        )?;
+        let rows = statement.query_map([id], schedule_trigger_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn list(&self) -> Result<Vec<WorkflowRecord>> {
@@ -784,6 +1018,21 @@ fn required_record(connection: &Connection, id: &str) -> Result<WorkflowRecord> 
     get_record(connection, id)?.with_context(|| format!("工作流不存在：{id}"))
 }
 
+fn get_schedule_record(connection: &Connection, id: &str) -> Result<Option<ScheduleRecord>> {
+    Ok(connection
+        .query_row(
+            "SELECT id,run_at,template,status,created_at,completed_at,created_workflow_id,error \
+             FROM schedules WHERE id=?1",
+            [id],
+            schedule_from_row,
+        )
+        .optional()?)
+}
+
+fn required_schedule(connection: &Connection, id: &str) -> Result<ScheduleRecord> {
+    get_schedule_record(connection, id)?.with_context(|| format!("schedule not found: {id}"))
+}
+
 fn ensure_record_exists(connection: &Connection, id: &str) -> Result<()> {
     let exists: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM workflows WHERE id=?1)",
@@ -891,6 +1140,58 @@ fn project_from_row(row: &Row<'_>) -> rusqlite::Result<ProjectRecord> {
     })
 }
 
+fn schedule_from_row(row: &Row<'_>) -> rusqlite::Result<ScheduleRecord> {
+    let status_text: String = row.get(3)?;
+    let status = ScheduleStatus::parse(&status_text).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            3,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                error.to_string(),
+            )),
+        )
+    })?;
+    Ok(ScheduleRecord {
+        id: row.get(0)?,
+        run_at: row.get(1)?,
+        template: json_from_column(row, 2)?,
+        status,
+        created_at: row.get(4)?,
+        completed_at: row.get(5)?,
+        created_workflow_id: row.get(6)?,
+        error: row.get(7)?,
+    })
+}
+
+fn schedule_trigger_from_row(row: &Row<'_>) -> rusqlite::Result<ScheduleTrigger> {
+    let outcome_text: String = row.get(2)?;
+    let outcome = ScheduleTriggerOutcome::parse(&outcome_text).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            2,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                error.to_string(),
+            )),
+        )
+    })?;
+    Ok(ScheduleTrigger {
+        schedule_id: row.get(0)?,
+        scheduled_for: row.get(1)?,
+        outcome,
+        workflow_id: row.get(3)?,
+        error: row.get(4)?,
+        created_at: row.get(5)?,
+    })
+}
+
+fn schedule_error(error: &anyhow::Error) -> String {
+    const MAX_SCHEDULE_ERROR_BYTES: usize = 4_096;
+    let text = error.to_string();
+    utf8_prefix(&text, MAX_SCHEDULE_ERROR_BYTES).to_owned()
+}
+
 fn touch_project(
     connection: &Connection,
     cwd: &str,
@@ -940,6 +1241,21 @@ mod tests {
                 None,
             )
             .unwrap()
+    }
+
+    fn future_run_at() -> String {
+        (Utc::now() + chrono::Duration::minutes(5)).to_rfc3339_opts(SecondsFormat::Micros, true)
+    }
+
+    fn make_schedule_due(store: &WorkflowStore, id: &str) {
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE schedules SET run_at=?1 WHERE id=?2",
+                params![timestamp(), id],
+            )
+            .unwrap();
     }
 
     #[test]
@@ -1011,7 +1327,8 @@ mod tests {
                 .unwrap()
                 .pragma_query_value(None, "user_version", |row| row.get(0))
                 .unwrap();
-            assert_eq!(version, 2);
+            assert_eq!(version, 3);
+            assert!(store.list_schedules().unwrap().is_empty());
         }
         let reopened = WorkflowStore::open(&database).unwrap();
         assert_eq!(reopened.get("legacy").unwrap(), Some(legacy));
@@ -1099,11 +1416,255 @@ mod tests {
     }
 
     #[test]
-    fn active_task_cannot_be_duplicated_as_a_retry() {
+    fn duplicate_accepts_each_terminal_status_and_rejects_each_nonterminal_status() {
         let temp = tempfile::tempdir().unwrap();
         let store = WorkflowStore::open_in_memory().unwrap();
-        let active = start(&store, temp.path());
-        assert!(store.duplicate_as_draft(&active.id).is_err());
+        for status in [
+            WorkflowStatus::Succeeded,
+            WorkflowStatus::Failed,
+            WorkflowStatus::Cancelled,
+            WorkflowStatus::Interrupted,
+        ] {
+            let original = start(&store, temp.path());
+            match status {
+                WorkflowStatus::Succeeded => {
+                    store
+                        .transition(
+                            &original.id,
+                            &[WorkflowStatus::Running],
+                            WorkflowStatus::Verifying,
+                            None,
+                        )
+                        .unwrap();
+                    store
+                        .transition(
+                            &original.id,
+                            &[WorkflowStatus::Verifying],
+                            WorkflowStatus::Succeeded,
+                            Some("accepted"),
+                        )
+                        .unwrap();
+                }
+                WorkflowStatus::Failed
+                | WorkflowStatus::Cancelled
+                | WorkflowStatus::Interrupted => {
+                    store
+                        .transition(
+                            &original.id,
+                            &[WorkflowStatus::Running],
+                            status,
+                            Some("done"),
+                        )
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let copy = store.duplicate_as_draft(&original.id).unwrap();
+            assert_eq!(copy.status, WorkflowStatus::Draft);
+            let source = store
+                .events(&copy.id, 0, 10)
+                .unwrap()
+                .into_iter()
+                .find(|event| event.kind == "duplicated_from")
+                .unwrap();
+            assert_eq!(source.data["source_workflow_id"], original.id);
+            assert_eq!(source.data["source_status"], status.as_str());
+        }
+
+        let draft = store.create(request(temp.path())).unwrap();
+        assert!(store.duplicate_as_draft(&draft.id).is_err());
+        let running = start(&store, temp.path());
+        assert!(store.duplicate_as_draft(&running.id).is_err());
+        let waiting = start(&store, temp.path());
+        store
+            .transition(
+                &waiting.id,
+                &[WorkflowStatus::Running],
+                WorkflowStatus::WaitingInput,
+                None,
+            )
+            .unwrap();
+        assert!(store.duplicate_as_draft(&waiting.id).is_err());
+        let verifying = start(&store, temp.path());
+        store
+            .transition(
+                &verifying.id,
+                &[WorkflowStatus::Running],
+                WorkflowStatus::Verifying,
+                None,
+            )
+            .unwrap();
+        assert!(store.duplicate_as_draft(&verifying.id).is_err());
+        let blocked = store.create(request(temp.path())).unwrap();
+        store
+            .transition(
+                &blocked.id,
+                &[WorkflowStatus::Draft],
+                WorkflowStatus::Blocked,
+                Some("waiting for an external condition"),
+            )
+            .unwrap();
+        assert!(store.duplicate_as_draft(&blocked.id).is_err());
+    }
+
+    #[test]
+    fn due_schedule_creates_one_audited_draft_without_starting_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = WorkflowStore::open_in_memory().unwrap();
+        assert!(store
+            .create_schedule("not-a-date", request(temp.path()))
+            .is_err());
+        assert!(store
+            .create_schedule(&timestamp(), request(temp.path()))
+            .is_err());
+        let schedule = store
+            .create_schedule(&future_run_at(), request(temp.path()))
+            .unwrap();
+        make_schedule_due(&store, &schedule.id);
+        let scheduled_for = store.get_schedule(&schedule.id).unwrap().unwrap().run_at;
+
+        let result = store
+            .materialize_due_schedule(&schedule.id, |request| Ok(request))
+            .unwrap()
+            .unwrap();
+        let workflow_id = match result {
+            ScheduleMaterialization::Created {
+                schedule,
+                workflow_id,
+            } => {
+                assert_eq!(schedule.status, ScheduleStatus::Fired);
+                assert_eq!(
+                    schedule.created_workflow_id.as_deref(),
+                    Some(workflow_id.as_str())
+                );
+                workflow_id
+            }
+            ScheduleMaterialization::Failed { error, .. } => panic!("unexpected failure: {error}"),
+        };
+        let workflow = store.get(&workflow_id).unwrap().unwrap();
+        assert_eq!(workflow.status, WorkflowStatus::Draft);
+        assert!(workflow.native_session_id.is_none());
+        assert!(workflow.output.is_empty());
+        let event = store
+            .events(&workflow.id, 0, 10)
+            .unwrap()
+            .into_iter()
+            .find(|event| event.kind == "scheduled_from")
+            .unwrap();
+        assert_eq!(event.data["schedule_id"], schedule.id.as_str());
+        assert_eq!(event.data["started_automatically"], false);
+        assert_eq!(event.data["model_dispatched"], false);
+        let triggers = store.schedule_triggers(&schedule.id).unwrap();
+        assert_eq!(triggers.len(), 1);
+        assert_eq!(triggers[0].schedule_id, schedule.id);
+        assert_eq!(triggers[0].scheduled_for, scheduled_for);
+        assert_eq!(triggers[0].outcome, ScheduleTriggerOutcome::Created);
+        assert_eq!(
+            triggers[0].workflow_id.as_deref(),
+            Some(workflow_id.as_str())
+        );
+        assert!(triggers[0].error.is_none());
+        assert!(store.due_schedule_ids().unwrap().is_empty());
+        assert!(store
+            .materialize_due_schedule(&schedule.id, |request| Ok(request))
+            .unwrap()
+            .is_none());
+        assert_eq!(store.list().unwrap().len(), 1);
+        assert_eq!(
+            store
+                .list_projects()
+                .unwrap()
+                .into_iter()
+                .map(|project| project.cwd)
+                .collect::<Vec<_>>(),
+            vec![workflow.cwd]
+        );
+    }
+
+    #[test]
+    fn schedule_with_removed_workspace_becomes_failed_once_without_a_draft() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("scheduled-workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = WorkflowStore::open_in_memory().unwrap();
+        let schedule = store
+            .create_schedule(&future_run_at(), request(&workspace))
+            .unwrap();
+        std::fs::remove_dir(&workspace).unwrap();
+        make_schedule_due(&store, &schedule.id);
+
+        let result = store
+            .materialize_due_schedule(&schedule.id, |request| Ok(request))
+            .unwrap()
+            .unwrap();
+        match result {
+            ScheduleMaterialization::Failed { schedule, error } => {
+                assert_eq!(schedule.status, ScheduleStatus::Failed);
+                assert_eq!(schedule.error.as_deref(), Some(error.as_str()));
+                assert!(error.contains("工作目录"));
+            }
+            ScheduleMaterialization::Created { .. } => {
+                panic!("removed workspace must not create a draft")
+            }
+        }
+        assert!(store.list().unwrap().is_empty());
+        assert_eq!(store.schedule_triggers(&schedule.id).unwrap().len(), 1);
+        assert_eq!(
+            store.schedule_triggers(&schedule.id).unwrap()[0].outcome,
+            ScheduleTriggerOutcome::Failed
+        );
+        assert!(store
+            .materialize_due_schedule(&schedule.id, |request| Ok(request))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn scheduled_draft_write_failure_rolls_back_schedule_and_workflow() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = WorkflowStore::open_in_memory().unwrap();
+        let schedule = store
+            .create_schedule(&future_run_at(), request(temp.path()))
+            .unwrap();
+        make_schedule_due(&store, &schedule.id);
+        store
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_scheduled_from BEFORE INSERT ON workflow_events \
+                 WHEN NEW.kind='scheduled_from' BEGIN SELECT RAISE(ABORT,'simulated write failure'); END;",
+            )
+            .unwrap();
+
+        assert!(store
+            .materialize_due_schedule(&schedule.id, |request| Ok(request))
+            .is_err());
+        assert_eq!(
+            store.get_schedule(&schedule.id).unwrap().unwrap().status,
+            ScheduleStatus::Pending
+        );
+        assert!(store.schedule_triggers(&schedule.id).unwrap().is_empty());
+        assert!(store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn pending_schedule_can_be_cancelled_and_never_becomes_due() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = WorkflowStore::open_in_memory().unwrap();
+        let schedule = store
+            .create_schedule(&future_run_at(), request(temp.path()))
+            .unwrap();
+        let cancelled = store.cancel_schedule(&schedule.id).unwrap();
+        assert_eq!(cancelled.status, ScheduleStatus::Cancelled);
+        assert!(cancelled.completed_at.is_some());
+        assert!(store.cancel_schedule(&schedule.id).is_err());
+        make_schedule_due(&store, &schedule.id);
+        assert!(store.due_schedule_ids().unwrap().is_empty());
+        assert!(store
+            .materialize_due_schedule(&schedule.id, |request| Ok(request))
+            .unwrap()
+            .is_none());
+        assert!(store.list().unwrap().is_empty());
     }
 
     #[test]
