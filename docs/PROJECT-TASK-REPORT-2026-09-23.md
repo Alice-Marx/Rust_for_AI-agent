@@ -47,6 +47,7 @@ API Agent 与 SSE、Rust egui 桌面、Rust/npm 双 CLI、官方工具 Work/Chat
 7. **H04 usage 归档（部分完成）**：规划 child、执行/评审 child 与每次重试结束时，把原生工具 `usage` 事件按 `workflow_id` 归入 `usage_observed` Teams 事件，并标记 phase、node、attempt、app、model、effort。最多保留最近 16 个快照；Claude CLI 与 MiMo harness 报告的 USD 值标成未确认来源，不做快照求和；估算与已确认金额都明确为空。**美元预算仍在派工前阻塞**：usage 事件不等于发票，也不能限制在途消费；预留账本尚未接入派工/结算。
 8. **H05 终态任务复制首步**：独立终态 workflow 可通过 `POST /api/v1/workflows/{id}/duplicate` 或 Rust/npm CLI `work duplicate <id>` 复制为新 Draft，并在事务内保存 `duplicated_from` 来源事件。保留任务请求配置，但不复制旧原生 session、输出或错误，不自动启动；活动任务和 Teams-owned child 被拒绝。**H05 原生恢复/分叉尚未完成**，所有适配器 `resume/fork` 仍为 false。
 9. **G3 文档与测试信号改进**：npm README 补齐 duplicate 与 routing 命令；仓库外 `upstream-study/PROVENANCE.md` 记录 Grok/ZCode 固定来源；版本探测分离 stdout/stderr，避免 PowerShell CLIXML 污染；Kimi 同名识别改为纯函数测试；真实 PTY 时序测试明确为外部集成测试；清除 native executor 编译警告。
+10. **npm CLI 预览发布准备**：npm registry 已占用 0.11.0，因此将包版本升为 0.11.1（兼容后端 0.11.0），目标 dist-tag 为 `next`。本地 tarball 已按 5 文件白名单打包，SHA-256 `F06B76B511DDBD0E7BBFB65935DB2A6CE6CBACBBD27E4E544D8FD141DE3F853C`；npm 身份检查返回 401，故远端发布与 integrity 核验尚未完成。
 
 ### 本轮报告对账
 
@@ -80,6 +81,7 @@ API Agent 与 SSE、Rust egui 桌面、Rust/npm 双 CLI、官方工具 Work/Chat
 | `src/bin/desktop/teams.rs` | Teams 详情中的路由决策事件、候选拒绝原因、证据链和派工就绪状态面板 |
 | `src/desktop_bridge.rs` / `src/app_diagnostics.rs` | 注册 Grok 官方应用/profile 与版本 banner；版本探测分离 stdout/stderr，降低环境噪声 |
 | `packaging/npm/wonderland-cli/README.md` | 补齐任务复制、路由预览/保存/重放命令和严格 RoutingPolicy JSON 示例 |
+| `packaging/npm/wonderland-cli/package.json` | npm CLI 预览包版本 0.11.1；兼容 0.11.0 后端，拟发布到 `next` |
 | `src/workbench_service.rs` | 工作流完成后持久化脱敏 `identity_readback`；为终态独立任务提供 duplicate API，拒绝 Teams child |
 | `src/workflow.rs` | SQLite 工作流状态机和事件账本；把终态任务原子复制为全新草稿，不复用 session/output |
 | `tests/claude_native/protocol.rs` | Claude 离线协议夹具；核对成功结果的模型回读和身份字段脱敏边界 |
@@ -122,6 +124,7 @@ API Agent 与 SSE、Rust egui 桌面、Rust/npm 双 CLI、官方工具 Work/Chat
 | `cargo test --locked native_executor::tests --lib` | 16/16 通过 |
 | `cargo test --locked --all-targets --features ui-snapshots` | 库 454 项通过、8 项按外部条件忽略；Rust CLI 4 项、桌面 18 项、协议集成 7 项通过；0 失败 |
 | `npm test --prefix packaging/npm/wonderland-cli` | 16/16 通过 |
+| `npm pack --dry-run --json --pack-destination dist` | 通过；5 个白名单文件，0.11.1 包，registry integrity `sha512-nm/ojEZyHK7jQM89AqvpiQ9ZUBQcb4uUCkZHxiDX7tVprlBzwpFAFzSLgXTmigAeHDuKtv6jQVOkLsJGF10zhw==` |
 
 最终全目标回归通过。PowerShell stdout/stderr 分离和 Kimi 纯函数识别使此前 CLIXML/PATH 相关用例恢复稳定；超时用例在本轮并行全测通过；真实 PTY/ConPTY 时序测试现按其外部环境属性显式忽略。全测发现的 3 个仅测试使用导入警告随后清除，并由无警告的全目标 `cargo check` 复验。
 
@@ -145,6 +148,7 @@ API Agent 与 SSE、Rust egui 桌面、Rust/npm 双 CLI、官方工具 Work/Chat
 | **两个 CLI 的路由策略命令** | 实现、自动测试完成；随提交 `03a8ff9` 交付 | 已提供 `preview/saved/replay`，严格透传既有 HTTP 合同；无需额外 CLI 测试 |
 | **桌面阻塞原因面板（H06 起步）** | 实现、桌面自动化测试完成；随提交 `03a8ff9` 交付 | 已渲染 `dispatch_readiness.missing` 与路由事件；还需按本报告手工检查事件差异、长解释和空数据情形 |
 | **Grok Build 真实闭环** | 第 8 个受管执行器的代码、离线 fixture、应用注册和文档已完成；`resume/fork=false`，无真实安装/账号推理证据，固定发布二进制摘要待回填 | 安装官方 1.0.38，分别用 `XAI_API_KEY` 与缓存令牌完成握手；执行真实推理、允许/拒绝、取消、认证失败和 usage 归档，保存脱敏 fixture 并回填发布指纹。真实 wire 不符时继续失败关闭并新增显式版本 profile |
+| **npm CLI 0.11.1 发布** | 本地包与 16 项测试通过，tarball 已生成；npm 当前登录失效（`npm whoami` 返回 E401），尚未发布 | 运行 `npm login --auth-type=web` 完成账号登录，再发布已校验 tarball 到 `next`；从 registry 核对版本、tag、SHA-256/integrity，并把核验结果补入本报告 |
 | **ZCode 接入** | 源码已取回，发布物对应关系待核 | 核对 `@zcode/cli@3.14.0` 与源码提交，再按其 app-server 协议实现独立 transport；不复用 ACP 假设 |
 | **H05 恢复/分叉** | 新增终态独立 workflow → 新 Draft 的 duplicate API/CLI（不复制 session/output、不自动启动；团队 child 禁止脱离父团队复制）；所有适配器 `resume/fork=false` | 继续完善终态状态/HTTP/CLI覆盖；注入崩溃、断网、审批等待、进程残留和集成中取消。后续按适配器持久化 session ID、工具版本/配置、workspace revision 并实测可恢复性；分叉历史与 Teams attempt 重试单独定合同，未验证前保持 false |
 | **H07 插件/定时/远程/PR/网站、H08 沙箱/MCP、H10 研究实验** | 未开始 | 按 [ROADMAP](ROADMAP-2026-09-23.md) 既有分解与验收门槛执行 |

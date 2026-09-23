@@ -1,6 +1,6 @@
 # rust-ai-wonderland-cli
 
-Wonderland 0.11.0 终端客户端。Node.js 18+，连接已启动的 Wonderland Rust 后端；后端来自桌面安装包、便携包或源码构建。npm 包不包含后端。预览版本使用 `next` 频道，稳定频道 `latest` 仍为 0.7.0。
+Wonderland 0.11.0 后端兼容的终端客户端，当前 npm 客户端版本为 0.11.1。Node.js 18+，连接已启动的 Wonderland Rust 后端；后端来自桌面安装包、便携包或源码构建。npm 包不包含后端。预览版本使用 `next` 频道，稳定频道 `latest` 仍为 0.7.0。
 
 新增官方应用任务命令：
 

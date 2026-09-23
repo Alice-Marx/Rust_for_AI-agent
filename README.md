@@ -97,7 +97,7 @@ wonderland-cli search "模型适配"
 wonderland-cli profile --model gpt-5.4
 ```
 
-也可安装本地发布包：`npm install -g ./dist/rust-ai-wonderland-cli-0.11.0.tgz`。`next` 对应 0.11.0 预览版，`latest` 仍为 0.7.0 稳定频道。命令别名为 `wonderland`、`wonderland-cli`；原生 `wonderland.exe` 是后端服务，因此安装两种 CLI 后建议使用 `wonderland-cli` 并检查 PATH 顺序。
+也可安装本地发布包：`npm install -g ./dist/rust-ai-wonderland-cli-0.11.1.tgz`。当前 `next` 预览频道计划发布 npm CLI 0.11.1（兼容 Wonderland 0.11.0 后端）；`latest` 仍为 0.7.0 稳定频道。命令别名为 `wonderland`、`wonderland-cli`；原生 `wonderland.exe` 是后端服务，因此安装两种 CLI 后建议使用 `wonderland-cli` 并检查 PATH 顺序。
 
 也可使用 GitHub 同版附件；若网络无法解析其下载域名，优先使用上面的 npm registry 安装命令：
 
