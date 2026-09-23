@@ -148,7 +148,7 @@ API Agent 与 SSE、Rust egui 桌面、Rust/npm 双 CLI、官方工具 Work/Chat
 | 任务 | 现状 | 完成思路 |
 | --- | --- | --- |
 | **H01 真实账号闭环** | Codex 回读账号渠道/计划和线程模型；Claude、ACP 与 Python Kimi 的工具指纹和可证实模型设置代码已完成。账号渠道/计划仅 Codex 有显式回读；其余字段遵守未知保留规则。真实账户测试未完成，需登录 | 按上节测试 1–5 执行，归档脱敏事件；仅在工具官方会话回传明确账号计费/额度信息时扩充 `billing_channel`/`account_plan`，否则保持 `None`。根据实测更新工具版本与指纹支持策略 |
-| **H04 硬预算闭环** | 已把每个 planner/node-attempt child 的原生 usage 事件按 workflow/phase/attempt 归档；金额有单独未确认分类。预留/终态结算仍未接线，`budget_usd` 继续阻塞 | 下一步建立 attempt 级 `estimated_usd`/`confirmed_usd` 数据合同；估算按 routing 成本与安全系数预留；接入官方确认账单源和进程内中断/配额机制后，才可结算并开放硬预算。凡只能拿到 token 数/CLI 或 harness 自报金额的渠道，明确标记不支持硬上限并只显示软提示；检查 Planner、评审、并行子任务、失败重试、取消及崩溃恢复均有费用归属 |
+| **H04 硬预算闭环** | usage 归档已完成；**预留/保守结算/对账已接线**（`ROUTING_RESERVATION_MARGIN=1.25` 平摊预留、attempt 终态结算 actual=None、运行收尾与重跑前 `reconcile_reservations` 兜底）；渠道 `hard_budget_capable` 合同建立（当前全 false），`budget_usd` 仍阻塞但原因结构化。详见[预算接线报告](WORK-REPORT-2026-09-23-BUDGET-WIRING.md) | 剩余：接入任一渠道的提供商确认账单源并证明可强制中断后置 `hard_budget_capable=true`，补预算内/超限/在途三场景测试解除该渠道阻塞；确认金额写入 `settle_reservation(actual)`；服务启动恢复流程批量对账 Interrupted 团队；harness 自报金额保持未确认分类 |
 | **两个 CLI 的路由策略命令** | 实现、自动测试完成；随提交 `03a8ff9` 交付 | 已提供 `preview/saved/replay`，严格透传既有 HTTP 合同；无需额外 CLI 测试 |
 | **桌面阻塞原因面板（H06 起步）** | 实现、桌面自动化测试完成；随提交 `03a8ff9` 交付 | 已渲染 `dispatch_readiness.missing` 与路由事件；还需按本报告手工检查事件差异、长解释和空数据情形 |
 | **Grok Build 真实闭环** | 第 8 个受管执行器的代码、离线 fixture、应用注册和文档已完成；`resume/fork=false`，无真实安装/账号推理证据，固定发布二进制摘要待回填 | 安装官方 1.0.38，分别用 `XAI_API_KEY` 与缓存令牌完成握手；执行真实推理、允许/拒绝、取消、认证失败和 usage 归档，保存脱敏 fixture 并回填发布指纹。真实 wire 不符时继续失败关闭并新增显式版本 profile |

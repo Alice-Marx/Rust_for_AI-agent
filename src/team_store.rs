@@ -1160,6 +1160,64 @@ impl TeamStore {
             Ok(json!({"reservation_id":reservation_id,"actual_cost_usd":actual_cost_usd,"known":actual.is_some(),"charged_microusd":charged}))
         })
     }
+    /// Close every reservation still marked Reserved on a team: attempts that
+    /// reached a terminal state settle conservatively at their reserved amount
+    /// (no provider-confirmed actual exists yet); attempts that never launched
+    /// are released. Called when a run finalizes, before a Blocked team is
+    /// retried, and after service restarts so stale holds never leak.
+    /// Settle the reservation attached to one attempt, if any. Actual cost
+    /// stays None (conservative: charged falls back to the reserved amount)
+    /// until a provider-confirmed invoice source exists.
+    pub fn settle_attempt_reservation(&self, id: &str, node_id: &str, number: u32) -> Result<()> {
+        let reservation_id = self
+            .get(id)?
+            .context("team not found")?
+            .nodes
+            .iter()
+            .find(|n| n.spec.id == node_id)
+            .and_then(|n| n.attempts.iter().find(|a| a.number == number))
+            .and_then(|a| a.reservation_id.clone());
+        if let Some(reservation_id) = reservation_id {
+            self.settle_reservation(id, &reservation_id, None)?;
+        }
+        Ok(())
+    }
+
+    pub fn reconcile_reservations(&self, id: &str, reason: &str) -> Result<TeamRecord> {
+        bounded(reason, 256, "reconciliation reason", false)?;
+        self.mutate(id, "budget_reconciled", |_, record| {
+            let mut reconciled = Vec::new();
+            for reservation in &mut record.reservations {
+                if reservation.status != ReservationStatus::Reserved {
+                    continue;
+                }
+                let attempt_ended = record.nodes.iter().any(|n| {
+                    n.spec.id == reservation.node_id
+                        && n.attempts
+                            .iter()
+                            .any(|a| a.number == reservation.attempt && a.status.is_terminal())
+                });
+                let outcome = if attempt_ended {
+                    "settled_at_reserved"
+                } else {
+                    "released"
+                };
+                reservation.status = if attempt_ended {
+                    ReservationStatus::Settled
+                } else {
+                    ReservationStatus::Released
+                };
+                reservation.settled_at = Some(now());
+                reconciled.push(json!({
+                    "reservation_id": reservation.id,
+                    "node_id": reservation.node_id,
+                    "attempt": reservation.attempt,
+                    "outcome": outcome,
+                }));
+            }
+            Ok(json!({"reason": reason, "reservations": reconciled}))
+        })
+    }
     pub fn release_reservation(&self, id: &str, reservation_id: &str) -> Result<TeamRecord> {
         self.mutate(id, "budget_released", |_, record| {
             let reservation = record
@@ -1743,6 +1801,58 @@ mod tests {
         assert!(store.release_reservation(&team.id, &reservation).is_err());
         assert!(store
             .begin_attempt(&team.id, "b", binding(), Some(0.3))
+            .is_ok());
+    }
+    #[test]
+    fn reconciliation_closes_stale_holds_without_leaking_or_double_charging() {
+        let store = TeamStore::open_in_memory().unwrap();
+        let mut r = request();
+        r.budget_usd = Some(1.0);
+        r.nodes[1].dependencies.clear();
+        let team = running(&store, r);
+        let a = store
+            .begin_attempt(&team.id, "a", binding(), Some(0.5))
+            .unwrap();
+        let b = store
+            .begin_attempt(&team.id, "b", binding(), Some(0.3))
+            .unwrap();
+        // Node a's attempt reached a terminal state; node b never launched.
+        store
+            .set_attempt_status(&team.id, "a", 1, NodeStatus::Failed, None, None)
+            .unwrap();
+        let reconciled = store
+            .reconcile_reservations(&team.id, "run failed: test")
+            .unwrap();
+        let find = |id: &str| reconciled.reservations.iter().find(|r| r.id == id).unwrap();
+        assert_eq!(
+            find(a.reservation_id.as_deref().unwrap()).status,
+            ReservationStatus::Settled
+        );
+        assert_eq!(
+            find(b.reservation_id.as_deref().unwrap()).status,
+            ReservationStatus::Released
+        );
+        // The ended attempt keeps its reserved amount charged; the unlaunched
+        // one is freed, so the team can retry within budget once the node is
+        // marked interrupted the way a service restart would.
+        assert_eq!(charged_microusd(&reconciled), 500_000);
+        // Reconciliation is idempotent while no new holds exist.
+        let again = store
+            .reconcile_reservations(&team.id, "run finalized")
+            .unwrap();
+        assert_eq!(
+            again
+                .reservations
+                .iter()
+                .filter(|r| r.status == ReservationStatus::Reserved)
+                .count(),
+            0
+        );
+        store
+            .set_attempt_status(&team.id, "b", 1, NodeStatus::Interrupted, None, None)
+            .unwrap();
+        assert!(store
+            .begin_attempt(&team.id, "b", binding(), Some(0.4))
             .is_ok());
     }
     #[test]

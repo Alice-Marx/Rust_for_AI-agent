@@ -88,6 +88,11 @@ impl TeamService {
                 || (record.status == TeamStatus::Blocked && record.run_workspace.is_none()),
             "create a new team to retry a run with execution evidence"
         );
+        // A retried Blocked team must not inherit stale reservation holds.
+        service
+            .teams
+            .store
+            .reconcile_reservations(id, "retry after previous run")?;
         let record = service.teams.store.transition(
             id,
             &[TeamStatus::Planned, TeamStatus::Blocked],
@@ -109,6 +114,19 @@ impl TeamService {
             // Cancel and reap every registered native child before recording a terminal
             // team status, even if persistence, merging or the scheduler itself failed.
             service.teams.stop_children(&service, &id).await;
+            // Close any reservation the run left open (unlaunched attempts,
+            // cancellation mid-flight, scheduler errors) so holds never leak.
+            let reason = match &result {
+                Ok(()) => "run finalized".to_owned(),
+                Err(error) => {
+                    let mut reason = format!("run failed: {error:#}");
+                    reason.truncate(200);
+                    reason
+                }
+            };
+            if let Err(error) = service.teams.store.reconcile_reservations(&id, &reason) {
+                tracing::warn!(team_id = %id, %error, "could not reconcile budget reservations");
+            }
             let current = service.teams.store.get(&id);
             if let Ok(Some(record)) = current {
                 if record.status.is_active() {
@@ -223,6 +241,10 @@ fn validate_binding(binding: &ExecutorBinding) -> Result<()> {
     // process startup. No model family guessing or direct API fallback here.
     Ok(())
 }
+/// Explicit in-flight safety margin applied when reserving a routing cost
+/// estimate; kept small and recorded in the binding_applied event.
+const ROUTING_RESERVATION_MARGIN: f64 = 1.25;
+
 fn active_check(cancel: &watch::Receiver<bool>, deadline: Instant) -> Result<()> {
     ensure!(!*cancel.borrow(), "team cancelled");
     ensure!(Instant::now() < deadline, "team deadline exceeded");
@@ -236,6 +258,7 @@ async fn execute_team(
 ) -> Result<()> {
     let mut record = service.teams.store.get(id)?.context("team not found")?;
     let deadline = Instant::now() + Duration::from_secs(record.request.max_duration_secs);
+    let mut routing_estimate: Option<f64> = None;
     if record.request.strategy == TeamStrategy::Automatic {
         // Each routing epoch fetches both sources anew. Cached display data cannot
         // silently authorize a routing decision after a failed online refresh.
@@ -310,7 +333,17 @@ async fn execute_team(
             return Ok(());
         }
         if record.request.budget_usd.is_some() {
-            block_team("a hard USD budget cannot be enforced on native tool accounts yet; the selected decision is recorded, but execution stays blocked until budget settlement closes (H04)".into())?;
+            let planner_app = record.request.planner.app_id.clone();
+            let blocker = crate::account_billing::channel(&planner_app, crate::account_billing::CHANNEL_API)
+                .or_else(|| crate::account_billing::channel(&planner_app, crate::account_billing::CHANNEL_SUBSCRIPTION))
+                .map(|contract| format!(
+                    "the selected decision is recorded, but a hard USD budget requires a channel that can honor one: {}/{} reports hard_budget_capable=false ({})",
+                    planner_app, contract.billing_channel, contract.hard_budget_blocker
+                ))
+                .unwrap_or_else(|| format!(
+                    "no billing contract exists for {planner_app}; a hard USD budget cannot be evaluated"
+                ));
+            block_team(blocker)?;
             return Ok(());
         }
         // Dispatch without a USD cap has the same cost posture as fixed
@@ -324,6 +357,12 @@ async fn execute_team(
             .teams
             .store
             .set_planner(id, record.revision, selected.binding.clone())?;
+        // The routing estimate is a team-level token-budget figure. Reservations
+        // carry it with an explicit in-flight safety margin and amortize it
+        // across the plan's nodes; per-node token splits are not claimed.
+        routing_estimate = decision
+            .selected_estimated_cost_usd
+            .map(|cost| cost * ROUTING_RESERVATION_MARGIN);
         service.teams.store.append_event(
             id,
             "binding_applied",
@@ -331,14 +370,30 @@ async fn execute_team(
                 "planner": selected.binding,
                 "quality_score": decision.selected_quality_score,
                 "estimated_cost_usd": decision.selected_estimated_cost_usd,
+                "reservation_margin": ROUTING_RESERVATION_MARGIN,
                 "epoch_id": decision.epoch_id,
                 "identity_mapping_version": decision.identity_mapping_version,
-                "note":"selected binding applied as planner and default node executor"
+                "note":"selected binding applied as planner and default node executor; reservations amortize the team-level estimate across nodes"
             }),
         )?;
     }
     if record.request.budget_usd.is_some() {
-        service.teams.store.transition(id,&[TeamStatus::Running],TeamStatus::Blocked,Some("The native tool's billing channel and spending limit cannot yet be verified. A USD budget cannot be enforced; choose fixed execution without a USD cap, or wait for billing attestation."))?;
+        let planner_app = record.request.planner.app_id.clone();
+        let reason = crate::account_billing::channel(&planner_app, crate::account_billing::CHANNEL_API)
+            .or_else(|| crate::account_billing::channel(&planner_app, crate::account_billing::CHANNEL_SUBSCRIPTION))
+            .map(|contract| format!(
+                "a hard USD budget requires a channel that can honor one: {}/{} reports hard_budget_capable=false ({})",
+                planner_app, contract.billing_channel, contract.hard_budget_blocker
+            ))
+            .unwrap_or_else(|| format!(
+                "no billing contract exists for {planner_app}; a hard USD budget cannot be evaluated"
+            ));
+        service.teams.store.transition(
+            id,
+            &[TeamStatus::Running],
+            TeamStatus::Blocked,
+            Some(&reason),
+        )?;
         return Ok(());
     }
     active_check(&cancel, deadline)?;
@@ -453,22 +508,26 @@ async fn execute_team(
                 .executor
                 .clone()
                 .unwrap_or_else(|| record.request.planner.clone());
-            let attempt =
-                match service
-                    .teams
-                    .store
-                    .begin_attempt(id, &node.spec.id, binding.clone(), None)
-                {
-                    Ok(attempt) => attempt,
-                    Err(error) if !running.is_empty() => {
-                        tracing::debug!(%error,"node will wait for current write scopes");
-                        continue;
-                    }
-                    Err(error) => {
-                        failure = Some(error);
-                        break;
-                    }
-                };
+            // Amortize the team-level routing estimate across the current plan;
+            // None for fixed/assigned teams (no routing decision exists).
+            let node_estimate =
+                routing_estimate.map(|total| total / record.nodes.len().max(1) as f64);
+            let attempt = match service.teams.store.begin_attempt(
+                id,
+                &node.spec.id,
+                binding.clone(),
+                node_estimate,
+            ) {
+                Ok(attempt) => attempt,
+                Err(error) if !running.is_empty() => {
+                    tracing::debug!(%error,"node will wait for current write scopes");
+                    continue;
+                }
+                Err(error) => {
+                    failure = Some(error);
+                    break;
+                }
+            };
             let service = Arc::clone(&service);
             let workspace = Arc::clone(&workspace);
             let git_gate = Arc::clone(&git_gate);
@@ -496,6 +555,14 @@ async fn execute_team(
                         NodeStatus::Failed,
                         Some(&short_error(error)),
                         None,
+                    );
+                    // A failed attempt that already launched its child keeps the
+                    // reserved amount charged (conservative); unlaunched ones are
+                    // reconciled at run end.
+                    let _ = service.teams.store.settle_attempt_reservation(
+                        &id,
+                        &spec.id,
+                        attempt.number,
                     );
                     if let Ok(Some(record)) = service.teams.store.get(&id) {
                         if let Some(child) = record
@@ -1031,6 +1098,12 @@ async fn execute_node(
     drop(guard);
     active_check(&cancel, deadline)?;
     service.teams.store.set_attempt_status(id,&spec.id,number,NodeStatus::Succeeded,None,Some(json!({"git":artifact,"integration":integration,"workflow_id":child.id,"verification":"declared file scope and Git integration checked; final acceptance commands still required"})))?;
+    // Conservative settlement: no confirmed invoice source exists, so the
+    // reserved amount stays charged until one does.
+    service
+        .teams
+        .store
+        .settle_attempt_reservation(id, &spec.id, number)?;
     Ok(())
 }
 

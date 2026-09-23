@@ -62,6 +62,11 @@ pub struct ChannelContract {
     pub reset_cycle: FieldAttestation,
     /// 该渠道的机会成本说明。
     pub opportunity_cost: &'static str,
+    /// 该渠道当前能否兑现硬 USD 预算：需要提供商确认的账单或可强制的中断
+    /// 机制。没有确认来源前一律 false；`budget_usd` 团队据此阻塞。
+    pub hard_budget_capable: bool,
+    /// `hard_budget_capable=false` 的具体原因（结构化进入阻塞事件）。
+    pub hard_budget_blocker: &'static str,
 }
 
 const API_SPEND: FieldAttestation = unknown(
@@ -73,6 +78,8 @@ const API_BALANCE: FieldAttestation = unknown(
 const API_RATE: FieldAttestation = unknown(
     "per-account rate limits depend on the provider tier and are not published in a machine-readable form integrated here",
 );
+const CAP_FALSE: &str = "no provider-confirmed invoice source is integrated on this channel; in-flight requests cannot be force-stopped at a USD boundary, so a hard cap cannot be honored";
+
 const API_RESET: FieldAttestation = unknown(
     "metered API spend has no attested billing or quota reset period in the integrated sources",
 );
@@ -103,6 +110,8 @@ const fn api_channel(app_id: &'static str) -> ChannelContract {
         reset_cycle: API_RESET,
         opportunity_cost:
             "metered USD per token at the official list price; no subscription quota is consumed",
+        hard_budget_capable: false,
+        hard_budget_blocker: CAP_FALSE,
     }
 }
 
@@ -118,6 +127,8 @@ const fn subscription_channel(app_id: &'static str) -> ChannelContract {
         rate_limits: SUB_RATE,
         reset_cycle: SUB_RESET,
         opportunity_cost: SUB_OPPORTUNITY,
+        hard_budget_capable: false,
+        hard_budget_blocker: CAP_FALSE,
     }
 }
 
@@ -312,6 +323,18 @@ mod tests {
     }
 
     #[test]
+    fn no_channel_claims_a_hard_budget_without_a_confirmed_source() {
+        for contract in CATALOG {
+            assert!(
+                !contract.hard_budget_capable,
+                "{}/{} must not claim a hard cap",
+                contract.app_id, contract.billing_channel
+            );
+            assert!(!contract.hard_budget_blocker.trim().is_empty());
+        }
+    }
+
+    #[test]
     fn catalog_json_keeps_its_fields() {
         let value = catalog_json();
         let entries = value.as_array().unwrap();
@@ -328,6 +351,8 @@ mod tests {
                 "rate_limits",
                 "reset_cycle",
                 "opportunity_cost",
+                "hard_budget_capable",
+                "hard_budget_blocker",
             ] {
                 assert!(entry.get(field).is_some(), "missing field {field}");
             }
