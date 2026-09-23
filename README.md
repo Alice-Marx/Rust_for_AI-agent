@@ -14,7 +14,7 @@ Work/Chat 推理档位在创建时保存，并与 Teams 共用固定配置。升
 
 **Teams 已支持固定官方执行器自动拆解任务，以及逐节点指定模型的 DAG 执行。** 节点在独立 Git 工作区运行，受依赖、写入范围、并发数、重试和总时限约束；集成后运行用户预先指定的验证命令。桌面、Rust CLI、npm CLI 共用持久状态与权限流程。
 
-**按模型质量和成本自动选择执行器尚未启用。** 每轮条件检查重新获取 LiveBench 与官方价格，当前 Automatic 刷新后仍转为 Blocked；模型身份、计费渠道和订阅额度尚待核验。`POST /api/v1/teams/{id}/routing/preview` 做在线证据绑定和可解释候选预览；创建 Team 时可保存 `routing_policy`，`POST /api/v1/teams/{id}/routing/preview/saved` 按保存约束重新在线预览，`GET /api/v1/teams/{id}/routing/preview` 只读重放最近一次已持久化决策。它们都不启动模型，也不解除该阻塞。预算账本已有实现，但带 USD 上限的原生任务当前不能执行。Kimi Node、MiniMax、MiMo 和 ZCode 当前通过交互终端使用；插件市场、定时任务、远程主机、PR 与网站面板仍属于后续范围。详见 [0.11.0 使用说明与边界](docs/RELEASE-0.11.0.md)。
+**按模型质量和成本自动选择执行器尚未启用。** 每轮条件检查重新获取 LiveBench 与官方价格，当前 Automatic 刷新后仍转为 Blocked；模型身份、计费渠道和订阅额度尚待核验。`POST /api/v1/teams/{id}/routing/preview` 做在线证据绑定和可解释候选预览；创建 Team 时可保存 `routing_policy`，`POST /api/v1/teams/{id}/routing/preview/saved` 按保存约束重新在线预览，`GET /api/v1/teams/{id}/routing/preview` 只读重放最近一次已持久化决策。它们都不启动模型，也不解除该阻塞。预算账本已有实现，但带 USD 上限的原生任务当前不能执行。Kimi Node、MiniMax 和 MiMo 可通过交互终端使用；ZCode 尚无可验证的公开发行物或 Wonderland 受管入口。插件市场、定时任务、远程主机、PR 与网站面板仍属于后续范围。详见 [0.11.0 使用说明与边界](docs/RELEASE-0.11.0.md)。
 
 应用页新增“检测安装”，显示实际入口、版本、文件指纹与适配器能力。检测不会调用模型或把“已安装”当作“已登录”。Claude 受管适配验证版本为 2.1.193；DeepSeek 为 0.1.6-alpha.2。未知版本保持手动终端可用，受管调用会要求先验证协议。
 

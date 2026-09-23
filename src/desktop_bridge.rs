@@ -214,7 +214,7 @@ pub fn official_apps() -> Vec<AppMetadata> {
             false,
             "zcode-v4",
             "anytool/zai/ZCode;ZCode",
-            "手动终端候选；Protocol V4 需独立适配及版本验证",
+            "无可验证公开发行物；仅作用户自备程序的手动终端候选，不能受管执行",
         ),
         (
             "wonderland",
@@ -493,7 +493,7 @@ pub fn default_cli_profiles() -> Vec<CliProfile> {
             "zcode",
             "ZCode",
             "zcode",
-            "请按 zai-org/ZCode 官方说明安装或构建 ZCode CLI",
+            "暂无可验证官方发行物；仅在已独立核验本地 zcode 程序时指定其路径",
         ),
         (
             "wonderland",

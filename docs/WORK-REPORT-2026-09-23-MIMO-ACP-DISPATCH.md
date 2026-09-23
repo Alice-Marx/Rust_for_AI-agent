@@ -36,6 +36,6 @@
 ## 边界与未完成
 
 1. **mimo 真实账号验证未做**（用户将自行登录执行 H09 步骤 7–8：真实握手、推理、取消/失败注入、脱敏 fixture、固定指纹回填）。在实测前不宣称 mimo 有真实模型执行能力。
-2. grok-build / kimi-code / minimax-code 同为 ACP，**按同框架接 dialect 即可**（评估报告给出各自待读细节）；ZCode 走自有 app-server 协议路径；opencode Go 版暂不接。
+2. grok-build / kimi-code / minimax-code 同为 ACP，**按同框架接 dialect 即可**（评估报告给出各自待读细节）；ZCode 的自有协议审计已完成，但没有官方可验证发行物，保持未接入，详见 [ZCode 审计报告](WORK-REPORT-2026-09-23-ZCODE-AUDIT.md)；opencode Go 版暂不接。
 3. Automatic 带硬预算（`budget_usd`）仍阻塞到 H04 预算结算闭环；订阅渠道派工仍按计费合同阻塞。
 4. Automatic 无预算路径的**真实跨厂商成功实例**待账号验证后按 [ROADMAP](ROADMAP-2026-09-23.md) H01 第 4 步归档。

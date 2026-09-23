@@ -57,5 +57,5 @@
 | Grok H01/H09 真实闭环 | 代码和离线 fixture 完成；无本机官方安装、账号握手或真实推理，固定发布指纹为空 | 用户登录后按上节矩阵执行；把脱敏帧固化到测试，回填官方二进制摘要；若真实 wire 与固定合同不符则继续失败关闭并升级显式版本 profile |
 | Grok 恢复/分叉 | 上游广告 resume/list/load，但 Wonderland `resume/fork=false` | 按 H05 保存 session ID、工具版本/摘要、模型/档位和 workspace revision；会话存在、版本兼容、目录一致、审批可重建四项同时通过后再开放 |
 | Automatic 身份种子 | Grok 未加入 LiveBench attestation，因此不能成为 Automatic 候选 | 找到官方精确模型名与同一榜单 byte-identical 行，按 identity v1.1 双证据合同加入；无证据继续 unknown，显式指定 Grok 仍可用 |
-| ZCode G2 | 固定源码归档已取得，npm 3.14.0 与源码 0.16.9 对应关系未证实 | 先下载 npm tarball、记录 integrity/文件清单并对照固定提交；证实后再按自有 stdio app-server 写独立 transport，不套 ACP 假设 |
+| ZCode G2 | 发行物与协议审计完成：三个源码包均 private、两个精确 npm 查询无包、GitHub 无 release；源码为初始 JSON 握手后接自有二进制 RPC | 等官方可验证发行物，先记录来源/版本/SHA-256/启动命令，再按实际协议写独立 transport；详情见 [ZCode 审计报告](WORK-REPORT-2026-09-23-ZCODE-AUDIT.md) |
 | H04/H05/H07/H08/H10 | 与本次 Grok 适配相互独立，仍按总路线图推进 | 先完成账号闭环和硬预算预留/结算，再做恢复分叉；插件/远程/PR/网站、沙箱/MCP 和实验分别按既有验收门槛实施 |

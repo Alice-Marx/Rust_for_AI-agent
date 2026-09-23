@@ -436,11 +436,11 @@ npm test --prefix packaging/npm/wonderland-cli
 
 ### H09：官方工具升级与更多应用适配
 
-**已评估并推进（2026-09-23，见 [anytool 接入评估](ANYTOOL-ADAPTER-ASSESSMENT-2026-09-23.md)）**：ACP 是 anytool 候选工具的收敛协议。MiMo、Kimi Code、MiniMax Code 与 Grok Build 均已通过独立 dialect 接入；Grok 另扩展了通用 ACP 的可选非交互 authenticate 生命周期，离线验证覆盖身份、模型/档位、权限、x.ai 扩展、usage 与取消，真实官方 1.0.38 安装和账号握手仍待 H01。ZCode 是自有 app-server 协议，下一步先核对 npm 发布物与固定源码提交；opencode Go 主干无结构化入口暂不接。所有新增工具的真实握手/推理与固定发布指纹仍须按 H09 步骤 7–8 验证。
+**已评估并推进（2026-09-23，见 [anytool 接入评估](ANYTOOL-ADAPTER-ASSESSMENT-2026-09-23.md)）**：ACP 是 anytool 候选工具的收敛协议。MiMo、Kimi Code、MiniMax Code 与 Grok Build 均已通过独立 dialect 接入；Grok 另扩展了通用 ACP 的可选非交互 authenticate 生命周期，离线验证覆盖身份、模型/档位、权限、x.ai 扩展、usage 与取消，真实官方 1.0.38 安装和账号握手仍待 H01。ZCode 审计已确认其源码是 `zcode-hello`/`hello-ack` 后接 `@zcode/rpc` 二进制帧的自有协议，但三个候选源码包均 private、精确 npm 查询无包、GitHub 无 release；详见 [ZCode 审计报告](WORK-REPORT-2026-09-23-ZCODE-AUDIT.md)。没有官方可验证发行物前，不创建受管适配器或猜测启动命令。opencode Go 主干无结构化入口暂不接。所有新增工具的真实握手/推理与固定发布指纹仍须按 H09 步骤 7–8 验证。
 
 **位置：** `src/desktop_bridge.rs`、`src/app_diagnostics.rs`、`src/native_executor/`、`anytool/`、`REFERENCES.md`。
 
-优先选有稳定结构化协议且允许明确模型/权限控制的官方工具。Kimi Node、MiniMax、MiMo、ZCode 等目前的手动入口需要逐项评估，不能仅复制 Codex 的 JSON 字段后宣称受管适配。厂商无合适协议时保留终端入口，并写明限制。
+优先选有稳定结构化协议且允许明确模型/权限控制的官方工具。Kimi Node、MiniMax、MiMo 的手动入口需要逐项评估，不能仅复制 Codex 的 JSON 字段后宣称受管适配。ZCode 仅在用户已独立核验本地程序时可作为手动终端候选；厂商无可验证发行物或合适协议时，不声明终端命令为官方受管入口。
 
 **验收门槛：** 一个新工具按第 12 节完成身份、配置、审批、取消、事件、计费语义、真实任务和文档，再纳入候选分配。保持主程序适配层可随上游升级，不创建难同步的隐式 fork。
 

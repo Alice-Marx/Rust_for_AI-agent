@@ -100,7 +100,7 @@ LiveBench 约束不扩大为阻止用户打开应用：用户直接指定模型�
 | DeepSeek Harness | 原生工作区、CLI、指定任务与团队 | 明确运行 profile，按 ACP/headless 能力验收 |
 | MiniMax Code | 原生工作区、`mcode` CLI、指定任务与团队 | 本地 origin 指向 MiniMax-AI/minimax-code，README 明确公开 TUI/headless/ACP，未公开桌面应用源码 |
 | MiMo Code | 优先 ACP 原生工作区、`mimo` CLI；按需适配其 HTTP 服务 | 本地 origin 指向 XiaomiMiMo/MiMo-Code；当前 Web 入口禁用，Web/App/Desktop 标为未维护，不能由 serve 推断可内嵌完整网页应用 |
-| ZCode | ZCode 自有协议工作区、`zcode` CLI、官方本地 Web 面板 | 本地 origin 指向 zai-org/ZCode；TUI/`--web`/Agent 入口均存在，自有协议不当作通用 ACP，按版本验证 |
+| ZCode | 暂不纳入受管工作区；仅在用户已独立核验本地程序时保留手动终端候选 | 固定源码有自有 stdio/HTTP RPC，但根包和 CLI 包均 private，精确 npm 查询无发行物、GitHub 无 release；没有可验证的公开启动命令或版本摘要，详见 [ZCode 审计报告](WORK-REPORT-2026-09-23-ZCODE-AUDIT.md) |
 
 `anytool/` 等本地目录作为只读参考/导入来源，不作为强制运行依赖。工具可以位于用户其他目录或远程主机；安装版和源码构建入口都有清晰版本身份。下载、构建和安装采用各工具支持的方式，完成后探测能力；更新不得修改正在运行任务的工具版本。
 
@@ -110,7 +110,7 @@ LiveBench 约束不扩大为阻止用户打开应用：用户直接指定模型�
 
 MiMo README 虽支持其他厂商账号和自定义 provider，托管任务仍遵守用户的模型→自身官方工具映射：OpenAI 任务交给 Codex，不能因为 MiMo 可以连接该账号就交给 MiMo 代执行。其余多 provider 工具同理。
 
-适配前的已知差异：MiniMax ACP 当前声明不支持图片/音频输入，需要 `ask` 授权往返的任务走 TUI/ACP；MiMo 的 SDK 启动辅助函数仍有旧 `opencode` 命令/日志约定，不能假定可直接启动当前发行物；ZCode 含旧协议与 V4，非交互 prompt 的默认权限较宽，应显式设置并验证，网关返回的实际模型也须核对。ZCode 目前的 Computer Use 占位实现不能作为已具备桌面远控的证据。
+适配前的已知差异：MiniMax ACP 当前声明不支持图片/音频输入，需要 `ask` 授权往返的任务走 TUI/ACP；MiMo 的 SDK 启动辅助函数仍有旧 `opencode` 命令/日志约定，不能假定可直接启动当前发行物；ZCode 的固定源码虽有初始 JSON 握手和自有二进制 RPC，但尚无可验证发行物，不能推断公开命令、权限默认值或网关模型回读。其 Computer Use 占位实现也不能作为已具备桌面远控的证据。
 
 ## 5. 新建任务、项目与看板
 
@@ -252,5 +252,5 @@ GUI、原生 CLI、npm 客户端共用后台任务状态。PR、定时器、远�
 - 现有主工程：[桌面工作台](../src/bin/desktop/workbench.rs)、[CLI 桥接](../src/desktop_bridge.rs)、[服务入口](../src/api.rs)。当前工作台主要面板为 Chat、Files、Changes、CLI，上述完整产品导航及功能仍需建设。
 - 2026-09-21 只读检查本地 `anytool/minimax/minimax-code/README.md`、`package.json` 与 git 来源；上游 [MiniMax-AI/minimax-code](https://github.com/MiniMax-AI/minimax-code)。
 - 同日检查 `anytool/mimo/MiMo-Code/README.md` 与 git 来源；上游 [XiaomiMiMo/MiMo-Code](https://github.com/XiaomiMiMo/MiMo-Code)。
-- 同日检查 `anytool/zai/ZCode/README.md`、`package.json` 与 git 来源；上游 [zai-org/ZCode](https://github.com/zai-org/ZCode)。
+- 同日检查 `anytool/zai/ZCode/README.md`、`package.json` 与 git 来源；随后完成 [ZCode 发行物与协议审计](WORK-REPORT-2026-09-23-ZCODE-AUDIT.md)，上游 [zai-org/ZCode](https://github.com/zai-org/ZCode)。
 - 其他官方工具接口依据总方案所列文档与源码核查记录，真实安装版仍需重新探测。以上链接用于定位参考来源，不表示本次已完成所有上游在线认证或模型测试。

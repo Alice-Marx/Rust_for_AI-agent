@@ -37,5 +37,5 @@
 | --- | --- |
 | **H04 确认账单和硬预算** | 只在获得提供商确认金额和可中断在途请求的证据后，为相应渠道设置 `hard_budget_capable=true`；把确认金额传给 `settle_reservation(Some(actual))`，其余渠道继续阻塞。 |
 | **H01 真实账号闭环** | 用最终 Windows 安装包分别登录各官方工具，执行脱敏的握手、推理、权限、取消和失败注入，并归档证据。 |
-| **H09 ZCode** | 先核对 npm 发布物与固定源码的对应关系；证据充分后再按其独立 app-server 协议实现受管 transport。 |
+| **H09 ZCode** | 发行物审计已完成：源码包均 private、精确 npm 查询无包、GitHub 无 release；等待官方可验证发行物后，再按实际初始 JSON 握手和二进制 RPC 实现独立 transport。详见 [ZCode 审计报告](WORK-REPORT-2026-09-23-ZCODE-AUDIT.md)。 |
 | **安装包** | 在剩余无需账号的代码、离线测试和桌面检查完成后，生成并校验 Windows 安装器和便携包，供用户自行进行真实登录测试。 |

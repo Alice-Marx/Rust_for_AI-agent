@@ -60,6 +60,7 @@ Windows 全目标回归通过：404 项库测试、3 项 Rust CLI、18 项桌面
 - [2026-09-23 预算接线](WORK-REPORT-2026-09-23-BUDGET-WIRING.md)：H04 第一片——预留/保守结算/对账接入派工路径，渠道硬预算能力合同。
 - [2026-09-23 预算恢复](WORK-REPORT-2026-09-23-BUDGET-RECOVERY.md)：H04 第二片——服务重启预留对账、历史 Interrupted 团队扫描和幂等性测试。
 - [2026-09-23 Grok Build ACP 接入](WORK-REPORT-2026-09-23-GROK-DIALECT.md)：受管执行器扩至 8 个；完成非交互认证、模型/档位回读、权限、usage 与离线完整生命周期，真实账号握手待做。
+- [2026-09-23 ZCode 发行物与协议审计](WORK-REPORT-2026-09-23-ZCODE-AUDIT.md)：确认私有源码包、缺失的公开发行物与实际自有 RPC；ZCode 尚未进入受管执行器。
 - [2026-09-22 源码获取工作报告](WORK-REPORT-2026-09-22-UPSTREAM-ACQUISITION.md)：Git Smart HTTP 不可达时的官方归档回退、验证结果与未解决网络限制。
 - [2026-09-22 最终交接整理报告](WORK-REPORT-2026-09-22-FINAL-HANDOFF.md)：文件分类、完成项、未完成项和交付前检查。
 

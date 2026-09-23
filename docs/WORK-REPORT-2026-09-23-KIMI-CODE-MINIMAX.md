@@ -42,7 +42,7 @@
 | 任务 | 思路与方式 |
 | --- | --- |
 | **grok-build 接入** | 先确认 server 暴露：读 `xai-grok-agent` 的启动方式（是否有 headless/serve 模式或可复用的 ACP agent 入口）；若有则写 `GrokDialect`（身份/模型值格式从其 proto 定义核对）+ 二进制定位（Rust 产物，非 npm）；若只有 pager 客户端形态，则记录为「不提供 server，只能终端手动」并更新评估报告 |
-| **ZCode 接入** | 走自有 app-server 协议路径（同 codex 适配模式）：读 `apps/zcode-cli/packages/contracts` 的消息 schema，实现独立 transport（不复用 ACP 框架），版本锁定 `@zcode/cli` 3.14.0 |
+| **ZCode 接入** | 发行物审计已完成但仍未接入：源码包均 private、精确 npm 查询无包、GitHub 无 release；等待官方可验证安装物后，按实际初始 JSON 握手和二进制 RPC 写独立 transport（不复用 ACP）。详见 [ZCode 审计报告](WORK-REPORT-2026-09-23-ZCODE-AUDIT.md)。 |
 | **两个 CLI 的路由策略命令** | Rust CLI 加 `team routing save <id> --file policy.json` / `team routing preview <id>` / `team routing replay <id>`（透传 HTTP 三接口）；npm CLI 同步等价命令。改 `src/bin/wonderland-cli.rs` 与 `packaging/npm/wonderland-cli/bin/wonderland.js` + 两边测试 |
 | **桌面阻塞原因面板（H06 起步）** | Teams 界面读 `/api/v1/pricing` 的 `dispatch_readiness.missing` 与 `routing_decision` 事件，渲染「为什么阻塞/为什么选它」面板（`src/bin/desktop/teams.rs`），如实呈现后端事实 |
 | **H04 预算闭环** | 派工前按 `estimated_cost_usd` 上浮安全系数走 `team_store` 既有微美元账本预留，终态/取消结算释放，重启扫未结算预留对账；适配器把 usage 事件映射到 attempt 账目（mimo 的 `reported_cost_usd` 标注为非确认值）。只有闭环后才解除 `budget_usd` 阻塞 |

@@ -1,6 +1,6 @@
 # 总项目任务报告
 
-日期：2026-09-23（含 Grok Build ACP、H04 预算接线与服务重启恢复）
+日期：2026-09-23（含 Grok Build ACP、H04 预算接线与服务重启恢复、ZCode 发行物审计）
 仓库：[Alice-Marx/Rust_for_AI-agent](https://github.com/Alice-Marx/Rust_for_AI-agent)，当前分支 `main`；H04 第一片为 `8db113f`，服务重启恢复作为当前增量
 版本基线：0.11.0（`24dbf54`）+ main 后续开发；本轮交付见「一·本轮交付」
 配套文档：[文档指南](DOCUMENT-GUIDE-2026-09-23.md)（每份文档的用途）、[后续路线图](ROADMAP-2026-09-23.md)（H01–H10 分解）
@@ -30,7 +30,7 @@ API Agent 与 SSE、Rust egui 桌面、Rust/npm 双 CLI、官方工具 Work/Chat
 - **通用 ACP 会话引擎**（`native_executor/acp.rs`）：从 DeepSeek transport 泛化（帧循环/生命周期/权限/取消），方言差异收敛为 `AcpDialect` trait；**上游子模块零修改**，适配全在 Wonderland 侧。
 - 新接入 **mimo**（@mimo-ai/cli 0.1.15）、**kimi-code**（@moonshot-ai/kimi-code 2.0.2）、**minimax-code**（0.5.2）——方言细节全部按上游源码逐项核对并 fail-closed。
 - 新接入 **Grok Build**（xAI CLI 1.0.38）：`grok agent stdio`、非交互 authenticate、模型/档位精确回读、一次性权限、x.ai 扩展、usage 与取消均已完成离线协议验证；真实账号握手仍待 H01。
-- 协议评估结论：ACP 是 anytool 工具收敛点；ZCode 走自有 app-server 协议；opencode Go 版无结构化入口。
+- 协议评估结论：ACP 是 anytool 工具收敛点；ZCode 源码使用自有 RPC，但没有可验证公开发行物，尚未接入；opencode Go 版无结构化入口。
 
 ### 当前能力边界（诚实声明）
 
@@ -41,7 +41,7 @@ API Agent 与 SSE、Rust egui 桌面、Rust/npm 双 CLI、官方工具 Work/Chat
 1. **两个 CLI 的路由策略命令完成**（原「未完成任务」表第 3 行）：Rust CLI 与 npm CLI 均新增 `team routing preview <id> --file <policy.json>`（显式约束在线预览，typed JSON 校验）、`team routing saved <id>`（用团队保存的 routing_policy 预览）、`team routing replay <id>`（重放最新持久化决策，不刷新网络）。三个命令严格透传既有 HTTP 合同，ID 单段 URL 编码，非法参数不发请求。
 2. **桌面 Teams 阻塞原因面板完成**（H06 起步项）：Teams 详情页新增「路由决策」区，渲染 `routing_decision`/`binding_applied`/`routing_preview` 事件——决策状态、解释、逐候选状态与拒绝原因、质量分/估算成本、epoch 与身份映射版本证据链；价格面板新增 `dispatch_readiness` 就绪状态与 `missing` 阻塞清单、`automatic_dispatch` 两档状态文案（改为读取后端事实，移除已过时的「Automatic 尚未开放自动价格调度」硬编码文案）。
 3. **Grok Build 受管 ACP 接入完成（离线）**：通用 ACP runner 新增 initialize 后、session/new 前的可选 authenticate 生命周期；Grok 方言固定官方版本 1.0.38，校验 `_meta.grokShell` / `_meta.agentVersion`，只选择 `xai.api_key` 或 `cached_token`，并强制 `_meta.headless=true`。模型、reasoning effort、provider、一次性权限、x.ai 扩展、usage、取消和进程回收均有离线 fixture。GitHub 子模块提交 `4247f661689354b831191f11eeeac8424993fe3d` 与归档内 `SOURCE_REV=9bb727ccdff0a793ee73bcde4e2e09cbef6b5387` 分属归档提交和 monorepo 同步点，已通过同一不可变 codeload 归档核对，并非冲突。真实官方程序和账号推理仍待实测。
-4. **ZCode 源码取回待深读**：按固定提交 `872ad96` 取回（`upstream-study/ZCode`）。monorepo 结构确认（`apps/zcode-cli`、`packages/server|rpc|zcode-server-cli`），接入仍按自有 app-server 协议（codex 模式独立 transport）；注意源码仓 `apps/zcode-cli` 版本显示 0.16.9 且标 private，实现前需先核对 npm 发布物 `@zcode/cli` 3.14.0 与该提交的对应关系。
+4. **ZCode 发行物与协议审计完成**：固定源码 `872ad96` 的根包、`apps/zcode-cli`、`packages/zcode-server-cli` 都标为 private；`@zcode/cli@3.14.0` 与 `zcode@3.14.0` 的精确 npm 查询均为 E404，官方 GitHub 无 release。源码的 stdio 入口先做 JSON `zcode-hello`/`hello-ack`，后续是 `@zcode/rpc` 的 13 字节头二进制帧；它既非 ACP 也非 Codex app-server JSON。没有可验证发行物时不写受管适配器、不采用第三方同名包。详见 [ZCode 审计报告](WORK-REPORT-2026-09-23-ZCODE-AUDIT.md)。
 5. **H01 Codex 身份回读第一步**：新增脱敏 `NativeIdentity`，Codex 执行前通过官方 app-server `config/read`、`account/read` 和 `thread/start` 保存配置模型/档位、`api` 或 `subscription` 渠道、ChatGPT 计划档位，以及线程回读的生效模型/提供商/默认档位。账户邮箱不进入身份事件；账户未登录或账号类型不受支持时，在发送提示前失败关闭。
 6. **H01 其他原生工具身份回读扩展**：Claude 保存固定 CLI 版本/二进制指纹、已应用模型/档位、first-party provider 边界及成功结果里的模型用量；ACP 通用会话引擎保存工具版本/指纹、会话配置模型、已选择模型，以及模型 ID 明确携带的 provider（DeepSeek、MiMo、MiniMax、Grok）；DeepSeek 与 Grok 另回读 reasoning effort。Grok 仅在明确选择 `xai.api_key` 且认证成功后记录 API 计费渠道；缓存令牌不推断渠道或账号计划。Kimi Code 的模型 ID 不携带 provider，故 provider 保持 unknown；Python Kimi 保存受限后的本地精确模型配置，但协议不回显实际生效模型。真实账户闭环尚未完成。
 7. **H04 usage 与账本接线（部分完成）**：规划 child、执行/评审 child 与每次重试结束时，把原生工具 `usage` 事件按 `workflow_id` 归入 `usage_observed` Teams 事件，并标记 phase、node、attempt、app、model、effort。Automatic 决策估算以 1.25 系数平摊预留，attempt 终态按预留额保守结算，运行结束、重跑和重启均有对账；Claude CLI 与 MiMo harness 报告的 USD 值仍标成未确认来源，不做快照求和。**美元预算仍在派工前阻塞**：没有提供商确认账单或可强制在途中断的证据，不能把 usage 或列价当作硬预算。
@@ -50,10 +50,11 @@ API Agent 与 SSE、Rust egui 桌面、Rust/npm 双 CLI、官方工具 Work/Chat
 10. **npm CLI 预览发布完成**：npm registry 已占用 0.11.0，因此新包使用版本 0.11.1（兼容后端 0.11.0），发布到 `next`；`latest` 保持 0.7.0。发布包仅含许可证、README、两个 CLI 脚本和 package.json。registry integrity 为 `sha512-nm/ojEZyHK7jQM89AqvpiQ9ZUBQcb4uUCkZHxiDX7tVprlBzwpFAFzSLgXTmigAeHDuKtv6jQVOkLsJGF10zhw==`，SHA-1 `bfe8f5d814c18cf9ef773e732fdf15ed0558f0f7`，本地与重新下载 registry tarball 的 SHA-256 均为 `F06B76B511DDBD0E7BBFB65935DB2A6CE6CBACBBD27E4E544D8FD141DE3F853C`。
 11. **GitHub main 整合**：PR [#2](https://github.com/Alice-Marx/Rust_for_AI-agent/pull/2) 已合并，main 合并提交 `aab19524ffb01e8444a39a2efc007a73e1d6423a`；合并后 GitHub Actions 的 Windows、Ubuntu、macOS 检查全部通过。此交付推送的是源码与报告；本轮没有重建或上传新的 Windows 桌面发行资产。
 12. **H04 服务重启预留恢复**：当前启动中断的团队在 `recover_interrupted` 的同一事务内关闭 hold，已有的 Interrupted 团队也在服务启动时扫描并对账；事件记录每笔处理结果，重复启动保持幂等。详见[预算恢复报告](WORK-REPORT-2026-09-23-BUDGET-RECOVERY.md)。
+13. **H09 ZCode 审计报告**：已把发行物缺失和协议事实写入路线图、交接和来源记录。此项不依赖真实账号；后续只能在官方可验证安装物出现后继续，真实账号登录留给适配器与离线 fixture 完成之后。
 
 ### 本轮报告对账
 
-修正了待办表中已实现的 CLI 命令与桌面面板状态；Grok Build 已从协议线索推进到第 8 个受管执行器，并完成全离线生命周期和负路径验证。源码归档两个 SHA 的含义已核对并记录到溯源清单。Codex 与其他原生工具身份字段均通过脱敏事件持久化。桌面真实窗口检查、Grok 官方安装/账号握手和其余依赖登录的 H01 实测仍待完成。
+修正了待办表中已实现的 CLI 命令与桌面面板状态；Grok Build 已从协议线索推进到第 8 个受管执行器，并完成全离线生命周期和负路径验证。源码归档两个 SHA 的含义已核对并记录到溯源清单。ZCode 的源码协议也已读完，但由于没有官方发行物而保持未接入。Codex 与其他原生工具身份字段均通过脱敏事件持久化。桌面真实窗口检查、Grok 官方安装/账号握手和其余依赖登录的 H01 实测仍待完成。
 
 ## 二、各文件的说明
 
@@ -154,9 +155,9 @@ API Agent 与 SSE、Rust egui 桌面、Rust/npm 双 CLI、官方工具 Work/Chat
 | **两个 CLI 的路由策略命令** | 实现、自动测试完成；随提交 `03a8ff9` 交付 | 已提供 `preview/saved/replay`，严格透传既有 HTTP 合同；无需额外 CLI 测试 |
 | **桌面阻塞原因面板（H06 起步）** | 实现、桌面自动化测试完成；随提交 `03a8ff9` 交付 | 已渲染 `dispatch_readiness.missing` 与路由事件；还需按本报告手工检查事件差异、长解释和空数据情形 |
 | **Grok Build 真实闭环** | 第 8 个受管执行器的代码、离线 fixture、应用注册和文档已完成；`resume/fork=false`，无真实安装/账号推理证据，固定发布二进制摘要待回填 | 安装官方 1.0.38，分别用 `XAI_API_KEY` 与缓存令牌完成握手；执行真实推理、允许/拒绝、取消、认证失败和 usage 归档，保存脱敏 fixture 并回填发布指纹。真实 wire 不符时继续失败关闭并新增显式版本 profile |
-| **ZCode 接入** | 源码已取回，发布物对应关系待核 | 核对 `@zcode/cli@3.14.0` 与源码提交，再按其 app-server 协议实现独立 transport；不复用 ACP 假设 |
+| **ZCode 接入** | 发行物与协议审计完成；未接入。源码包均 private，精确 npm 查询无包，GitHub 无 release；源码是初始 JSON 握手后接二进制 RPC | 等官方 tarball、签名 release 资产或安装器；先固定来源、版本、SHA-256、启动命令，再按实测协议写独立 transport 与离线 fixture，最后再做真实登录 |
 | **H05 恢复/分叉** | 新增终态独立 workflow → 新 Draft 的 duplicate API/CLI（不复制 session/output、不自动启动；团队 child 禁止脱离父团队复制）；所有适配器 `resume/fork=false` | 继续完善终态状态/HTTP/CLI覆盖；注入崩溃、断网、审批等待、进程残留和集成中取消。后续按适配器持久化 session ID、工具版本/配置、workspace revision 并实测可恢复性；分叉历史与 Teams attempt 重试单独定合同，未验证前保持 false |
 | **Windows 安装包交付** | 用户要求在无需账号的开发完成后交付安装器，用于自行登录实测 | 完成剩余离线开发与全回归后构建 release 二进制、Inno Setup 安装器和便携 ZIP，检查文件清单与 SHA-256；安装包不包含账号、OAuth token 或测试数据 |
 | **H07 插件/定时/远程/PR/网站、H08 沙箱/MCP、H10 研究实验** | 未开始 | 按 [ROADMAP](ROADMAP-2026-09-23.md) 既有分解与验收门槛执行 |
 
-**执行顺序建议**：完成桌面视觉检查 → 你登录账号做 H01 实测（含 Codex API key/ChatGPT 两渠道、Grok 两认证路径及其他已接入工具）→ H04 预算闭环（只有兑现成本上限后才解除阻塞）→ G2 核对并适配 ZCode → H05/H07/H08 → H10 实验出结论。
+**执行顺序建议**：完成桌面视觉检查和 H05/H07/H08 的离线增量 → 构建安装包 → 你登录账号做 H01 实测（含 Codex API key/ChatGPT 两渠道、Grok 两认证路径及其他已接入工具）→ H04 预算闭环（只有兑现成本上限后才解除阻塞）。ZCode 等官方可验证发行物出现后再进入适配与账号测试；H10 等真实跨厂商与费用证据齐备后出结论。

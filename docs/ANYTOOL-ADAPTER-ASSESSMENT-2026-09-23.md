@@ -10,7 +10,7 @@
 | **Grok Build**（xAI，`grok` 1.0.38，Rust workspace） | `grok agent stdio` | **ACP** stdin/stdout JSON-RPC；另有 leader/serve/headless 模式 | **离线适配已完成**（`src/native_executor/grok.rs`）：验证 `grokShell`/`agentVersion`、只选广告的 `xai.api_key` 或 `cached_token` 并用 headless 认证、固定裸模型 id 与 `reasoning_effort`、限制一次性权限、透传 x.ai 扩展、核对提示级 usage。真实安装握手与推理待 H01/H09 验证 |
 | **kimi-code**（Moonshot，`@moonshot-ai/kimi-code` 2.0.2，bin `kimi`） | `kimi acp`（`dist/main.mjs acp`，`@moonshot-ai/acp-server` 驱动） | **ACP** | **已接入**（`src/native_executor/kimi_code.rs`）：身份 "Kimi Code CLI" 2.0.2、裸模型 id、`thinking` 选项模型相关故不映射、权限 `approve_once`/`reject`、`plan` 与 `available_commands_update` 透传、usage 无 cost。只认 npm `dist/main.mjs` 入口，绝不解析 PATH 裸 `kimi`（与 Python kimi-cli 区分） |
 | **minimax-code**（`minimax-code` 0.5.2，bin `mcode`） | `mcode acp`（`node dist/cli.js acp`） | **ACP** | **已接入**（`src/native_executor/minimax.rs`）：身份 "minimax-code" 0.5.2、模型值 `m:<provider>:<model>[:v:<variant>]` wire 格式、权限 `allow-once`/`deny`、`thinkingEffort` 模型相关故不映射。登录走 `mcode acp login --region cn\|global`（真实登录待账号验证） |
-| **ZCode**（zai-org，`@zcode/cli` 3.14.0） | `zcode app-server` / `agent-server` | 自有 app-server JSON（与 Codex app-server 同类） | 可接但走**自有协议**路径（类似 codex 适配），工作量大于 ACP 方言 |
+| **ZCode**（zai-org；固定源码 `872ad96`） | 源码有内部 stdio/HTTP 入口，但没有可验证的公开安装命令 | 一行 `zcode-hello`/`hello-ack` JSON 后进入 `@zcode/rpc` 二进制分帧；非 ACP、非 Codex app-server JSON | **未接入**：`@zcode/cli@3.14.0` 与 `zcode@3.14.0` 均无法取得，官方 GitHub 无 release；等待官方发行物后再建独立 transport |
 | opencode（opencode-ai，Go 重写版） | 仅 TUI | 无结构化入口 | **暂不接**：当前 Go 主干没有 serve/RPC 模式（TS 时代有 `opencode serve`；MiMo-Code 正是 TS 版 fork 并自带 ACP） |
 | Kiro / KiroCrew / Hermes / pi / anomalyco | 未在本次深扫范围 | 待评估 | 按同方法逐个补评 |
 
@@ -40,3 +40,7 @@
 ## H09 步骤 7–8 的待办（等用户账号）
 
 真实 `mimo acp` 与 `grok agent stdio` 握手、登录、真实推理、取消/失败注入与脱敏 fixture 归档尚未执行（用户将自行登录验证）；在此之前两者的受管能力以本文件与离线协议测试为准，不宣称真实模型执行。Grok 的固定发布二进制指纹也须在真实安装后回填。
+
+## ZCode 审计结论（不等账号）
+
+详见 [ZCode 发行物与协议审计](WORK-REPORT-2026-09-23-ZCODE-AUDIT.md)。当前阻塞来自缺少官方可验证发行物，不是账号登录。源码里确有 stdio 与 WebSocket RPC 实现，但根包、CLI 包和 server CLI 包均为 private；精确 npm 查询无 tarball，官方 Releases 页面也没有资产。不能把内部源码构建入口、第三方同名包或猜测的 `app-server` 命令写成 Wonderland 的受管合同。

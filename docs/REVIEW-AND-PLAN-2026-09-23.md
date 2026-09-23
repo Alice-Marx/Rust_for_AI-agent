@@ -60,7 +60,7 @@ native executor 各模块存在未使用导入/变量与死代码警告（连续
 
 ### P3　观察项（暂不动）
 
-- ZCode 源码仓 `apps/zcode-cli` 标 `private`、版本 0.16.9，与 npm 发布物 `@zcode/cli@3.14.0` 的对应关系**未证实**；未证实前不写 ZCode 适配代码。
+- ZCode 审计完成：源码根包、`apps/zcode-cli` 与 `@zcode/server-cli` 都是 private，`@zcode/cli@3.14.0` 和 `zcode@3.14.0` 的精确 npm 查询均无发行物，官方 GitHub 无 release。没有官方可验证安装物前不写适配代码，详见 [ZCode 审计报告](WORK-REPORT-2026-09-23-ZCODE-AUDIT.md)。
 - `auto_dispatch_ready=false`、硬预算 `budget_usd` 阻塞均为正确的诚实状态，非缺陷。
 
 ---
@@ -94,12 +94,9 @@ native executor 各模块存在未使用导入/变量与死代码警告（连续
 
 **验收**：离线 fixture 全绿；真实 `grok agent stdio` 握手与登录并入 H01 账号实测后才宣称真实模型执行。
 
-### G2　ZCode 受管适配（G1 完成之后）
+### G2　ZCode 受管适配（等待官方发行物）
 
-1. **发布物核对**（不写代码）：`npm view @zcode/cli@3.14.0` 取 dist tarball SHA 与文件清单，对照源码提交 `872ad96`（`packages/zcode-server-cli`、`apps/zcode-cli` 构建产物）；对应不上则记录「发布物来源未证实」并保持终端手动路径；
-2. **协议深读**（已确认入口存在：`packages/server/src/entry-stdio.ts`、`entry-http.ts`，stdio app-server）：逐帧核对握手、会话、权限、取消、usage 的 JSON 合同（`packages/rpc/src/protocol.ts`）；
-3. **实现**：按 codex 适配模式写独立 transport（自有协议，**不复用 ACP 假设**），锁定 3.14.0 双闸（npm 版本 + banner/指纹）；
-4. 测试与文档同 G1 第 4–5 步。
+发行物和协议深读已完成，结论见 [ZCode 审计报告](WORK-REPORT-2026-09-23-ZCODE-AUDIT.md)：源码的 stdio 入口是初始 JSON 握手后接 `@zcode/rpc` 二进制帧，并没有可验证的公开 npm 包或 GitHub release。下一步不能猜测命令或从第三方包继续；等待厂商发布官方 tarball、签名 release 资产或安装器后，记录来源、版本、SHA-256、`--version` 与真实启动命令，再以实际 wire 写独立 transport、离线 fixture 和文档。真实账号握手排在这些离线闸门之后。
 
 ### G3　小改进批（可与 G1 同批或紧随）
 
@@ -127,7 +124,7 @@ native executor 各模块存在未使用导入/变量与死代码警告（连续
 ### 执行顺序总表
 
 ```text
-立即可做（纯代码）：G1 Grok 适配 → G3 小改进批 → G2 ZCode（先发布物核对）
+立即可做（纯代码）：G1 Grok 适配 → G3 小改进批 → H05/H06/H07/H08 可离线增量
 等账号（用户）：   G4 = H01 → H04 → H05
 并行池：          G5 = H07 / H08 / H10 / 剩余候选评估
 每项完成：        写增量工作报告 → 登记 DOCUMENT-GUIDE → 更新总报告与 ROADMAP 对应行
