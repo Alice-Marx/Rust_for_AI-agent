@@ -1,7 +1,7 @@
 # 总项目任务报告
 
-日期：2026-09-23（含本轮适配器身份回读扩展与测试对账）
-仓库：[Alice-Marx/Rust_for_AI-agent](https://github.com/Alice-Marx/Rust_for_AI-agent)，当前分支 `handoff-development`；本轮从 `0e75c0d` 继续；CLI/桌面交付已提交为 `03a8ff9`
+日期：2026-09-23（含适配器身份回读与 H04 usage 归档增量）
+仓库：[Alice-Marx/Rust_for_AI-agent](https://github.com/Alice-Marx/Rust_for_AI-agent)，当前分支 `handoff-development`；身份回读提交 `09a1014` 后继续；CLI/桌面交付已提交为 `03a8ff9`
 版本基线：0.11.0（`24dbf54`）+ 本阶段 13 个功能提交；本轮 CLI、桌面面板、Codex 身份回读与报告交付见「一·本轮交付」
 配套文档：[文档指南](DOCUMENT-GUIDE-2026-09-23.md)（每份文档的用途）、[后续路线图](ROADMAP-2026-09-23.md)（H01–H10 分解）
 
@@ -35,7 +35,7 @@ API Agent 与 SSE、Rust egui 桌面、Rust/npm 双 CLI、官方工具 Work/Chat
 
 `auto_dispatch_ready=false` 仍是正确状态：Codex 可回读 API key/ChatGPT 账号渠道与计划档位；Claude、ACP 与 Kimi CLI 已增加工具/模型配置身份记录，但各自账号渠道与真实服务端落点尚未全部实测。账号实付、额度、限速、重置周期仍未核验。无预算 Automatic 派工代码路径已就绪，等账号登录后即可真实验证。硬预算（`budget_usd`）阻塞保持到 H04 闭环。
 
-### 本轮交付（8 个程序/测试文件 + 本报告）
+### 本轮交付（9 个程序/测试文件 + 本报告）
 
 1. **两个 CLI 的路由策略命令完成**（原「未完成任务」表第 3 行）：Rust CLI 与 npm CLI 均新增 `team routing preview <id> --file <policy.json>`（显式约束在线预览，typed JSON 校验）、`team routing saved <id>`（用团队保存的 routing_policy 预览）、`team routing replay <id>`（重放最新持久化决策，不刷新网络）。三个命令严格透传既有 HTTP 合同，ID 单段 URL 编码，非法参数不发请求。
 2. **桌面 Teams 阻塞原因面板完成**（H06 起步项）：Teams 详情页新增「路由决策」区，渲染 `routing_decision`/`binding_applied`/`routing_preview` 事件——决策状态、解释、逐候选状态与拒绝原因、质量分/估算成本、epoch 与身份映射版本证据链；价格面板新增 `dispatch_readiness` 就绪状态与 `missing` 阻塞清单、`automatic_dispatch` 两档状态文案（改为读取后端事实，移除已过时的「Automatic 尚未开放自动价格调度」硬编码文案）。
@@ -43,6 +43,7 @@ API Agent 与 SSE、Rust egui 桌面、Rust/npm 双 CLI、官方工具 Work/Chat
 4. **ZCode 源码取回待深读**：按固定提交 `872ad96` 取回（`upstream-study/ZCode`）。monorepo 结构确认（`apps/zcode-cli`、`packages/server|rpc|zcode-server-cli`），接入仍按自有 app-server 协议（codex 模式独立 transport）；注意源码仓 `apps/zcode-cli` 版本显示 0.16.9 且标 private，实现前需先核对 npm 发布物 `@zcode/cli` 3.14.0 与该提交的对应关系。
 5. **H01 Codex 身份回读第一步**：新增脱敏 `NativeIdentity`，Codex 执行前通过官方 app-server `config/read`、`account/read` 和 `thread/start` 保存配置模型/档位、`api` 或 `subscription` 渠道、ChatGPT 计划档位，以及线程回读的生效模型/提供商/默认档位。账户邮箱不进入身份事件；账户未登录或账号类型不受支持时，在发送提示前失败关闭。
 6. **H01 其他原生工具身份回读扩展**：Claude 保存固定 CLI 版本/二进制指纹、已应用模型/档位、first-party provider 边界及成功结果里的模型用量；ACP 通用会话引擎保存工具版本/指纹、会话配置模型、已选择模型，以及模型 ID 明确携带的 provider（DeepSeek、MiMo、MiniMax）；DeepSeek 在协议返回值中另回读 reasoning effort。Kimi Code 的模型 ID 不携带 provider，故 provider 保持 unknown；Python Kimi 保存受限后的本地精确模型配置，但协议不回显实际生效模型。没有由协议确认的模型、档位或计费渠道不作推断，`billing_channel` 与 `account_plan` 在这些适配器中继续为空；真实账户闭环尚未完成。
+7. **H04 usage 归档（部分完成）**：规划 child、执行/评审 child 与每次重试结束时，把原生工具 `usage` 事件按 `workflow_id` 归入 `usage_observed` Teams 事件，并标记 phase、node、attempt、app、model、effort。最多保留最近 16 个快照；Claude CLI 与 MiMo harness 报告的 USD 值标成未确认来源，不做快照求和；估算与已确认金额都明确为空。**美元预算仍在派工前阻塞**：usage 事件不等于发票，也不能限制在途消费；预留账本尚未接入派工/结算。
 
 ### 本轮报告对账
 
@@ -91,7 +92,7 @@ API Agent 与 SSE、Rust egui 桌面、Rust/npm 双 CLI、官方工具 Work/Chat
 
 | 文件 | 说明 |
 | --- | --- |
-| `team_service.rs` | Teams HTTP 合同 + Automatic 启动路径（决策→`set_planner` 写回→执行） |
+| `team_service.rs` | Teams HTTP 合同 + Automatic 启动路径（决策→`set_planner` 写回→执行）；将 Planner、节点执行/评审/重试 child 的工具 usage 按 workflow 归档为带尝试归属、未确认金额分类的事件 |
 | `team_store.rs` | 团队/节点/attempt 权威存储 + 微美元账本 + `set_planner` |
 | `team_workspace.rs` / `team_checks.rs` | 独立 Git 工作区与主机验收 |
 | `workflow.rs` / `workbench_service.rs` | 单任务 SQLite 状态机（v2）、执行控制与原生身份回读持久化 |
@@ -109,10 +110,12 @@ API Agent 与 SSE、Rust egui 桌面、Rust/npm 双 CLI、官方工具 Work/Chat
 | `rustup run stable cargo test --bin wonderland-desktop` | 18 项通过 |
 | `rustup run stable cargo test --lib codex_identity` | 1 项通过 |
 | `rustup run stable cargo test --lib identity_readback_is_persisted_as_a_redacted_event` | 1 项通过 |
-| `rustup run stable cargo test` | 本轮完整回归：库 444 项通过、7 项按外部条件忽略；Rust CLI 4 项、桌面 18 项、协议集成 7 项通过；文档测试 0 项。覆盖 ACP/Claude 新身份断言与跨适配器编译 |
+| `rustup run stable cargo test --lib team_service::tests::reported_usage_costs_are_not_marked_as_confirmed` | 1 项通过 |
+| `rustup run stable cargo test --lib team_service::tests::child_usage_is_attributed_to_a_team_phase_and_attempt` | 1 项通过 |
+| `rustup run stable cargo test` | 本轮完整回归：库 446 项通过、7 项按外部条件忽略；Rust CLI 4 项、桌面 18 项、协议集成 7 项通过；文档测试 0 项。覆盖 ACP/Claude 身份断言、usage 归属与未确认金额分类 |
 | `npm test`（`packaging/npm/wonderland-cli`） | 15 项通过 |
 
-完整 Rust 回归通过；仍有执行器模块中既有未使用导入/变量及死代码警告。此前历史基线为库 437 + Rust CLI 3 + 桌面 18 + 协议集成 7 + npm 14 项通过；desktop_bridge×3/desktop_terminal×1 在未改动基线即可复现（本机 PowerShell CLIXML 污染与真实 kimi CLI 行为），不属于本轮新增失败。
+最终 Rust 全量回归通过；首轮全量执行时 `desktop_bridge::tests::version_probe_times_out_hung_program` 在 3 秒限时下失败，单项复跑与随后全量重跑均通过，表现为并行负载敏感的既有时序测试。仍有执行器模块中既有未使用导入/变量及死代码警告。此前历史基线为库 437 + Rust CLI 3 + 桌面 18 + 协议集成 7 + npm 14 项通过；desktop_bridge×3/desktop_terminal×1 在未改动基线即可复现（本机 PowerShell CLIXML 污染与真实 kimi CLI 行为），不属于本轮新增失败。
 
 **仍需人工确认：**在桌面应用打开 Teams 详情，分别检查无路由事件、有 `routing_decision`、有 `binding_applied`，以及 `dispatch_readiness.missing` 有值/为空时的布局与长解释换行。自动化测试覆盖逻辑，尚不能替代该视觉检查。
 
@@ -130,7 +133,7 @@ API Agent 与 SSE、Rust egui 桌面、Rust/npm 双 CLI、官方工具 Work/Chat
 | 任务 | 现状 | 完成思路 |
 | --- | --- | --- |
 | **H01 真实账号闭环** | Codex 回读账号渠道/计划和线程模型；Claude、ACP 与 Python Kimi 的工具指纹和可证实模型设置代码已完成。账号渠道/计划仅 Codex 有显式回读；其余字段遵守未知保留规则。真实账户测试未完成，需登录 | 按上节测试 1–5 执行，归档脱敏事件；仅在工具官方会话回传明确账号计费/额度信息时扩充 `billing_channel`/`account_plan`，否则保持 `None`。根据实测更新工具版本与指纹支持策略 |
-| **H04 硬预算闭环** | 账本已有、未接线 | 派工前按估算成本×安全系数走 `team_store` 微美元预留，终态结算/释放，重启对账；适配器 usage→attempt 账目（mimo 的 `reported_cost_usd` 标为非确认值）；闭环后解除 `budget_usd` 阻塞 |
+| **H04 硬预算闭环** | 已把每个 planner/node-attempt child 的原生 usage 事件按 workflow/phase/attempt 归档；金额有单独未确认分类。预留/终态结算仍未接线，`budget_usd` 继续阻塞 | 下一步建立 attempt 级 `estimated_usd`/`confirmed_usd` 数据合同；估算按 routing 成本与安全系数预留；接入官方确认账单源和进程内中断/配额机制后，才可结算并开放硬预算。凡只能拿到 token 数/CLI 或 harness 自报金额的渠道，明确标记不支持硬上限并只显示软提示；检查 Planner、评审、并行子任务、失败重试、取消及崩溃恢复均有费用归属 |
 | **两个 CLI 的路由策略命令** | 实现、自动测试完成；随提交 `03a8ff9` 交付 | 已提供 `preview/saved/replay`，严格透传既有 HTTP 合同；无需额外 CLI 测试 |
 | **桌面阻塞原因面板（H06 起步）** | 实现、桌面自动化测试完成；随提交 `03a8ff9` 交付 | 已渲染 `dispatch_readiness.missing` 与路由事件；还需按本报告手工检查事件差异、长解释和空数据情形 |
 | **Grok Build 接入** | ACP stdio 已确认；适配未开始，源码提交号有冲突 | 先重新取得并校验上游固定提交/官方发布物，再按 `meta.grokShell` 与 `agentVersion` 校验身份；补非交互 `authenticate`、模型/努力值配置、权限和取消适配；真实 CLI 握手及推理后再开放为受管执行器。通用 ACP runner 目前缺少认证步骤，不能直接套用 |

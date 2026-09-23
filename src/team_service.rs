@@ -376,7 +376,17 @@ async fn execute_team(
         )?;
         service.teams.register_child(id, &child.id).await?;
         service.start_team_child(&child.id, id).await?;
-        let result = wait_child(&service, id, &child.id, cancel.clone(), deadline).await?;
+        let result = wait_child(
+            &service,
+            id,
+            &child.id,
+            cancel.clone(),
+            deadline,
+            "planner",
+            None,
+            None,
+        )
+        .await?;
         let nodes = parse_plan(&result.output)?;
         let current = service.teams.store.get(id)?.context("team disappeared")?;
         record = service.teams.store.set_plan(id, current.revision, nodes)?;
@@ -663,6 +673,9 @@ async fn wait_child(
     child_id: &str,
     mut cancel: watch::Receiver<bool>,
     deadline: Instant,
+    phase: &str,
+    node_id: Option<&str>,
+    attempt: Option<u32>,
 ) -> Result<WorkflowRecord> {
     let mut stopping = false;
     loop {
@@ -681,6 +694,7 @@ async fn wait_child(
         }
         match child.status {
             WorkflowStatus::Verifying if !stopping => {
+                record_child_usage(service, team_id, &child, phase, node_id, attempt)?;
                 resume_if_ready(service, team_id).await?;
                 return Ok(child);
             }
@@ -706,6 +720,7 @@ async fn wait_child(
                 }
             }
             _ => {
+                record_child_usage(service, team_id, &child, phase, node_id, attempt)?;
                 resume_if_ready(service, team_id).await?;
                 bail!(
                     "child {child_id} ended with {}: {}",
@@ -720,6 +735,102 @@ async fn wait_child(
             tokio::select! {_=tokio::time::sleep(Duration::from_millis(150))=>{},_=cancel.changed()=>{}}
         }
     }
+}
+
+fn reported_cost_observation(usage: &Value) -> Value {
+    for (field, basis) in [
+        ("total_cost_usd", "cli_reported_unconfirmed"),
+        ("reported_cost_usd", "harness_reported_unconfirmed"),
+    ] {
+        if let Some(amount) = usage
+            .get(field)
+            .and_then(Value::as_f64)
+            .filter(|amount| amount.is_finite() && *amount >= 0.0)
+        {
+            return json!({
+                "reported_usd": amount,
+                "reported_usd_basis": basis,
+                "confirmed_usd": null,
+            });
+        }
+    }
+    json!({
+        "reported_usd": null,
+        "reported_usd_basis": "no_usd_cost_field",
+        "confirmed_usd": null,
+    })
+}
+
+fn record_child_usage(
+    service: &WorkbenchService,
+    team_id: &str,
+    child: &WorkflowRecord,
+    phase: &str,
+    node_id: Option<&str>,
+    attempt: Option<u32>,
+) -> Result<()> {
+    const MAX_RETAINED_OBSERVATIONS: usize = 16;
+    const MAX_OBSERVATION_BYTES: usize = 8 * 1024;
+    let mut cursor = 0;
+    let mut observed_count = 0usize;
+    let mut observations = std::collections::VecDeque::new();
+    loop {
+        let events = service.store.events(&child.id, cursor, 1000)?;
+        if events.is_empty() {
+            break;
+        }
+        cursor = events.last().map_or(cursor, |event| event.seq);
+        for event in events.iter().filter(|event| event.kind == "usage") {
+            observed_count = observed_count.saturating_add(1);
+            let raw_usage = event
+                .data
+                .get("data")
+                .cloned()
+                .unwrap_or_else(|| event.data.clone());
+            let cost = reported_cost_observation(&raw_usage);
+            let encoded = serde_json::to_vec(&raw_usage)?;
+            let usage = if encoded.len() <= MAX_OBSERVATION_BYTES {
+                raw_usage
+            } else {
+                json!({"truncated":true,"encoded_bytes":encoded.len()})
+            };
+            observations.push_back(json!({
+                "event_seq": event.seq,
+                "usage": usage,
+                "cost": cost,
+            }));
+            if observations.len() > MAX_RETAINED_OBSERVATIONS {
+                observations.pop_front();
+            }
+        }
+        if events.len() < 1000 {
+            break;
+        }
+    }
+    let data = json!({
+        "workflow_id": child.id,
+        "phase": phase,
+        "node_id": node_id,
+        "attempt": attempt,
+        "app_id": child.app_id,
+        "model": child.model,
+        "reasoning_effort": child.reasoning_effort,
+        "observed_count": observed_count,
+        "observations_truncated": observed_count > observations.len(),
+        "observations": observations,
+        "estimated_usd": null,
+        "confirmed_usd": null,
+        "note":"Tool usage and tool-reported USD values are observations only; no provider invoice is confirmed and no total is inferred.",
+    });
+    ensure!(
+        serde_json::to_vec(&data)?.len() <= 65_536,
+        "usage observations exceed the team event limit"
+    );
+    service
+        .teams
+        .store
+        .append_event(team_id, "usage_observed", data)?;
+    Ok(())
 }
 
 async fn resume_if_ready(service: &WorkbenchService, id: &str) -> Result<()> {
@@ -869,7 +980,17 @@ async fn execute_node(
     )?;
     service.teams.register_child(id, &child.id).await?;
     service.start_team_child(&child.id, id).await?;
-    let result = wait_child(&service, id, &child.id, cancel.clone(), deadline).await?;
+    let result = wait_child(
+        &service,
+        id,
+        &child.id,
+        cancel.clone(),
+        deadline,
+        "node_attempt",
+        Some(&spec.id),
+        Some(number),
+    )
+    .await?;
     active_check(&cancel, deadline)?;
     ensure!(
         !result.output.trim().is_empty(),
@@ -1083,6 +1204,83 @@ async fn quote(State(s): State<AppState>, Query(q): Query<QuoteQuery>) -> Json<V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reported_usage_costs_are_not_marked_as_confirmed() {
+        let cli = reported_cost_observation(&json!({"total_cost_usd":0.12}));
+        assert_eq!(cli["reported_usd"], 0.12);
+        assert_eq!(cli["reported_usd_basis"], "cli_reported_unconfirmed");
+        assert!(cli["confirmed_usd"].is_null());
+
+        let harness = reported_cost_observation(&json!({"reported_cost_usd":0.05}));
+        assert_eq!(harness["reported_usd"], 0.05);
+        assert_eq!(
+            harness["reported_usd_basis"],
+            "harness_reported_unconfirmed"
+        );
+        assert!(harness["confirmed_usd"].is_null());
+
+        let context = reported_cost_observation(&json!({"kind":"context_occupancy","used":5}));
+        assert!(context["reported_usd"].is_null());
+        assert_eq!(context["reported_usd_basis"], "no_usd_cost_field");
+    }
+
+    #[test]
+    fn child_usage_is_attributed_to_a_team_phase_and_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let service = WorkbenchService::open(&data_dir).unwrap();
+        let team = service.teams.create(request(dir.path())).unwrap();
+        let child = create_child(
+            &service,
+            &team.id,
+            &team.request.planner,
+            dir.path(),
+            "bounded subtask".into(),
+            false,
+            Instant::now() + Duration::from_secs(30),
+            "Implementation",
+            vec![],
+        )
+        .unwrap();
+        service
+            .store
+            .append_event(
+                &child.id,
+                "usage",
+                json!({"type":"usage","data":{"reported_cost_usd":0.05,"kind":"context_occupancy"}}),
+            )
+            .unwrap();
+
+        record_child_usage(
+            &service,
+            &team.id,
+            &child,
+            "node_attempt",
+            Some("implementation"),
+            Some(2),
+        )
+        .unwrap();
+
+        let observed = service
+            .teams
+            .store
+            .latest_event(&team.id, "usage_observed")
+            .unwrap()
+            .unwrap();
+        assert_eq!(observed.data["phase"], "node_attempt");
+        assert_eq!(observed.data["node_id"], "implementation");
+        assert_eq!(observed.data["attempt"], 2);
+        assert_eq!(observed.data["observed_count"], 1);
+        assert_eq!(observed.data["estimated_usd"], Value::Null);
+        assert_eq!(observed.data["confirmed_usd"], Value::Null);
+        assert_eq!(
+            observed.data["observations"][0]["cost"]["reported_usd"],
+            0.05
+        );
+        assert!(observed.data["observations"][0]["cost"]["confirmed_usd"].is_null());
+    }
+
     #[test]
     fn review_rejections_are_not_successful_task_reports() {
         let rejected=parse_review(r#"{"accepted":false,"findings":["negative quantities accepted"],"summary":"missed requirement"}"#).unwrap();
