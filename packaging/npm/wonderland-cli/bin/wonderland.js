@@ -39,6 +39,9 @@ Usage:
   wonderland-cli [options] team list|get|start|cancel <id>
   wonderland-cli [options] team create --file <team.json>
   wonderland-cli [options] team events <id> [--after <sequence>]
+  wonderland-cli [options] team routing preview <id> --file <policy.json>
+  wonderland-cli [options] team routing saved <id>
+  wonderland-cli [options] team routing replay <id>
   wonderland-cli [options] pricing status|refresh
   wonderland-cli [options] pricing quote --app <app-id> --model <exact-id> --billing <channel>
 
@@ -143,34 +146,52 @@ async function request(options, pathname, init = {}) {
   return body;
 }
 
+function readJsonFile(file, what) {
+  const maxBytes = 8 * 1024 * 1024;
+  const descriptor = fs.openSync(file, "r");
+  try {
+    const stat = fs.fstatSync(descriptor);
+    if (!stat.isFile() || stat.size > maxBytes) throw new Error(`${what} must be a JSON file of at most 8 MiB`);
+    const buffer = Buffer.alloc(Math.min(stat.size + 1, maxBytes + 1));
+    let size = 0;
+    while (size < buffer.length) {
+      const count = fs.readSync(descriptor, buffer, size, buffer.length - size, null);
+      if (!count) break;
+      size += count;
+    }
+    if (size > stat.size || size > maxBytes) throw new Error(`${what} changed while reading or exceeds 8 MiB`);
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, size)));
+  } finally { fs.closeSync(descriptor); }
+}
+
 function teamRequest(options) {
   const [action, id, ...extra] = options.args;
-  if (!action) throw new Error("team requires list, create, get, start, cancel or events");
+  if (!action) throw new Error("team requires list, create, get, start, cancel, events or routing");
   if (options.app !== null || options.billing !== null) throw new Error("team does not accept --app or --billing; set executors in the plan JSON");
-  if (action !== "create" && options.file !== null) throw new Error("--file is only valid for team create");
+  const fileAllowed = action === "create" || (action === "routing" && id === "preview");
+  if (!fileAllowed && options.file !== null) throw new Error("--file is only valid for team create or team routing preview");
   if (action !== "events" && options.after !== null) throw new Error("--after is only valid for team events");
   let pathname = "/api/v1/teams";
   let body;
   if (action === "create") {
     if (!options.file || id || extra.length) throw new Error("team create requires --file <team.json> without positional arguments");
-    const maxBytes = 8 * 1024 * 1024;
-    const descriptor = fs.openSync(options.file, "r");
-    try {
-      const stat = fs.fstatSync(descriptor);
-      if (!stat.isFile() || stat.size > maxBytes) throw new Error("Team plan must be a JSON file of at most 8 MiB");
-      const buffer = Buffer.alloc(Math.min(stat.size + 1, maxBytes + 1));
-      let size = 0;
-      while (size < buffer.length) {
-        const count = fs.readSync(descriptor, buffer, size, buffer.length - size, null);
-        if (!count) break;
-        size += count;
-      }
-      if (size > stat.size || size > maxBytes) throw new Error("Team plan changed while reading or exceeds 8 MiB");
-      body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, size)));
-    } finally { fs.closeSync(descriptor); }
+    body = readJsonFile(options.file, "Team plan");
     if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Team plan must be a TeamCreate JSON object");
   } else if (action === "list") {
     if (id || extra.length) throw new Error("team list does not accept a team ID");
+  } else if (action === "routing") {
+    const [sub, rid, ...rest] = [id, ...extra];
+    if (!["preview", "saved", "replay"].includes(sub)) throw new Error(`Unknown team routing operation: ${sub || "(missing)"}`);
+    if (!rid || rid === "." || rid === ".." || rest.length) throw new Error(`team routing ${sub} requires exactly one team ID`);
+    pathname += `/${encodeURIComponent(rid)}/routing/preview`;
+    if (sub === "preview") {
+      if (!options.file) throw new Error("team routing preview requires --file <policy.json>");
+      body = readJsonFile(options.file, "Routing policy");
+      if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Routing policy must be a RoutingPolicy JSON object");
+    } else if (sub === "saved") {
+      pathname += "/saved";
+      body = {};
+    }
   } else {
     if (!["get", "start", "cancel", "events"].includes(action)) throw new Error(`Unknown team operation: ${action}`);
     if (!id || id === "." || id === ".." || extra.length) throw new Error(`team ${action} requires exactly one team ID`);

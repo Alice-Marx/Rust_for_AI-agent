@@ -81,6 +81,34 @@ test("invalid team arguments and malformed plans perform no requests", async () 
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
+test("team routing passthrough keeps IDs encoded and validates the policy file", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "wonderland-routing-"));
+  try {
+    const policy = { required_categories: ["coding"], minimum_quality: 50, budget_usd: 1.5 };
+    const file = path.join(directory, "policy.json");
+    fs.writeFileSync(file, JSON.stringify(policy));
+    const preview = await invoke(["team", "routing", "preview", "team/a?x=1", "--file", file], { status: "previewed" });
+    assert.equal(preview.code, 0, preview.error);
+    assert.deepEqual(preview.requests, [{ path: "/api/v1/teams/team%2Fa%3Fx%3D1/routing/preview", method: "POST", body: policy }]);
+    const saved = await invoke(["team", "routing", "saved", "team-1"]);
+    assert.equal(saved.code, 0, saved.error);
+    assert.deepEqual(saved.requests, [{ path: "/api/v1/teams/team-1/routing/preview/saved", method: "POST", body: {} }]);
+    const replay = await invoke(["team", "routing", "replay", "team-1"]);
+    assert.equal(replay.code, 0, replay.error);
+    assert.deepEqual(replay.requests, [{ path: "/api/v1/teams/team-1/routing/preview", method: "GET", body: undefined }]);
+    const malformed = path.join(directory, "bad.json"); fs.writeFileSync(malformed, "{broken");
+    for (const args of [
+      ["team", "routing"], ["team", "routing", "guess", "team-1"], ["team", "routing", "replay", ".."],
+      ["team", "routing", "preview", "team-1"], ["team", "routing", "preview", "team-1", "--file", malformed],
+      ["team", "routing", "saved", "team-1", "--file", file], ["team", "routing", "saved", "team-1", "extra"],
+    ]) {
+      const result = await invoke(args);
+      assert.equal(result.code, 1, args.join(" "));
+      assert.equal(result.requests.length, 0, args.join(" "));
+    }
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("pricing status reads cache and refresh is an explicit POST", async () => {
   const status = await invoke(["--continue", "pricing", "status"]);
   assert.equal(status.code, 0, status.error);

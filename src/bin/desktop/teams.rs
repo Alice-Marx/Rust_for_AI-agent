@@ -852,6 +852,28 @@ impl Teams {
                         }
                     }
                 }
+                if let Some(events) = self.events.get(&record.id) {
+                    let routing: Vec<&TeamEvent> = events
+                        .iter()
+                        .filter(|event| {
+                            matches!(
+                                event.kind.as_str(),
+                                "routing_decision" | "binding_applied" | "routing_preview"
+                            )
+                        })
+                        .collect();
+                    if !routing.is_empty() {
+                        section(
+                            ui,
+                            "00",
+                            "路由决策",
+                            "为什么阻塞、为什么选它；事件持久化可重放，不会静默改派",
+                        );
+                        for event in routing.iter().rev().take(3) {
+                            render_routing_event(ui, event);
+                        }
+                    }
+                }
                 section(
                     ui,
                     "01",
@@ -1055,28 +1077,131 @@ impl Teams {
 
     fn render_pricing(&mut self, ui: &mut Ui) {
         egui::CollapsingHeader::new("官方价格来源与自动选择条件").show(ui, |ui| {
-            ui.label(RichText::new("API 标价仅供核对；订阅额度不能换算为免费 API 用量。Automatic 尚未开放自动价格调度。").small().color(MUTED));
+            ui.label(
+                RichText::new("API 标价仅供核对；订阅额度不能换算为免费 API 用量。")
+                    .small()
+                    .color(MUTED),
+            );
             ui.horizontal_wrapped(|ui| {
-                if ui.add_enabled(!self.refreshing && self.connected, egui::Button::new("刷新官方价格")).clicked() { self.refresh_prices(ui.ctx()); }
-                if self.refreshing { ui.spinner(); ui.label("核对官方来源中…"); }
+                if ui
+                    .add_enabled(
+                        !self.refreshing && self.connected,
+                        egui::Button::new("刷新官方价格"),
+                    )
+                    .clicked()
+                {
+                    self.refresh_prices(ui.ctx());
+                }
+                if self.refreshing {
+                    ui.spinner();
+                    ui.label("核对官方来源中…");
+                }
             });
             if let Some(pricing) = &self.pricing {
-                if pricing.get("cache_is_stale").and_then(Value::as_bool).unwrap_or(true) { pill(ui, "价格缓存缺失或过期", AMBER); }
-                if let Some(snapshot) = pricing.get("latest_snapshot").filter(|value| !value.is_null()) {
-                    ui.label(RichText::new(format!("最近核对  {}", snapshot.get("checked_at").and_then(Value::as_str).unwrap_or("未知"))).small().color(MUTED));
+                if pricing
+                    .get("cache_is_stale")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true)
+                {
+                    pill(ui, "价格缓存缺失或过期", AMBER);
+                }
+                if let Some(snapshot) = pricing
+                    .get("latest_snapshot")
+                    .filter(|value| !value.is_null())
+                {
+                    ui.label(
+                        RichText::new(format!(
+                            "最近核对  {}",
+                            snapshot
+                                .get("checked_at")
+                                .and_then(Value::as_str)
+                                .unwrap_or("未知")
+                        ))
+                        .small()
+                        .color(MUTED),
+                    );
                     if let Some(sources) = snapshot.get("sources").and_then(Value::as_array) {
                         for source in sources {
                             ui.horizontal_wrapped(|ui| {
-                                ui.label(source.get("provider").and_then(Value::as_str).unwrap_or("来源"));
-                                let status = source.get("status").and_then(Value::as_str).unwrap_or("unknown");
-                                pill(ui, status, if status == "verified" { ACCENT } else { AMBER });
-                                if let Some(reason) = source.get("reason").and_then(Value::as_str) { ui.label(RichText::new(reason).small().color(MUTED)); }
+                                ui.label(
+                                    source
+                                        .get("provider")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("来源"),
+                                );
+                                let status = source
+                                    .get("status")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("unknown");
+                                pill(
+                                    ui,
+                                    status,
+                                    if status == "verified" { ACCENT } else { AMBER },
+                                );
+                                if let Some(reason) = source.get("reason").and_then(Value::as_str) {
+                                    ui.label(RichText::new(reason).small().color(MUTED));
+                                }
                             });
                         }
                     }
                 }
-                if let Some(error) = pricing.pointer("/latest_failure/error").and_then(Value::as_str) { ui.label(RichText::new(error).small().color(AMBER)); }
-            } else { ui.label(RichText::new("尚未读取价格快照。").small().color(MUTED)); }
+                if let Some(error) = pricing
+                    .pointer("/latest_failure/error")
+                    .and_then(Value::as_str)
+                {
+                    ui.label(RichText::new(error).small().color(AMBER));
+                }
+                if let Some(readiness) = pricing.get("dispatch_readiness") {
+                    ui.separator();
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("自动派工条件").strong());
+                        let ready = readiness
+                            .get("ready")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        pill(
+                            ui,
+                            if ready { "就绪" } else { "未就绪" },
+                            if ready { ACCENT } else { AMBER },
+                        );
+                    });
+                    if let Some(missing) = readiness.get("missing").and_then(Value::as_array) {
+                        let blockers: Vec<&str> =
+                            missing.iter().filter_map(Value::as_str).collect();
+                        for blocker in blockers.iter().take(8) {
+                            ui.label(RichText::new(*blocker).small().color(AMBER));
+                        }
+                        if blockers.len() > 8 {
+                            ui.label(
+                                RichText::new(format!("…另有 {} 项未核验条件", blockers.len() - 8))
+                                    .small()
+                                    .color(AMBER),
+                            );
+                        }
+                    }
+                    if let Some(scope) = readiness.get("scope").and_then(Value::as_str) {
+                        ui.label(RichText::new(scope).small().color(MUTED));
+                    }
+                }
+                if let Some(automatic) = pricing.get("automatic_dispatch") {
+                    if let Some(text) = automatic.get("no_budget").and_then(Value::as_str) {
+                        ui.label(
+                            RichText::new(format!("无预算派工：{text}"))
+                                .small()
+                                .color(MUTED),
+                        );
+                    }
+                    if let Some(text) = automatic.get("hard_budget").and_then(Value::as_str) {
+                        ui.label(
+                            RichText::new(format!("硬预算派工：{text}"))
+                                .small()
+                                .color(MUTED),
+                        );
+                    }
+                }
+            } else {
+                ui.label(RichText::new("尚未读取价格快照。").small().color(MUTED));
+            }
         });
     }
 
@@ -1173,6 +1298,116 @@ impl Teams {
         }];
         self.selected = (!composing).then(|| "fixture-team".into());
     }
+}
+
+fn render_routing_event(ui: &mut Ui, event: &TeamEvent) {
+    Frame::new()
+        .fill(PANEL)
+        .stroke(Stroke::new(1_f32, BORDER))
+        .corner_radius(10)
+        .inner_margin(14.)
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(&event.created_at).small().color(MUTED));
+                ui.label(RichText::new(&event.kind).small().strong());
+                if let Some(status) = event.data.get("status").and_then(Value::as_str) {
+                    pill(
+                        ui,
+                        status,
+                        if status == "selected" { ACCENT } else { AMBER },
+                    );
+                }
+            });
+            match event.kind.as_str() {
+                "routing_decision" | "routing_preview" => {
+                    if let Some(explanation) = event.data.get("explanation").and_then(Value::as_str)
+                    {
+                        ui.label(RichText::new(truncate(explanation, 800)).small());
+                    }
+                    if let Some(candidates) = event.data.get("candidates").and_then(Value::as_array)
+                    {
+                        for candidate in candidates {
+                            let binding = candidate.pointer("/candidate/binding");
+                            let name = binding
+                                .and_then(|value| value.get("app_id"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("?");
+                            let model = binding
+                                .and_then(|value| value.get("model"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("?");
+                            let status = candidate
+                                .get("status")
+                                .and_then(Value::as_str)
+                                .unwrap_or("?");
+                            let mut line = format!("{name} · {model} · {status}");
+                            if let Some(score) =
+                                candidate.get("quality_score").and_then(Value::as_f64)
+                            {
+                                line += &format!(" · 质量 {score:.1}");
+                            }
+                            if let Some(cost) =
+                                candidate.get("estimated_cost_usd").and_then(Value::as_f64)
+                            {
+                                line += &format!(" · 估算 ${cost:.4}");
+                            }
+                            ui.label(RichText::new(line).small());
+                            for reason in candidate
+                                .get("reasons")
+                                .and_then(Value::as_array)
+                                .into_iter()
+                                .flatten()
+                                .filter_map(Value::as_str)
+                            {
+                                ui.label(RichText::new(format!("· {reason}")).small().color(AMBER));
+                            }
+                        }
+                    }
+                    let epoch = event
+                        .data
+                        .get("epoch_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("?");
+                    let mapping = event
+                        .data
+                        .get("identity_mapping_version")
+                        .and_then(Value::as_str)
+                        .unwrap_or("?");
+                    ui.label(
+                        RichText::new(format!("证据链  epoch {epoch} · 身份映射 {mapping}"))
+                            .small()
+                            .color(MUTED),
+                    );
+                }
+                "binding_applied" => {
+                    let planner = event.data.get("planner");
+                    let app = planner
+                        .and_then(|value| value.get("app_id"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("?");
+                    let model = planner
+                        .and_then(|value| value.get("model"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("?");
+                    ui.label(RichText::new(format!("已绑定执行器  {app} · {model}")).small());
+                    let mut detail = String::new();
+                    if let Some(score) = event.data.get("quality_score").and_then(Value::as_f64) {
+                        detail += &format!("质量 {score:.1}  ");
+                    }
+                    if let Some(cost) = event.data.get("estimated_cost_usd").and_then(Value::as_f64)
+                    {
+                        detail += &format!("估算 ${cost:.4}  ");
+                    }
+                    if let Some(epoch) = event.data.get("epoch_id").and_then(Value::as_str) {
+                        detail += &format!("epoch {epoch}");
+                    }
+                    if !detail.is_empty() {
+                        ui.label(RichText::new(detail).small().color(MUTED));
+                    }
+                }
+                _ => {}
+            }
+        });
 }
 
 fn render_dag(ui: &mut Ui, record: &TeamRecord) {

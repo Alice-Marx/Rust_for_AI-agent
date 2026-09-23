@@ -226,6 +226,25 @@ enum TeamAction {
         #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(i64).range(0..))]
         after: i64,
     },
+    /// 路由策略：显式约束预览、保存策略预览与最新决策重放（透传三个 HTTP 接口）
+    Routing {
+        #[command(subcommand)]
+        action: TeamRoutingAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum TeamRoutingAction {
+    /// 显式约束的在线预览，从 RoutingPolicy JSON 文件读取约束；只决策不执行
+    Preview {
+        id: String,
+        #[arg(long)]
+        file: std::path::PathBuf,
+    },
+    /// 用团队保存的 routing_policy 再次在线预览
+    Saved { id: String },
+    /// 重放最新持久化的路由决策；不刷新网络，不授予派工权限
+    Replay { id: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -246,6 +265,24 @@ enum PricingAction {
 }
 
 fn team_request(action: TeamAction) -> Result<(String, Option<serde_json::Value>)> {
+    fn read_typed_json<T: serde::de::DeserializeOwned>(
+        file: &std::path::Path,
+        what: &str,
+    ) -> Result<T> {
+        const MAX_TEAM_FILE: u64 = 8 * 1024 * 1024;
+        let file_handle = std::fs::File::open(file)
+            .with_context(|| format!("无法读取{what}：{}", file.display()))?;
+        anyhow::ensure!(
+            file_handle.metadata()?.is_file() && file_handle.metadata()?.len() <= MAX_TEAM_FILE,
+            "{what}必须是最多 8 MiB 的 JSON 文件"
+        );
+        let mut bytes = Vec::new();
+        file_handle
+            .take(MAX_TEAM_FILE + 1)
+            .read_to_end(&mut bytes)?;
+        anyhow::ensure!(bytes.len() as u64 <= MAX_TEAM_FILE, "{what}超过 8 MiB");
+        serde_json::from_slice(&bytes).with_context(|| format!("{what}JSON 不符合约定格式"))
+    }
     let segment = |id: &str| -> Result<String> {
         anyhow::ensure!(!id.is_empty() && id != "." && id != "..", "团队 ID 无效");
         Ok(url::form_urlencoded::byte_serialize(id.as_bytes())
@@ -255,19 +292,7 @@ fn team_request(action: TeamAction) -> Result<(String, Option<serde_json::Value>
     Ok(match action {
         TeamAction::List => ("/api/v1/teams".into(), None),
         TeamAction::Create { file } => {
-            const MAX_TEAM_FILE: usize = 8 * 1024 * 1024;
-            let file = std::fs::File::open(&file)
-                .with_context(|| format!("无法读取团队计划：{}", file.display()))?;
-            anyhow::ensure!(
-                file.metadata()?.is_file() && file.metadata()?.len() <= MAX_TEAM_FILE as u64,
-                "团队计划必须是最多 8 MiB 的 JSON 文件"
-            );
-            let mut bytes = Vec::new();
-            file.take(MAX_TEAM_FILE as u64 + 1)
-                .read_to_end(&mut bytes)?;
-            anyhow::ensure!(bytes.len() <= MAX_TEAM_FILE, "团队计划超过 8 MiB");
-            let request: wonderland::team_store::TeamCreate =
-                serde_json::from_slice(&bytes).context("团队计划 JSON 不符合 TeamCreate 格式")?;
+            let request: wonderland::team_store::TeamCreate = read_typed_json(&file, "团队计划")?;
             ("/api/v1/teams".into(), Some(serde_json::to_value(request)?))
         }
         TeamAction::Get { id } => (format!("/api/v1/teams/{}", segment(&id)?), None),
@@ -283,6 +308,24 @@ fn team_request(action: TeamAction) -> Result<(String, Option<serde_json::Value>
             format!("/api/v1/teams/{}/events?after={after}", segment(&id)?),
             None,
         ),
+        TeamAction::Routing { action } => match action {
+            TeamRoutingAction::Preview { id, file } => {
+                let policy: wonderland::routing::RoutingPolicy =
+                    read_typed_json(&file, "路由策略")?;
+                (
+                    format!("/api/v1/teams/{}/routing/preview", segment(&id)?),
+                    Some(serde_json::to_value(policy)?),
+                )
+            }
+            TeamRoutingAction::Saved { id } => (
+                format!("/api/v1/teams/{}/routing/preview/saved", segment(&id)?),
+                Some(serde_json::json!({})),
+            ),
+            TeamRoutingAction::Replay { id } => (
+                format!("/api/v1/teams/{}/routing/preview", segment(&id)?),
+                None,
+            ),
+        },
     })
 }
 
@@ -1458,5 +1501,74 @@ mod management_tests {
         assert_eq!(body.unwrap()["planner"]["model"], "kimi-for-coding");
         std::fs::write(&file, r#"{"prompt":"repair tests","unexpected":true}"#).unwrap();
         assert!(team_request(TeamAction::Create { file }).is_err());
+    }
+
+    #[test]
+    fn team_routing_routes_match_http_contract_and_validate_policy_file() {
+        let cli = Cli::try_parse_from([
+            "wonderland-cli",
+            "team",
+            "routing",
+            "preview",
+            "team-1",
+            "--file",
+            "policy.json",
+        ])
+        .unwrap();
+        let Some(Command::Team {
+            action:
+                TeamAction::Routing {
+                    action: TeamRoutingAction::Preview { id, file },
+                },
+        }) = cli.command
+        else {
+            panic!("wrong command")
+        };
+        assert_eq!(id, "team-1");
+        let directory = tempfile::tempdir().unwrap();
+        let policy_file = directory.path().join("policy.json");
+        std::fs::write(
+            &policy_file,
+            r#"{"required_categories":["coding"],"budget_usd":1.5}"#,
+        )
+        .unwrap();
+        let (path, body) = team_request(TeamAction::Routing {
+            action: TeamRoutingAction::Preview {
+                id: "team/a b?x=1".into(),
+                file: policy_file.clone(),
+            },
+        })
+        .unwrap();
+        assert_eq!(path, "/api/v1/teams/team%2Fa%20b%3Fx%3D1/routing/preview");
+        assert_eq!(body.unwrap()["required_categories"][0], "coding");
+        drop(file);
+        std::fs::write(&policy_file, r#"{"required_categories":"coding"}"#).unwrap();
+        assert!(team_request(TeamAction::Routing {
+            action: TeamRoutingAction::Preview {
+                id: "team-1".into(),
+                file: policy_file,
+            },
+        })
+        .is_err());
+        let (path, body) = team_request(TeamAction::Routing {
+            action: TeamRoutingAction::Saved {
+                id: "team-1".into(),
+            },
+        })
+        .unwrap();
+        assert_eq!(path, "/api/v1/teams/team-1/routing/preview/saved");
+        assert!(body.is_some());
+        assert!(team_request(TeamAction::Routing {
+            action: TeamRoutingAction::Replay { id: "..".into() },
+        })
+        .is_err());
+        let (path, body) = team_request(TeamAction::Routing {
+            action: TeamRoutingAction::Replay {
+                id: "team-1".into(),
+            },
+        })
+        .unwrap();
+        assert_eq!(path, "/api/v1/teams/team-1/routing/preview");
+        assert!(body.is_none());
     }
 }
