@@ -1,4 +1,8 @@
-﻿$ErrorActionPreference = 'Stop'
+﻿param(
+    [switch]$NonInteractive
+)
+
+$ErrorActionPreference = 'Stop'
 $installDir = $PSScriptRoot
 $backend = Join-Path $installDir 'wonderland.exe'
 $desktop = Join-Path $installDir 'wonderland-desktop.exe'
@@ -8,8 +12,10 @@ function Fail($message) {
     Write-Host "[错误] $message" -ForegroundColor Red
     Write-Host ""
     Write-Host "日志位置: $dataDir\wonderland.err.log / wonderland.out.log"
-    Write-Host "本窗口 15 秒后自动关闭。" -ForegroundColor DarkGray
-    Start-Sleep -Seconds 15
+    if (-not $NonInteractive) {
+        Write-Host "本窗口 15 秒后自动关闭。" -ForegroundColor DarkGray
+        Start-Sleep -Seconds 15
+    }
     exit 1
 }
 

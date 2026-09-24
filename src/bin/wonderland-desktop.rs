@@ -1140,6 +1140,29 @@ impl eframe::App for DesktopApp {
         self.sync_workspace_change();
         self.studio.project_context(&self.working_dir);
         self.studio.poll(ctx, &self.server_url);
+        // A verified installer may only close this window after local edits,
+        // terminals, and API conversations have settled. Team jobs belong to
+        // the service and are deliberately not inspected or stopped here.
+        let update_exit_safe = !self.workbench.has_unsaved()
+            && !self.workbench.has_running()
+            && !self.tasks.iter().any(|task| task.running);
+        self.studio.set_update_exit_safe(update_exit_safe);
+        if let Some(prepared) = self.studio.take_update_launch_request() {
+            if !update_exit_safe {
+                self.studio.update_launch_failed(
+                    "请先保存编辑并停止本窗口的终端或 API 对话，再安装更新。".into(),
+                );
+            } else if let Err(error) = wonderland::client_update::launch(&prepared) {
+                self.studio.update_launch_failed(error.to_string());
+            } else {
+                // The helper waits for this exact desktop PID, then delegates
+                // only installer-owned file locks to Inno Setup. It never
+                // touches the configured 8080 service by port or name.
+                self.allow_close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                return;
+            }
+        }
         if let Some(app_id) = self.studio.launch_cli.take() {
             if let Some(profile) = self
                 .workbench

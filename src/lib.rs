@@ -6,6 +6,7 @@ pub mod api;
 pub mod app_diagnostics;
 pub mod app_installer;
 pub mod approval;
+pub mod client_update;
 pub mod cliproxy;
 pub mod collaboration;
 pub mod commands;

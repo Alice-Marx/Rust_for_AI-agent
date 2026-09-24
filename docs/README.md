@@ -1,8 +1,8 @@
 # 开发文档与仓库结构
 
-当前 Wonderland 源码与 Windows 发行版本为 0.11.1；[GitHub v0.11.1 Release](https://github.com/Alice-Marx/Rust_for_AI-agent/releases/tag/v0.11.1) 含安装器、便携 ZIP、npm tarball 和 SHA-256 清单。[0.11.0](RELEASE-0.11.0.md) 保留 Work/Chat 推理配置持久化和开发交接的历史发布说明。npm CLI [0.11.1](https://www.npmjs.com/package/rust-ai-wonderland-cli/v/0.11.1) 已发布到 `next`，与 0.11.1 后端配套；稳定频道 `latest` 保持 0.7.0。历史发布记录按对应版本理解。
+当前 Wonderland 源码与 Windows 发行版本为 0.11.2；[GitHub v0.11.2 Release](https://github.com/Alice-Marx/Rust_for_AI-agent/releases/tag/v0.11.2) 含安装器、便携 ZIP、npm tarball 和 SHA-256 清单。[0.11.2 发布说明](RELEASE-NOTES-0.11.2.md)记录客户端一键更新、数据目录保留和官方工具一键安装；[0.11.0](RELEASE-0.11.0.md)保留 Work/Chat 推理配置持久化和开发交接的历史发布说明。npm CLI [0.11.2](https://www.npmjs.com/package/rust-ai-wonderland-cli/v/0.11.2) 已发布到 `next`，与 0.11.2 后端配套；稳定频道 `latest` 保持 0.7.0。历史发布记录按对应版本理解。
 
-**0.11.0 的最终远端核验见 [0.11.0 交付报告](DELIVERY-0.11.0.md)。** 当前 0.11.1 的构建、校验、静默安装、离线后端健康检查、卸载、GitHub Release 资产和远端清单核验结果见 [Windows 打包报告](WORK-REPORT-2026-09-23-WINDOWS-PACKAGE.md)。
+**0.11.0 的最终远端核验见 [0.11.0 交付报告](DELIVERY-0.11.0.md)。** 当前 0.11.2 的构建、校验、D 盘覆盖安装、GitHub Release 资产和远端清单核验结果见 [0.11.2 客户端更新与发布报告](WORK-REPORT-2026-09-24-CLIENT-UPDATE-AND-RELEASE.md)。
 
 ## 代码位置
 
@@ -67,7 +67,7 @@ Windows 全目标回归通过：466 项库测试、8 项外部条件默认忽略
 - [2026-09-23 H06 路由可视化](WORK-REPORT-2026-09-23-H06-ROUTING-VISUAL.md)：Teams 长 blocker/routing fixture、渲染测试和静态截图证据。
 - [2026-09-23 H07 一次性定时草稿](WORK-REPORT-2026-09-23-H07-SCHEDULED-DRAFTS.md)：SQLite v3 原子计划、启动补触发、HTTP/Rust CLI 和离线验证。
 - [2026-09-23 H08 MCP discovery](WORK-REPORT-2026-09-23-H08-MCP-DISCOVERY.md)：有界分页、资源模板和公开名称碰撞防护。
-- [2026-09-23 Windows 0.11.1 安装包](WORK-REPORT-2026-09-23-WINDOWS-PACKAGE.md)：安装器、便携 ZIP 和 npm tarball 的 SHA-256、离线安装验证与真实账号验收步骤。
+- [2026-09-24 0.11.2 客户端更新与发布](WORK-REPORT-2026-09-24-CLIENT-UPDATE-AND-RELEASE.md)：客户端更新控件、数据目录保留、安装器、便携 ZIP、npm tarball、远端核验与真实账号验收步骤。
 - [2026-09-22 源码获取工作报告](WORK-REPORT-2026-09-22-UPSTREAM-ACQUISITION.md)：Git Smart HTTP 不可达时的官方归档回退、验证结果与未解决网络限制。
 - [2026-09-22 最终交接整理报告](WORK-REPORT-2026-09-22-FINAL-HANDOFF.md)：文件分类、完成项、未完成项和交付前检查。
 

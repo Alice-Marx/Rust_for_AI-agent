@@ -1,6 +1,6 @@
 # Wonderland · Rust AI Agent
 
-Wonderland 是支持多模型 API 与订阅账号的 Rust 编码工作区，提供 Windows 桌面应用、原生 CLI、npm CLI 和本地 HTTP 服务。当前源码与本地 Windows 发行候选为 **0.11.1**；0.11.0 是已交付的配置持久化与开发交接基线。版本分发见 [GitHub Releases](https://github.com/Alice-Marx/Rust_for_AI-agent/releases)，npm 预览频道使用 `next`。
+Wonderland 是支持多模型 API 与订阅账号的 Rust 编码工作区，提供 Windows 桌面应用、原生 CLI、npm CLI 和本地 HTTP 服务。当前源码与 Windows 发行版为 **0.11.2**；0.11.0 是已交付的配置持久化与开发交接基线。版本分发见 [GitHub Releases](https://github.com/Alice-Marx/Rust_for_AI-agent/releases)，npm 预览频道使用 `next`。
 
 本版继续实现[多模型协作建设方案](docs/MULTI_MODEL_ORCHESTRATION_PLAN.md)与[桌面产品方案](docs/DESKTOP_PRODUCT_PLAN.md)。Work/Chat、持久任务看板、项目与 Teams 共用官方执行器：Codex app-server、Kimi Wire，以及新增的 Claude Code 双向 stream-json、DeepSeek Harness ACP。模型执行由对应原生工具承担，原工具源码不作修改。
 
@@ -10,7 +10,7 @@ Work/Chat 推理档位在创建时保存，并与 Teams 共用固定配置。升
 
 **历史交接归档：** [2026-09-22 最终交接包](docs/FINAL_HANDOFF-2026-09-22.md)记录了当时工作区的隔离与交付结论（其中 model_identity 候选已在 `85a0cd2` 评审入库）。当前开发工作区已迁移至 `F:/everyAI/all/Wonderland`（即本仓库检出）；旧 `F:/harness/Codex` 根目录仍不要整体打包或合并。
 
-0.11.0 的分发结果见 [0.11.0 交付报告](docs/DELIVERY-0.11.0.md)。当前 [0.11.1 GitHub Release](https://github.com/Alice-Marx/Rust_for_AI-agent/releases/tag/v0.11.1) 已上传 Windows 安装器、便携 ZIP、npm tarball 和 SHA-256 清单；npm CLI [0.11.1](https://www.npmjs.com/package/rust-ai-wonderland-cli/v/0.11.1) 位于预览频道 `next`，稳定频道 `latest` 保持 0.7.0。远端 release 清单与本地 SHA-256 已核对。
+0.11.0 的分发结果见 [0.11.0 交付报告](docs/DELIVERY-0.11.0.md)。当前 [0.11.2 GitHub Release](https://github.com/Alice-Marx/Rust_for_AI-agent/releases/tag/v0.11.2) 提供 Windows 安装器、便携 ZIP、npm tarball 和 SHA-256 清单；npm CLI [0.11.2](https://www.npmjs.com/package/rust-ai-wonderland-cli/v/0.11.2) 位于预览频道 `next`，稳定频道 `latest` 保持 0.7.0。桌面“应用”页可检查稳定版更新、下载并核对安装器摘要；详细说明见 [0.11.2 发布说明](docs/RELEASE-NOTES-0.11.2.md)。
 
 **Teams 已支持固定官方执行器自动拆解任务，以及逐节点指定模型的 DAG 执行。** 节点在独立 Git 工作区运行，受依赖、写入范围、并发数、重试和总时限约束；集成后运行用户预先指定的验证命令。桌面、Rust CLI、npm CLI 共用持久状态与权限流程。
 
@@ -36,13 +36,13 @@ Work/Chat 推理档位在创建时保存，并与 Teams 共用固定配置。升
 
 ## Windows 桌面安装
 
-当前 0.11.1 本地交付在构建后的 `dist/`：
+当前 0.11.2 本地交付在构建后的 `dist/`：
 
-- `Wonderland-Setup-0.11.1-x64.exe`：当前用户安装程序，含桌面、服务、原生 CLI 和 CLIProxyAPI。
-- `Wonderland-0.11.1-windows-x64.zip`：便携包，解压后运行 `Start-Wonderland.ps1`。
+- `Wonderland-Setup-0.11.2-x64.exe`：当前用户安装程序，含桌面、服务、原生 CLI 和 CLIProxyAPI。
+- `Wonderland-0.11.2-windows-x64.zip`：便携包，解压后运行 `Start-Wonderland.ps1`。
 - `SHA256SUMS.txt`：产物 SHA-256 校验值。
 
-[GitHub Releases](https://github.com/Alice-Marx/Rust_for_AI-agent/releases) 中的 [v0.11.1](https://github.com/Alice-Marx/Rust_for_AI-agent/releases/tag/v0.11.1) 含当前安装器、便携 ZIP、npm tarball 和 `SHA256SUMS.txt`；0.11.0 资产保留为历史发布。
+[GitHub Releases](https://github.com/Alice-Marx/Rust_for_AI-agent/releases) 中的 [v0.11.2](https://github.com/Alice-Marx/Rust_for_AI-agent/releases/tag/v0.11.2) 含当前安装器、便携 ZIP、npm tarball 和 `SHA256SUMS.txt`；0.11.0 与 0.11.1 资产保留为历史发布。
 
 开始菜单的 Wonderland 快捷方式启动本地服务和桌面。默认服务地址为 `http://127.0.0.1:8080`，程序安装到 `%LOCALAPPDATA%\Programs\Wonderland`，数据保存在 `%LOCALAPPDATA%\WonderlandData`。升级和卸载保留用户数据。安装程序未进行代码签名。
 
@@ -101,7 +101,7 @@ wonderland-cli search "模型适配"
 wonderland-cli profile --model gpt-5.4
 ```
 
-也可安装本地发布包：`npm install -g ./dist/rust-ai-wonderland-cli-0.11.1.tgz`。当前 `next` 预览频道为 npm CLI 0.11.1，与 Wonderland 0.11.1 后端配套；`latest` 仍为 0.7.0 稳定频道。命令别名为 `wonderland`、`wonderland-cli`；原生 `wonderland.exe` 是后端服务，因此安装两种 CLI 后建议使用 `wonderland-cli` 并检查 PATH 顺序。
+也可安装本地发布包：`npm install -g ./dist/rust-ai-wonderland-cli-0.11.2.tgz`。当前 `next` 预览频道为 npm CLI 0.11.2，与 Wonderland 0.11.2 后端配套；`latest` 仍为 0.7.0 稳定频道。命令别名为 `wonderland`、`wonderland-cli`；原生 `wonderland.exe` 是后端服务，因此安装两种 CLI 后建议使用 `wonderland-cli` 并检查 PATH 顺序。
 
 也可使用 GitHub 的历史 0.11.0 附件；若网络无法解析其下载域名，优先使用上面的 npm registry 安装命令：
 

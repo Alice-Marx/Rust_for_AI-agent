@@ -6,7 +6,7 @@
 #define MyAppURL "https://github.com/Alice-Marx/Rust_for_AI-agent"
 #define MyAppExeName "wonderland-desktop.exe"
 #ifndef MyAppVersion
-  #define MyAppVersion "0.11.1"
+  #define MyAppVersion "0.11.2"
 #endif
 #define BuildRoot "..\..\dist\staging\windows-x64"
 
@@ -34,6 +34,12 @@ WizardStyle=modern
 ChangesEnvironment=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+; The update helper passes /CLOSEAPPLICATIONS. Restart Manager examines only
+; executable and DLL files installed below {app}; it does not select a process
+; merely because it listens on the same localhost port.
+CloseApplications=yes
+CloseApplicationsFilter=*.exe,*.dll
+RestartApplications=no
 UninstallDisplayName={#MyAppName}
 UninstallDisplayIcon={app}\{#MyAppExeName}
 VersionInfoVersion={#MyAppVersion}
@@ -74,6 +80,55 @@ Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile
 [Code]
 var
   DataDirPage: TInputDirWizardPage;
+  DataDirWasExisting: Boolean;
+  DataDirAutoSelected: Boolean;
+
+function DefaultDataDirectory: String;
+var
+  InstallDrive, ProfileDrive: String;
+begin
+  InstallDrive := ExtractFileDrive(ExpandConstant('{app}'));
+  ProfileDrive := ExtractFileDrive(ExpandConstant('{localappdata}'));
+  if (InstallDrive <> '') and (CompareText(InstallDrive, ProfileDrive) <> 0) then
+    Result := AddBackslash(InstallDrive) + 'WonderlandData'
+  else
+    Result := ExpandConstant('{localappdata}') + '\WonderlandData';
+end;
+
+function ExistingDataDirectory: String;
+var
+  StoredValue: String;
+  StoredFileValue: AnsiString;
+begin
+  Result := '';
+
+  { The installed marker is the source of truth for upgrades in the same
+    directory.  It must be read before the page receives a default value. }
+  if LoadStringFromFile(AddBackslash(ExpandConstant('{app}')) +
+     'data-location.txt', StoredFileValue) then
+  begin
+    StoredValue := Trim(StoredFileValue);
+    if StoredValue <> '' then
+    begin
+      Result := StoredValue;
+      Exit;
+    end;
+  end;
+
+  { Keep the location even when the user moves the program directory during
+    an upgrade.  Older installers did not record this value, hence the
+    environment-variable fallback below. }
+  StoredValue := Trim(GetPreviousData('WonderlandDataDirectory', ''));
+  if StoredValue <> '' then
+  begin
+    Result := StoredValue;
+    Exit;
+  end;
+
+  StoredValue := Trim(GetEnv('AGENT_DATA_DIR'));
+  if StoredValue <> '' then
+    Result := StoredValue;
+end;
 
 function PathContains(const PathValue, Entry: String): Boolean;
 var
@@ -174,6 +229,12 @@ begin
   end;
 end;
 
+procedure RegisterPreviousData(PreviousDataKey: Integer);
+begin
+  SetPreviousData(PreviousDataKey, 'WonderlandDataDirectory',
+    DataDirPage.Values[0]);
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usUninstall then
@@ -181,6 +242,8 @@ begin
 end;
 
 procedure InitializeWizard;
+var
+  StoredDataDir: String;
 begin
   DataDirPage := CreateInputDirPage(wpSelectDir,
     '选择数据目录',
@@ -190,7 +253,13 @@ begin
     False,
     '');
   DataDirPage.Add('');
-  DataDirPage.Values[0] := ExpandConstant('{localappdata}') + '\WonderlandData';
+  StoredDataDir := ExistingDataDirectory;
+  DataDirWasExisting := StoredDataDir <> '';
+  DataDirAutoSelected := not DataDirWasExisting;
+  if DataDirWasExisting then
+    DataDirPage.Values[0] := StoredDataDir
+  else
+    DataDirPage.Values[0] := DefaultDataDirectory;
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -198,13 +267,15 @@ begin
   Result := True;
   if CurPageID = wpSelectDir then
   begin
-    // Keep the data-dir default sensible when the user picks a non-C install
-    // drive before reaching the data page.
-    if DataDirPage.Values[0] = ExpandConstant('{localappdata}') + '\WonderlandData' then
-    begin
-      if Copy(ExpandConstant('{app}'), 1, 2) <> Copy(ExpandConstant('{localappdata}'), 1, 2) then
-        DataDirPage.Values[0] := Copy(ExpandConstant('{app}'), 1, 3) + 'WonderlandData';
-    end;
+    { A fresh install follows a newly selected non-system drive.  An upgrade
+      keeps its recorded data directory, and a value accepted on the data
+      page is treated as an explicit user choice. }
+    if (not DataDirWasExisting) and DataDirAutoSelected then
+      DataDirPage.Values[0] := DefaultDataDirectory;
+  end
+  else if CurPageID = DataDirPage.ID then
+  begin
+    DataDirAutoSelected := False;
   end;
 end;
 

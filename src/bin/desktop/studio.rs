@@ -42,6 +42,9 @@ enum Reply {
         app_id: String,
         result: Result<Value, String>,
     },
+    ClientUpdate {
+        result: Result<ClientUpdateReply, String>,
+    },
     Snapshot {
         source: String,
         records: Result<Vec<WorkflowRecord>, String>,
@@ -64,6 +67,11 @@ enum Reply {
     Directory(String),
 }
 
+enum ClientUpdateReply {
+    Checked(wonderland::client_update::UpdateCheck),
+    Downloaded(wonderland::client_update::PreparedUpdate),
+}
+
 pub struct Studio {
     pub page: Page,
     records: Vec<WorkflowRecord>,
@@ -73,6 +81,13 @@ pub struct Studio {
     installing: Option<String>,
     install_jobs: HashMap<String, Value>,
     next_install_poll: Instant,
+    client_update: Option<wonderland::client_update::UpdateCheck>,
+    prepared_update: Option<wonderland::client_update::PreparedUpdate>,
+    client_update_busy: bool,
+    client_update_message: Option<String>,
+    client_update_error: Option<String>,
+    update_exit_safe: bool,
+    pending_update_launch: bool,
     projects: Vec<ProjectRecord>,
     events: HashMap<String, Vec<WorkflowEvent>>,
     selected: Option<String>,
@@ -120,6 +135,13 @@ impl Studio {
             installing: None,
             install_jobs: HashMap::new(),
             next_install_poll: Instant::now(),
+            client_update: None,
+            prepared_update: None,
+            client_update_busy: false,
+            client_update_message: None,
+            client_update_error: None,
+            update_exit_safe: true,
+            pending_update_launch: false,
             projects: vec![],
             events: HashMap::new(),
             selected: None,
@@ -197,6 +219,26 @@ impl Studio {
             self.workspace = cwd.into();
         }
     }
+    /// The outer desktop owns unsaved editors and local terminal sessions.
+    /// Keep that decision outside the update implementation, which must not
+    /// inspect or stop an externally connected task service.
+    pub fn set_update_exit_safe(&mut self, safe: bool) {
+        self.update_exit_safe = safe;
+    }
+    /// Returns a verified installer only after an explicit UI click. The
+    /// outer app performs its final exit-safety check immediately before it
+    /// launches the helper and closes this window.
+    pub fn take_update_launch_request(
+        &mut self,
+    ) -> Option<wonderland::client_update::PreparedUpdate> {
+        std::mem::take(&mut self.pending_update_launch)
+            .then(|| self.prepared_update.clone())
+            .flatten()
+    }
+    pub fn update_launch_failed(&mut self, error: String) {
+        self.client_update_message = None;
+        self.client_update_error = Some(error);
+    }
     fn merge_record(&mut self, record: WorkflowRecord) {
         if let Some(old) = self.records.iter_mut().find(|r| r.id == record.id) {
             if record.updated_at >= old.updated_at {
@@ -261,8 +303,7 @@ impl Studio {
                             // the probe the service ran post-install.
                             if let Some(probe) = job.get("post_install_probe") {
                                 if probe.get("installed").and_then(Value::as_bool) == Some(true) {
-                                    self.diagnostics
-                                        .insert(app_id.clone(), probe.clone());
+                                    self.diagnostics.insert(app_id.clone(), probe.clone());
                                 }
                             }
                         }
@@ -273,6 +314,39 @@ impl Studio {
                         self.notice = error;
                     }
                 },
+                Reply::ClientUpdate { result } => {
+                    self.client_update_busy = false;
+                    match result {
+                        Ok(ClientUpdateReply::Checked(check)) => {
+                            self.prepared_update = None;
+                            self.client_update_error = None;
+                            self.client_update_message = Some(if check.update_available {
+                                format!(
+                                    "已找到 v{}，并已核对 GitHub SHA-256 清单。",
+                                    check.latest_version
+                                )
+                            } else {
+                                format!(
+                                    "当前客户端 v{} 无需更新（不会自动降级）。",
+                                    check.current_version
+                                )
+                            });
+                            self.client_update = Some(check);
+                        }
+                        Ok(ClientUpdateReply::Downloaded(prepared)) => {
+                            self.client_update_error = None;
+                            self.client_update_message = Some(format!(
+                                "v{} 已下载并通过 SHA-256 校验。安装器暂存于数据目录的 updates 文件夹；成功后会自动删除。",
+                                prepared.version
+                            ));
+                            self.prepared_update = Some(prepared);
+                        }
+                        Err(error) => {
+                            self.client_update_message = None;
+                            self.client_update_error = Some(error);
+                        }
+                    }
+                }
                 Reply::Snapshot {
                     source,
                     records,
@@ -1197,6 +1271,8 @@ impl Studio {
                 .color(MUTED),
         );
         ui.add_space(12.);
+        self.render_client_update(ui);
+        ui.add_space(12.);
         let apps = self.apps.clone();
         ScrollArea::vertical()
             .id_salt("studio-apps")
@@ -1341,7 +1417,8 @@ impl Studio {
                                 // One-click install: only offered when the
                                 // service registry has a fixed recipe for the
                                 // app and no program has been detected yet.
-                                let installing_here = self.installing.as_deref() == Some(id.as_str());
+                                let installing_here =
+                                    self.installing.as_deref() == Some(id.as_str());
                                 let install_job = self.install_jobs.get(&id).cloned();
                                 let detected = self
                                     .diagnostics
@@ -1371,7 +1448,11 @@ impl Studio {
                                 }
                                 if installing_here {
                                     ui.spinner();
-                                    ui.label(RichText::new("正在安装，请勿关闭应用…").small().color(MUTED));
+                                    ui.label(
+                                        RichText::new("正在安装，请勿关闭应用…")
+                                            .small()
+                                            .color(MUTED),
+                                    );
                                 }
                                 if managed(&app) && ui.button("创建任务").clicked() {
                                     self.page = Page::Work;
@@ -1401,7 +1482,9 @@ impl Studio {
                             if let Some(job) = self.install_jobs.get(&id).cloned() {
                                 match job.get("status").and_then(Value::as_str) {
                                     Some("failed") => {
-                                        if let Some(error) = job.get("error").and_then(Value::as_str) {
+                                        if let Some(error) =
+                                            job.get("error").and_then(Value::as_str)
+                                        {
                                             ui.label(
                                                 RichText::new(format!("安装失败：{error}"))
                                                     .small()
@@ -1454,6 +1537,138 @@ impl Studio {
                 }
                 if self.apps.is_empty() {
                     ui.label(RichText::new("等待服务返回应用目录…").color(MUTED));
+                }
+            });
+    }
+    fn render_client_update(&mut self, ui: &mut Ui) {
+        Frame::new()
+            .fill(PANEL)
+            .stroke(Stroke::new(1.0_f32, BORDER))
+            .corner_radius(8)
+            .inner_margin(16.)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal_wrapped(|ui| {
+                    icons::glyph(ui, icons::Icon::Spark, 20., ACCENT);
+                    ui.label(RichText::new("Wonderland 客户端").strong().size(16.));
+                    pill(
+                        ui,
+                        &format!("当前 v{}", env!("CARGO_PKG_VERSION")),
+                        MUTED,
+                    );
+                    if ui
+                        .add_enabled(
+                            !self.client_update_busy,
+                            egui::Button::new("检查更新"),
+                        )
+                        .clicked()
+                    {
+                        self.check_client_update(ui.ctx());
+                    }
+                    if self.client_update_busy {
+                        ui.spinner();
+                    }
+                });
+                ui.label(
+                    RichText::new("从固定的 GitHub stable Release 下载 Windows 安装器，并在启动前核对 SHA-256。")
+                        .small()
+                        .color(MUTED),
+                );
+
+                let check = self.client_update.clone();
+                let prepared = self.prepared_update.clone();
+                if let Some(check) = check {
+                    if check.update_available {
+                        ui.horizontal_wrapped(|ui| {
+                            pill(ui, &format!("可更新至 v{}", check.latest_version), ACCENT);
+                            ui.hyperlink_to("查看 GitHub Release ↗", &check.release_url);
+                            let already_downloaded = prepared
+                                .as_ref()
+                                .is_some_and(|update| update.version == check.latest_version);
+                            if !already_downloaded
+                                && ui
+                                    .add_enabled(
+                                        !self.client_update_busy,
+                                        egui::Button::new(format!(
+                                            "下载 v{} 并校验",
+                                            check.latest_version
+                                        )),
+                                    )
+                                    .clicked()
+                            {
+                                self.download_client_update(ui.ctx(), check.clone());
+                            }
+                        });
+                        if let Some(prepared) = prepared.filter(|update| {
+                            update.version == check.latest_version
+                        }) {
+                            ui.label(
+                                RichText::new(
+                                    "安装器暂存于数据目录的 updates 文件夹；成功后自动删除，失败时保留安装器与日志供排查。",
+                                )
+                                .small()
+                                .color(MUTED),
+                            );
+                            ui.horizontal_wrapped(|ui| {
+                                if ui
+                                    .add_enabled(
+                                        !self.client_update_busy && self.update_exit_safe,
+                                        egui::Button::new(
+                                            RichText::new(format!(
+                                                "安装 v{} 并重启",
+                                                prepared.version
+                                            ))
+                                            .strong()
+                                            .color(BG),
+                                        )
+                                        .fill(ACCENT),
+                                    )
+                                    .clicked()
+                                {
+                                    self.pending_update_launch = true;
+                                    self.client_update_error = None;
+                                    self.client_update_message = Some(
+                                        "正在退出桌面窗口并启动已验证的安装器…".into(),
+                                    );
+                                }
+                                if !self.update_exit_safe {
+                                    ui.label(
+                                        RichText::new(
+                                            "请先保存编辑并停止本窗口的终端或 API 对话，再安装更新。",
+                                        )
+                                        .small()
+                                        .color(MUTED),
+                                    );
+                                }
+                            });
+                        }
+                    } else {
+                        ui.label(
+                            RichText::new(format!(
+                                "GitHub stable 为 v{}；当前版本无需更新。",
+                                check.latest_version
+                            ))
+                            .small()
+                            .color(ACCENT),
+                        );
+                    }
+                    if check.proxy_fallback_used {
+                        ui.label(
+                            RichText::new("已避开不可用的本机代理完成 GitHub 检查。")
+                                .small()
+                                .color(MUTED),
+                        );
+                    }
+                }
+                if let Some(message) = &self.client_update_message {
+                    ui.label(RichText::new(message).small().color(ACCENT));
+                }
+                if let Some(error) = &self.client_update_error {
+                    ui.label(
+                        RichText::new(format!("客户端更新失败：{error}"))
+                            .small()
+                            .color(Color32::from_rgb(224, 111, 99)),
+                    );
                 }
             });
     }
@@ -1534,6 +1749,51 @@ impl Studio {
                 app_id,
                 result,
             });
+            ctx.request_repaint();
+        });
+    }
+    /// GitHub is contacted directly by the desktop binary. The local service
+    /// may be an older installation or a deliberately external 8080 process.
+    fn check_client_update(&mut self, ctx: &egui::Context) {
+        self.client_update_busy = true;
+        self.client_update_error = None;
+        self.client_update_message = Some("正在检查 GitHub stable Release…".into());
+        let (tx, ctx) = (self.tx.clone(), ctx.clone());
+        thread::spawn(move || {
+            let result = Runtime::new()
+                .map_err(|error| error.to_string())
+                .and_then(|runtime| {
+                    runtime
+                        .block_on(wonderland::client_update::check())
+                        .map(ClientUpdateReply::Checked)
+                        .map_err(|error| error.to_string())
+                });
+            let _ = tx.send(Reply::ClientUpdate { result });
+            ctx.request_repaint();
+        });
+    }
+    fn download_client_update(
+        &mut self,
+        ctx: &egui::Context,
+        check: wonderland::client_update::UpdateCheck,
+    ) {
+        self.client_update_busy = true;
+        self.client_update_error = None;
+        self.client_update_message = Some(format!(
+            "正在下载 v{} 并核对 SHA-256…",
+            check.latest_version
+        ));
+        let (tx, ctx) = (self.tx.clone(), ctx.clone());
+        thread::spawn(move || {
+            let result = Runtime::new()
+                .map_err(|error| error.to_string())
+                .and_then(|runtime| {
+                    runtime
+                        .block_on(wonderland::client_update::download_and_verify(&check))
+                        .map(ClientUpdateReply::Downloaded)
+                        .map_err(|error| error.to_string())
+                });
+            let _ = tx.send(Reply::ClientUpdate { result });
             ctx.request_repaint();
         });
     }
