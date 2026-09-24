@@ -7,6 +7,7 @@
 | 文档 | 说明 |
 | --- | --- |
 | [根 README](../README.md) | 项目门面：Wonderland 是什么、0.11.0 版本概要、官方执行路径与分发渠道（GitHub Releases / npm `next` 频道）。当前开发分支的 8 个受管执行器以总报告为准。 |
+| [EXPERIMENT-2026-09-24-CROSS-VENDOR-TEAM](EXPERIMENT-2026-09-24-CROSS-VENDOR-TEAM.md) | **跨厂商分工实验记录**：一键安装两个官方 CLI 后，Kimi 与 DeepSeek 在同一团队各实现一个模块并独立验收成功；附 8 轮真实缺陷修复表。想看"多模型分工怎么跑通/怎么重做"读这份。 |
 | [USER-GUIDE](USER-GUIDE.md) | **面向最终用户的图文使用说明**：下载安装（自定义安装/数据目录）、启动终端状态解读、官方工具安装登录表、第一个 Work 任务、Teams 创建与路由面板、内置终端、常见问题排查。**新用户上手读这份，不需要读其他开发文档。** |
 | [docs/README](README.md) | 开发文档与仓库结构总览：代码模块位置表、0.11.0 本轮整理说明、版本特性摘要。 |
 | [DOCUMENT-GUIDE（本文档）](DOCUMENT-GUIDE-2026-09-23.md) | 每份文档的用途与阅读时机。 |

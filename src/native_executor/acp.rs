@@ -96,12 +96,13 @@ pub(super) trait AcpDialect: Send {
         Ok(())
     }
     /// Return true only for a terminal update that clears the active tool.
+    /// Intermediate progress updates are legal and keep the tool open.
     fn tool_update_terminal(&self, status: Option<&str>) -> Result<bool> {
-        ensure!(
-            matches!(status, Some("completed" | "failed")),
-            "invalid tool result status"
-        );
-        Ok(true)
+        match status {
+            None | Some("pending" | "in_progress") => Ok(false),
+            Some("completed" | "failed") => Ok(true),
+            _ => bail!("invalid tool result status"),
+        }
     }
     /// Verify any vendor metadata on the settled prompt response.
     fn verify_prompt_result(&self, _result: &Value, _req: &NativeRequest) -> Result<()> {
@@ -259,8 +260,16 @@ impl AcpRunner {
         let session_id = session["sessionId"]
             .as_str()
             .context("ACP session ID missing")?;
+        // ACP leaves the session identifier opaque; upstream CLIs emit plain
+        // UUIDs (MiMo, MiniMax) as well as prefixed ids such as Kimi Code's
+        // `session_<uuid>`. Reject empty or control-character ids, nothing
+        // stricter, so real agents are not failed-closed on formatting.
         ensure!(
-            uuid::Uuid::parse_str(session_id).is_ok(),
+            !session_id.is_empty()
+                && session_id.len() <= 128
+                && !session_id
+                    .chars()
+                    .any(|c| c.is_control() || c.is_whitespace()),
             "invalid ACP session ID"
         );
         self.result.session_id = Some(session_id.into());

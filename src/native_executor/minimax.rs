@@ -97,17 +97,8 @@ fn resolve_entry() -> Result<PathBuf> {
         );
         return Ok(path);
     }
-    let output = std::process::Command::new("npm")
-        .args(["root", "-g"])
-        .output()
+    let base = crate::desktop_bridge::npm_root_global()
         .context("npm is required to locate the official MiniMax installation")?;
-    ensure!(
-        output.status.success(),
-        "npm root -g failed while locating MiniMax"
-    );
-    let text = String::from_utf8_lossy(&output.stdout);
-    let base = PathBuf::from(text.trim().trim_end_matches(['/', '\\']));
-    ensure!(base.is_absolute(), "npm root -g returned a relative path");
     let entry = base.join("minimax-code").join("dist").join("cli.js");
     ensure!(
         entry.is_file(),
@@ -143,7 +134,11 @@ fn verify_installation(entry: &Path) -> Result<Prepared> {
     );
     let node = which_node()?;
     let sha256 = super::executable_digest(&cli)?;
-    Ok(Prepared { node, cli, sha256 })
+    Ok(Prepared {
+        node,
+        cli: super::node_path(&cli)?,
+        sha256,
+    })
 }
 
 fn which_node() -> Result<PathBuf> {

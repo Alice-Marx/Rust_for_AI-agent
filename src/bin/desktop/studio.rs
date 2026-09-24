@@ -37,6 +37,11 @@ enum Reply {
         app_id: String,
         result: Result<Value, String>,
     },
+    AppInstall {
+        source: String,
+        app_id: String,
+        result: Result<Value, String>,
+    },
     Snapshot {
         source: String,
         records: Result<Vec<WorkflowRecord>, String>,
@@ -65,6 +70,9 @@ pub struct Studio {
     apps: Vec<Value>,
     diagnostics: HashMap<String, Value>,
     probing: Option<String>,
+    installing: Option<String>,
+    install_jobs: HashMap<String, Value>,
+    next_install_poll: Instant,
     projects: Vec<ProjectRecord>,
     events: HashMap<String, Vec<WorkflowEvent>>,
     selected: Option<String>,
@@ -109,6 +117,9 @@ impl Studio {
             apps: vec![],
             diagnostics: HashMap::new(),
             probing: None,
+            installing: None,
+            install_jobs: HashMap::new(),
+            next_install_poll: Instant::now(),
             projects: vec![],
             events: HashMap::new(),
             selected: None,
@@ -232,6 +243,36 @@ impl Studio {
                         Err(error) => self.notice = error,
                     }
                 }
+                Reply::AppInstall {
+                    source,
+                    app_id,
+                    result,
+                } if source == self.source => match result {
+                    Ok(job) => {
+                        let running = job.get("status").and_then(Value::as_str) == Some("running");
+                        if running {
+                            self.installing = Some(app_id.clone());
+                            self.next_install_poll = Instant::now();
+                        } else {
+                            if self.installing.as_deref() == Some(app_id.as_str()) {
+                                self.installing = None;
+                            }
+                            // A finished install refreshes the diagnostic from
+                            // the probe the service ran post-install.
+                            if let Some(probe) = job.get("post_install_probe") {
+                                if probe.get("installed").and_then(Value::as_bool) == Some(true) {
+                                    self.diagnostics
+                                        .insert(app_id.clone(), probe.clone());
+                                }
+                            }
+                        }
+                        self.install_jobs.insert(app_id, job);
+                    }
+                    Err(error) => {
+                        self.installing = None;
+                        self.notice = error;
+                    }
+                },
                 Reply::Snapshot {
                     source,
                     records,
@@ -1141,6 +1182,14 @@ impl Studio {
         ui.add_space(8.);
     }
     fn render_apps(&mut self, ui: &mut Ui) {
+        // While an install runs, poll the service-side job so the tail output
+        // and completion stay visible.
+        if let Some(app_id) = self.installing.clone() {
+            if Instant::now() >= self.next_install_poll {
+                self.next_install_poll = Instant::now() + Duration::from_millis(1500);
+                self.poll_install(ui.ctx(), &app_id);
+            }
+        }
         ui.heading("应用");
         ui.label(
             RichText::new("保留各应用的官方执行引擎、登录方式与更新机制")
@@ -1289,6 +1338,41 @@ impl Studio {
                                 if self.probing.as_deref() == Some(&id) {
                                     ui.spinner();
                                 }
+                                // One-click install: only offered when the
+                                // service registry has a fixed recipe for the
+                                // app and no program has been detected yet.
+                                let installing_here = self.installing.as_deref() == Some(id.as_str());
+                                let install_job = self.install_jobs.get(&id).cloned();
+                                let detected = self
+                                    .diagnostics
+                                    .get(&id)
+                                    .and_then(|d| d["installed"].as_bool())
+                                    == Some(true);
+                                let recipe = wonderland::app_installer::install_recipe(&id);
+                                if !detected && recipe.is_supported() && !installing_here {
+                                    let failed = install_job
+                                        .as_ref()
+                                        .and_then(|job| job.get("status").and_then(Value::as_str))
+                                        == Some("failed");
+                                    let label = if failed {
+                                        format!("重试安装（{}）", recipe.label())
+                                    } else {
+                                        format!("一键安装（{}）", recipe.label())
+                                    };
+                                    if ui
+                                        .add_enabled(
+                                            self.connected && self.probing.is_none(),
+                                            egui::Button::new(label),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.install_app(ui.ctx(), &id);
+                                    }
+                                }
+                                if installing_here {
+                                    ui.spinner();
+                                    ui.label(RichText::new("正在安装，请勿关闭应用…").small().color(MUTED));
+                                }
                                 if managed(&app) && ui.button("创建任务").clicked() {
                                     self.page = Page::Work;
                                     self.composing = true;
@@ -1312,6 +1396,59 @@ impl Studio {
                                     ui.hyperlink_to("官方文档 ↗", url);
                                 }
                             });
+                            // Install job feedback: failure reason plus a
+                            // bounded tail of the installer output.
+                            if let Some(job) = self.install_jobs.get(&id).cloned() {
+                                match job.get("status").and_then(Value::as_str) {
+                                    Some("failed") => {
+                                        if let Some(error) = job.get("error").and_then(Value::as_str) {
+                                            ui.label(
+                                                RichText::new(format!("安装失败：{error}"))
+                                                    .small()
+                                                    .color(Color32::from_rgb(224, 111, 99)),
+                                            );
+                                        }
+                                    }
+                                    Some("succeeded") => {
+                                        let version = job
+                                            .pointer("/post_install_probe/version")
+                                            .and_then(Value::as_str)
+                                            .unwrap_or("版本见上方检测结果");
+                                        ui.label(
+                                            RichText::new(format!("一键安装完成：{version}"))
+                                                .small()
+                                                .color(ACCENT),
+                                        );
+                                    }
+                                    _ => {}
+                                }
+                                let tail: Vec<&str> = job
+                                    .get("output_tail")
+                                    .and_then(Value::as_array)
+                                    .map(|lines| {
+                                        lines
+                                            .iter()
+                                            .rev()
+                                            .take(12)
+                                            .filter_map(Value::as_str)
+                                            .collect::<Vec<_>>()
+                                    })
+                                    .unwrap_or_default();
+                                if !tail.is_empty() {
+                                    egui::CollapsingHeader::new("安装输出（最近 12 行）")
+                                        .id_salt(("app-install-output", &id))
+                                        .show(ui, |ui| {
+                                            for line in tail.iter().rev() {
+                                                ui.label(
+                                                    RichText::new(*line)
+                                                        .monospace()
+                                                        .small()
+                                                        .color(MUTED),
+                                                );
+                                            }
+                                        });
+                                }
+                            }
                         });
                     ui.add_space(9.);
                 }
@@ -1339,6 +1476,60 @@ impl Studio {
                     ))
                 });
             let _ = tx.send(Reply::AppProbe {
+                source,
+                app_id,
+                result,
+            });
+            ctx.request_repaint();
+        });
+    }
+    /// Starts the service-side one-click install. The command lives in the
+    /// server registry; the request only names the application.
+    fn install_app(&mut self, ctx: &egui::Context, app_id: &str) {
+        self.installing = Some(app_id.into());
+        let (tx, source, ctx, app_id) = (
+            self.tx.clone(),
+            self.source.clone(),
+            ctx.clone(),
+            app_id.to_owned(),
+        );
+        thread::spawn(move || {
+            let result = Runtime::new()
+                .map_err(|error| error.to_string())
+                .and_then(|runtime| {
+                    runtime.block_on(post_json(
+                        &source,
+                        &format!("/api/v1/apps/{app_id}/install"),
+                        json!({}),
+                    ))
+                });
+            let _ = tx.send(Reply::AppInstall {
+                source,
+                app_id,
+                result,
+            });
+            ctx.request_repaint();
+        });
+    }
+    /// Polls the running install so the tail output and completion state stay
+    /// visible without blocking the UI thread.
+    fn poll_install(&self, ctx: &egui::Context, app_id: &str) {
+        let (tx, source, ctx, app_id) = (
+            self.tx.clone(),
+            self.source.clone(),
+            ctx.clone(),
+            app_id.to_owned(),
+        );
+        thread::spawn(move || {
+            let result = Runtime::new()
+                .map_err(|error| error.to_string())
+                .and_then(|runtime| {
+                    runtime.block_on(get_json::<Value>(
+                        &source,
+                        &format!("/api/v1/apps/{app_id}/install/status"),
+                    ))
+                });
+            let _ = tx.send(Reply::AppInstall {
                 source,
                 app_id,
                 result,
@@ -1503,6 +1694,12 @@ impl Studio {
                 self.page = Page::Apps;
                 self.apps = local_apps();
                 self.diagnostics.insert("claude".into(), json!({"installed":true,"version":"2.1.193","path":"C:/Apps/Claude/bin/claude.exe","identity":{"matches_requested":true},"version_probe":{"status":"completed"},"authentication":{"status":"unknown"},"fixture":true}));
+                // One-click install states for the guide screenshots: a
+                // not-yet-installed tool and a finished install with its
+                // post-install probe result.
+                self.diagnostics.insert("kimi-code".into(), json!({"installed":false,"version":null,"install_hint":"npm install -g @moonshot-ai/kimi-code；注意与 Python kimi 命令同名","fixture":true}));
+                self.install_jobs.insert("kimi-code".into(), json!({"app_id":"kimi-code","command":"npm install -g @moonshot-ai/kimi-code@2.0.2","status":"succeeded","output_tail":["added 1 package in 18s","— 安装完成 —"],"post_install_probe":{"installed":true,"version":"2.0.2"}}));
+                self.diagnostics.insert("deepseek".into(), json!({"installed":false,"version":null,"install_hint":"安装 @deepseek-ai/dsh，或指定已构建 checkout 的 Node 入口","fixture":true}));
             }
             "studio-projects" => self.page = Page::Projects,
             "studio-task" => {

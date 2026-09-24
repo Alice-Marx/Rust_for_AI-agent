@@ -877,6 +877,51 @@ fn read_config_bounded(path: &std::path::Path) -> Result<String> {
     Ok(text)
 }
 
+/// Node rejects `\\?\` verbatim paths as module arguments (it resolves them
+/// relative to the CWD and the loader dies). `std::fs::canonicalize` on
+/// Windows produces exactly that form, so every script path handed to a
+/// `node <script>` spawn must be normalized back to a plain disk/UNC path.
+/// Changing the syntax must never change the target, which is re-verified.
+pub(super) fn node_path(path: &std::path::Path) -> Result<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        let mut parts = path.components();
+        if let Some(Component::Prefix(prefix)) = parts.next() {
+            let normal = match prefix.kind() {
+                Prefix::VerbatimDisk(drive) => {
+                    Some(std::path::PathBuf::from(format!("{}:\\", drive as char)))
+                }
+                Prefix::VerbatimUNC(server, share) => {
+                    let mut root = std::ffi::OsString::from("\\\\");
+                    root.push(server);
+                    root.push("\\");
+                    root.push(share);
+                    root.push("\\");
+                    Some(std::path::PathBuf::from(root))
+                }
+                Prefix::Verbatim(_) | Prefix::DeviceNS(_) => {
+                    anyhow::bail!("unsupported Windows device path for a node entry")
+                }
+                _ => None,
+            };
+            if let Some(mut normal) = normal {
+                for part in parts {
+                    if !matches!(part, Component::RootDir) {
+                        normal.push(part.as_os_str());
+                    }
+                }
+                anyhow::ensure!(
+                    std::fs::canonicalize(&normal)? == std::fs::canonicalize(path)?,
+                    "path normalization changed its target"
+                );
+                return Ok(normal);
+            }
+        }
+    }
+    Ok(path.to_path_buf())
+}
+
 fn executable_digest(path: &std::path::Path) -> Result<String> {
     use sha2::{Digest, Sha256};
     use std::io::Read;

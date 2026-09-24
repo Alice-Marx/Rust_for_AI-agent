@@ -21,6 +21,10 @@ use wonderland::{
 async fn main() -> Result<()> {
     init_tracing()?;
 
+    // Discover the user's real npm global prefix (it is frequently moved off
+    // the C drive) so installed CLI tools are found by probes and executors.
+    wonderland::app_installer::ensure_npm_prefix_on_path().await;
+
     let data_dir = PathBuf::from(
         std::env::var("AGENT_DATA_DIR").unwrap_or_else(|_| ".agent-data".to_string()),
     );

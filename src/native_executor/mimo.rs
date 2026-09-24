@@ -104,17 +104,8 @@ fn resolve_binary() -> Result<PathBuf> {
 }
 
 fn npm_mimo_root() -> Result<PathBuf> {
-    let output = std::process::Command::new("npm")
-        .args(["root", "-g"])
-        .output()
+    let base = crate::desktop_bridge::npm_root_global()
         .context("npm is required to locate the official MiMo installation")?;
-    ensure!(
-        output.status.success(),
-        "npm root -g failed while locating MiMo"
-    );
-    let text = String::from_utf8_lossy(&output.stdout);
-    let base = PathBuf::from(text.trim().trim_end_matches(['/', '\\']));
-    ensure!(base.is_absolute(), "npm root -g returned a relative path");
     Ok(base.join("@mimo-ai"))
 }
 

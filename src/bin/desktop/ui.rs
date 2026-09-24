@@ -40,6 +40,11 @@ impl DesktopApp {
         }
         for event in ctx.input(|i| i.events.clone()) {
             if let egui::Event::Screenshot { image, .. } = event {
+                // Icon and other auxiliary viewports also emit screenshot
+                // events; only the main window is the capture target.
+                if image.width() < 500 || image.height() < 400 {
+                    continue;
+                }
                 let bytes: Vec<u8> = image.pixels.iter().flat_map(|p| p.to_array()).collect();
                 image::save_buffer(
                     &path,

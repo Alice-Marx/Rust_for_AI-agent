@@ -80,17 +80,10 @@ fn resolve_entry() -> Result<PathBuf> {
         );
         return Ok(path);
     }
-    let output = std::process::Command::new("npm")
-        .args(["root", "-g"])
-        .output()
+    // `npm` resolves to npm.cmd on Windows, which std::process::Command cannot
+    // execute directly; the shared bridge helper applies the PowerShell shim.
+    let base = crate::desktop_bridge::npm_root_global()
         .context("npm is required to locate the official Kimi Code installation")?;
-    ensure!(
-        output.status.success(),
-        "npm root -g failed while locating Kimi Code"
-    );
-    let text = String::from_utf8_lossy(&output.stdout);
-    let base = PathBuf::from(text.trim().trim_end_matches(['/', '\\']));
-    ensure!(base.is_absolute(), "npm root -g returned a relative path");
     let entry = base
         .join("@moonshot-ai")
         .join("kimi-code")
@@ -130,7 +123,11 @@ fn verify_installation(entry: &Path) -> Result<Prepared> {
     );
     let node = which_node()?;
     let sha256 = super::executable_digest(&cli)?;
-    Ok(Prepared { node, cli, sha256 })
+    Ok(Prepared {
+        node,
+        cli: super::node_path(&cli)?,
+        sha256,
+    })
 }
 
 fn which_node() -> Result<PathBuf> {
@@ -186,11 +183,48 @@ impl AcpDialect for KimiCodeDialect {
         "model"
     }
     fn model_value(&self, req: &NativeRequest) -> String {
-        // The upstream model option uses the bare catalog model id.
-        req.model.clone()
+        // The upstream model option values are provider-prefixed catalog ids
+        // (`kimi-code/kimi-for-coding`, verified against the official 2.0.2
+        // ACP server). A bare catalog id is normalized with the single
+        // official prefix; no alias or fuzzy mapping is performed.
+        if req.model.contains('/') {
+            req.model.clone()
+        } else {
+            format!("kimi-code/{}", req.model)
+        }
     }
     fn effort_config_id(&self) -> Option<&'static str> {
         None
+    }
+    /// At session/new the server still reports its default model; the request
+    /// is only required to name a value the official server actually offers.
+    /// Equality is enforced after set_config_option by verify_config_options.
+    fn verify_initial_config_options(
+        &self,
+        options: &Value,
+        model: &str,
+        _effort: Option<&str>,
+    ) -> Result<()> {
+        let options = options
+            .as_array()
+            .context("Kimi Code ACP config options missing")?;
+        let models: Vec<_> = options
+            .iter()
+            .filter(|item| item["id"] == "model")
+            .collect();
+        ensure!(models.len() == 1, "Kimi Code model option missing");
+        let offered = models[0]["options"]
+            .as_array()
+            .is_some_and(|choices| {
+                choices.iter().any(|choice| {
+                    choice["value"] == model || choice["value"] == format!("kimi-code/{model}")
+                })
+            });
+        ensure!(
+            offered,
+            "Kimi Code does not offer the requested model {model}"
+        );
+        Ok(())
     }
     fn verify_config_options(
         &self,
@@ -205,10 +239,20 @@ impl AcpDialect for KimiCodeDialect {
             .iter()
             .filter(|item| item["id"] == "model")
             .collect();
-        ensure!(
-            models.len() == 1 && models[0]["currentValue"].as_str() == Some(model),
-            "Kimi Code provider/model drift detected"
-        );
+        // The official server reports provider-prefixed ids while requests
+        // may name the bare catalog id; both forms must match exactly, and a
+        // prefixed report must be one of the advertised option values.
+        let matches = |value: &str| value == model || value == format!("kimi-code/{model}");
+        let advertised = |value: &str| {
+            models[0]["options"]
+                .as_array()
+                .is_some_and(|choices| choices.iter().any(|choice| choice["value"] == value))
+        };
+        let current = models.len() == 1
+            && models[0]["currentValue"]
+                .as_str()
+                .is_some_and(|value| matches(value) && (value == model || advertised(value)));
+        ensure!(current, "Kimi Code provider/model drift detected");
         Ok(())
     }
     fn permission_selection(&self, options: &[Value]) -> Result<(String, String)> {
@@ -224,8 +268,20 @@ impl AcpDialect for KimiCodeDialect {
         );
         Ok(("approve_once".into(), "reject".into()))
     }
+    /// The official 2.0.2 server emits tool_call with status "pending" before
+    /// the first tool_call_update flips it to "in_progress" (observed in a
+    /// real run); both are non-terminal start states.
+    fn tool_start_status(&self, status: Option<&str>) -> Result<()> {
+        ensure!(
+            matches!(status, Some("pending" | "in_progress")),
+            "invalid tool start status"
+        );
+        Ok(())
+    }
     fn passthrough_updates(&self) -> &'static [&'static str] {
-        &["plan", "available_commands_update"]
+        // `session_info_update` (session title) was observed from the official
+        // 2.0.2 server during a real run; it is metadata, not output.
+        &["plan", "available_commands_update", "session_info_update"]
     }
     fn stop_status(&self, reason: Option<&str>) -> Result<String> {
         match reason {
@@ -436,7 +492,7 @@ mod tests {
                 json!({"kind":"reject_once","optionId":"reject"}),
             ])
             .is_err());
-        assert_eq!(dialect.model_value(&request(true)), "kimi-k2.7-code");
+        assert_eq!(dialect.model_value(&request(true)), "kimi-code/kimi-k2.7-code");
         assert_eq!(dialect.confirmed_provider(&request(true)), None);
         assert_eq!(dialect.effort_config_id(), None);
         assert!(dialect.passthrough_updates().contains(&"plan"));
@@ -500,15 +556,30 @@ mod tests {
             event_tx,
             &req,
         );
-        let options = json!([
-            {"id":"model","currentValue":"kimi-k2.7-code","type":"select"},
+        // Mirrors the official 2.0.2 server: session/new reports the default
+        // model with the full catalog; set_config_option reports the selection.
+        let catalog = json!([
+            {"value":"kimi-code/kimi-for-coding"},
+            {"value":"kimi-code/kimi-for-coding-highspeed"},
+            {"value":"kimi-code/kimi-k2.7-code"},
+            {"value":"kimi-code/k3-256k"},
+            {"value":"kimi-code/k3"}
+        ]);
+        let initial_options = json!([
+            {"id":"model","currentValue":"kimi-code/k3","type":"select","options":catalog},
+            {"id":"thinking","currentValue":"off","type":"select"}
+        ]);
+        let mut selected_catalog = catalog.as_array().cloned().unwrap_or_default();
+        selected_catalog.push(json!({"value":"kimi-code/kimi-k2.7-code"}));
+        let selected_options = json!([
+            {"id":"model","currentValue":"kimi-code/kimi-k2.7-code","type":"select","options":selected_catalog},
             {"id":"thinking","currentValue":"off","type":"select"}
         ]);
         let session = "1f0e7a61-2b3c-4d5e-8f9a-0b1c2d3e4f5a";
         for value in [
             json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentInfo":{"name":"Kimi Code CLI","version":PACKAGE_VERSION},"agentCapabilities":{"sessionCapabilities":{"close":{},"resume":{}}}}}),
-            json!({"jsonrpc":"2.0","id":2,"result":{"sessionId":session,"configOptions":options}}),
-            json!({"jsonrpc":"2.0","id":3,"result":{"configOptions":options}}),
+            json!({"jsonrpc":"2.0","id":2,"result":{"sessionId":session,"configOptions":initial_options}}),
+            json!({"jsonrpc":"2.0","id":3,"result":{"configOptions":selected_options}}),
             json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session,"update":{"sessionUpdate":"plan","entries":[{"label":"inspect","status":"completed"}]}}}),
             json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session,"update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"thinking..."}}}}),
             json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"done"}}}}),
@@ -550,7 +621,7 @@ mod tests {
             .filter(|v| !v.is_empty())
             .map(|v| serde_json::from_slice(v).unwrap())
             .collect();
-        assert_eq!(frames[2]["params"]["value"], "kimi-k2.7-code");
+        assert_eq!(frames[2]["params"]["value"], "kimi-code/kimi-k2.7-code");
         assert_eq!(frames[3]["method"], "session/prompt");
     }
 }

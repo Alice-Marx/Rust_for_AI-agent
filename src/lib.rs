@@ -4,6 +4,7 @@ pub mod agent_defs;
 pub mod anthropic;
 pub mod api;
 pub mod app_diagnostics;
+pub mod app_installer;
 pub mod approval;
 pub mod cliproxy;
 pub mod collaboration;

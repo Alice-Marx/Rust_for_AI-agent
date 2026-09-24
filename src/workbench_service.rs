@@ -508,6 +508,8 @@ pub fn routes() -> Router<AppState> {
         .merge(crate::team_service::routes())
         .route("/api/v1/apps", get(apps))
         .route("/api/v1/apps/{id}/probe", post(probe_app))
+        .route("/api/v1/apps/{id}/install", post(install_app))
+        .route("/api/v1/apps/{id}/install/status", get(install_status))
         .route("/api/v1/intelligence", get(intelligence))
         .route("/api/v1/intelligence/refresh", post(refresh_intelligence))
         .route("/api/v1/workflows", get(list).post(create))
@@ -599,6 +601,17 @@ async fn apps() -> Json<Value> {
 }
 async fn probe_app(HttpPath(id): HttpPath<String>) -> ApiResult {
     Ok(Json(crate::app_diagnostics::probe(&id).await?))
+}
+/// Starts the fixed one-click install recipe registered for this app. The
+/// request body carries no command data; the registry alone decides argv.
+async fn install_app(HttpPath(id): HttpPath<String>) -> ApiResult {
+    Ok(Json(crate::app_installer::start(&id).await?))
+}
+async fn install_status(HttpPath(id): HttpPath<String>) -> ApiResult {
+    crate::app_installer::status(&id)
+        .map(Json)
+        .context("该应用还没有安装记录")
+        .map_err(Into::into)
 }
 async fn intelligence(State(s): State<AppState>) -> Json<Value> {
     let mut status = s.workbench.intelligence.status();

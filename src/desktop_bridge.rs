@@ -863,6 +863,31 @@ fn validated_workspace(path: &Path) -> Result<PathBuf> {
     })
 }
 
+/// Runs `npm root -g` through the shim-aware launcher and returns the global
+/// node_modules directory. `npm` resolves to npm.cmd on Windows, which
+/// std::process::Command cannot execute directly.
+pub fn npm_root_global() -> anyhow::Result<PathBuf> {
+    let npm = find_executable("npm").context("npm is required but was not found on PATH")?;
+    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let spec = normalize_launch(
+        npm,
+        vec!["root".into(), "-g".into()],
+        cwd,
+        "npm root -g".into(),
+    )?;
+    let output = std::process::Command::new(&spec.executable)
+        .args(&spec.args)
+        .current_dir(&spec.cwd)
+        .envs(&spec.env)
+        .output()
+        .context("npm root -g failed to start")?;
+    anyhow::ensure!(output.status.success(), "npm root -g failed");
+    let text = String::from_utf8_lossy(&output.stdout);
+    let base = PathBuf::from(text.trim().trim_end_matches(['/', '\\']));
+    anyhow::ensure!(base.is_absolute(), "npm root -g returned a relative path");
+    Ok(base)
+}
+
 /// Discover only existing local executables. Never invokes npm/npx/uv installers.
 pub fn find_executable(name: &str) -> Option<PathBuf> {
     if name.is_empty() || name.contains('\0') {
@@ -978,7 +1003,7 @@ fn executable_file(path: &Path) -> bool {
 }
 
 #[allow(unused_mut)] // Only Windows shims replace the executable and argv.
-fn normalize_launch(
+pub(crate) fn normalize_launch(
     mut executable: PathBuf,
     mut args: Vec<String>,
     cwd: PathBuf,

@@ -57,47 +57,6 @@ struct Prepared {
     sha256: String,
 }
 
-/// Node's entry-point resolver rejects Windows extended-length paths even
-/// when CreateProcess and Rust filesystem APIs accept the same path.
-fn node_path(path: &Path) -> Result<PathBuf> {
-    #[cfg(windows)]
-    {
-        use std::path::{Component, Prefix};
-        let mut parts = path.components();
-        if let Some(Component::Prefix(prefix)) = parts.next() {
-            let normal = match prefix.kind() {
-                Prefix::VerbatimDisk(drive) => Some(PathBuf::from(format!("{}:\\", drive as char))),
-                Prefix::VerbatimUNC(server, share) => {
-                    let mut root = std::ffi::OsString::from("\\\\");
-                    root.push(server);
-                    root.push("\\");
-                    root.push(share);
-                    root.push("\\");
-                    Some(PathBuf::from(root))
-                }
-                Prefix::Verbatim(_) | Prefix::DeviceNS(_) => {
-                    bail!("unsupported Windows device path for DeepSeek")
-                }
-                _ => None,
-            };
-            if let Some(mut normal) = normal {
-                for part in parts {
-                    if !matches!(part, Component::RootDir) {
-                        normal.push(part.as_os_str());
-                    }
-                }
-                // Changing path syntax must not change the filesystem object.
-                ensure!(
-                    std::fs::canonicalize(&normal)? == std::fs::canonicalize(path)?,
-                    "DeepSeek path normalization changed its target"
-                );
-                return Ok(normal);
-            }
-        }
-    }
-    Ok(path.to_path_buf())
-}
-
 fn read_json(path: &Path) -> Result<Value> {
     use std::io::Read;
     let mut data = Vec::new();
@@ -140,9 +99,29 @@ fn verify_installation(cli: &Path) -> Result<Prepared> {
         "unsupported DeepSeek installation layout"
     );
     // npm uses caret dependencies: checking the top-level CLI version alone is
-    // insufficient. The managed adapter accepts a flat, consistent release.
+    // insufficient. The official npm 11 layout nests the whole dsh-* release
+    // under dsh/node_modules/@deepseek-ai; source checkouts and some npm
+    // configurations hoist them next to dsh in the scope. Both carry the same
+    // verified files; a mix of the two is ambiguous and rejected.
+    let nested = root.join("node_modules/@deepseek-ai");
+    let dep_scope = if nested.join("dsh-base").is_dir() {
+        if std::fs::read_dir(scope)?
+            .filter_map(std::result::Result::ok)
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("dsh-")
+            })
+        {
+            anyhow::bail!("DeepSeek installation mixes hoisted and nested packages; reinstall a consistent {VERSION} package set");
+        }
+        nested
+    } else {
+        scope.to_path_buf()
+    };
     let mut checked = HashSet::new();
-    for entry in std::fs::read_dir(scope)? {
+    for entry in std::fs::read_dir(&dep_scope)? {
         let path = entry?.path();
         let name = path
             .file_name()
@@ -155,10 +134,12 @@ fn verify_installation(cli: &Path) -> Result<Prepared> {
                     && metadata["version"] == VERSION,
                 "DeepSeek dependency release drift; reinstall a consistent {VERSION} package set"
             );
-            ensure!(
-                !path.join("node_modules/@deepseek-ai").exists(),
-                "nested DeepSeek package overrides are unsupported"
-            );
+            if dep_scope == scope {
+                ensure!(
+                    !path.join("node_modules/@deepseek-ai").exists(),
+                    "nested DeepSeek package overrides are unsupported"
+                );
+            }
             checked.insert(name.into_owned());
             ensure!(
                 checked.len() <= 1024,
@@ -183,14 +164,14 @@ fn verify_installation(cli: &Path) -> Result<Prepared> {
     }
     let sha256 = executable_digest(&cli)?;
     ensure!(sha256.eq_ignore_ascii_case(CLI_HASH)
-        && executable_digest(&scope.join("dsh-base/cordis.patch.yml"))?.eq_ignore_ascii_case(BASE_HASH)
-        && executable_digest(&scope.join("dsh-acp-app/cordis.patch.yml"))?.eq_ignore_ascii_case(ACP_HASH),
+        && executable_digest(&dep_scope.join("dsh-base/cordis.patch.yml"))?.eq_ignore_ascii_case(BASE_HASH)
+        && executable_digest(&dep_scope.join("dsh-acp-app/cordis.patch.yml"))?.eq_ignore_ascii_case(ACP_HASH),
         "DeepSeek CLI/profile content differs from the verified official release; use the manual terminal");
     let node = crate::desktop_bridge::find_executable("node")
         .context("Node.js is required by the official DeepSeek CLI")?;
     Ok(Prepared {
         node,
-        cli: node_path(&cli)?,
+        cli: super::node_path(&cli)?,
         sha256,
     })
 }
@@ -346,7 +327,7 @@ fn command(prepared: &Prepared, home: &ManagedHome, credentials: bool) -> tokio:
         }
     }
     if credentials {
-        if let Some(value) = std::env::var_os("DEEPSEEK_API_KEY") {
+        if let Some(value) = deepseek_api_key() {
             command.env("DEEPSEEK_API_KEY", value);
         }
     }
@@ -362,6 +343,22 @@ fn command(prepared: &Prepared, home: &ManagedHome, credentials: bool) -> tokio:
     #[cfg(unix)]
     command.process_group(0);
     command
+}
+
+/// The dsh child reads its credential from DEEPSEEK_API_KEY. When the service
+/// carries a configured DeepSeek API connection (the desktop 工作区设置 panel
+/// persists it under the data directory), that key is forwarded so both
+/// DeepSeek paths share one credential instead of requiring a duplicate
+/// environment variable. The value never leaves process boundaries or logs.
+fn deepseek_api_key() -> Option<std::ffi::OsString> {
+    if let Some(value) = std::env::var_os("DEEPSEEK_API_KEY") {
+        return Some(value);
+    }
+    let dir = std::env::var_os("AGENT_DATA_DIR")?;
+    let settings = crate::connection::ConnectionSettings::load(std::path::Path::new(&dir)).ok()??;
+    (!settings.api_key.trim().is_empty()
+        && settings.provider.eq_ignore_ascii_case("deepseek"))
+        .then(|| std::ffi::OsString::from(settings.api_key.trim()))
 }
 
 async fn verify_banner(prepared: &Prepared, home: &ManagedHome) -> Result<()> {
@@ -415,7 +412,7 @@ pub(super) async fn execute_with_control(
     controls: mpsc::Receiver<NativeControl>,
 ) -> Result<NativeResult> {
     validate_request(&req)?;
-    req.cwd = node_path(&req.cwd)?;
+    req.cwd = super::node_path(&req.cwd)?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(req.max_duration_secs);
     if *cancel.borrow() {
         return Ok(empty_result(&req, "cancelled"));
